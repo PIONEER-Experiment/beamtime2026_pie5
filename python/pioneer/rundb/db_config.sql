@@ -64,10 +64,30 @@ CREATE SCHEMA IF NOT EXISTS utils;
 -- Lock down public schema (important in fresh systems)
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 
+GRANT USAGE ON SCHEMA config TO readonly, bot, shifter, admin;
+GRANT USAGE ON SCHEMA state TO readonly, bot, shifter, admin;
+GRANT USAGE ON SCHEMA logs TO readonly, bot, shifter, admin;
+GRANT USAGE ON SCHEMA utils TO readonly, bot, shifter, admin;
+
+-- explicit schema write control
+REVOKE ALL ON ALL TABLES IN SCHEMA config FROM readonly;
+REVOKE ALL ON ALL TABLES IN SCHEMA state FROM readonly;
+REVOKE ALL ON ALL TABLES IN SCHEMA logs FROM readonly;
+REVOKE ALL ON ALL TABLES IN SCHEMA utils FROM readonly;
+
+GRANT SELECT ON ALL TABLES IN SCHEMA config TO readonly, bot, shifter, admin;
+GRANT SELECT ON ALL TABLES IN SCHEMA state TO readonly, bot, shifter, admin;
+GRANT SELECT ON ALL TABLES IN SCHEMA logs TO readonly, bot, shifter, admin;
+GRANT SELECT ON ALL TABLES IN SCHEMA utils TO readonly, bot, shifter, admin;
+
+GRANT SELECT ON ALL SEQUENCES IN SCHEMA config TO readonly, bot, shifter, admin;
+GRANT SELECT ON ALL SEQUENCES IN SCHEMA state TO readonly, bot, shifter, admin;
+GRANT SELECT ON ALL SEQUENCES IN SCHEMA logs TO readonly, bot, shifter, admin;
+GRANT SELECT ON ALL SEQUENCES IN SCHEMA utils TO readonly, bot, shifter, admin;
+
 -- =========================================================
 -- 3. DEFAULT PRIVILEGES FOR FUTURE TABLES
 -- =========================================================
-
 
 -- Default permissions on SCHEMA config:
 --
@@ -403,33 +423,7 @@ CREATE TABLE IF NOT EXISTS logs.slow_control (
 
 
 -- =========================================================
--- 5. SCHEMA PERMISSIONS
--- =========================================================
-
-GRANT USAGE ON SCHEMA config TO readonly, bot, shifter, admin;
-GRANT USAGE ON SCHEMA state TO readonly, bot, shifter, admin;
-GRANT USAGE ON SCHEMA logs TO readonly, bot, shifter, admin;
-GRANT USAGE ON SCHEMA utils TO readonly, bot, shifter, admin;
-
--- explicit schema write control
-REVOKE ALL ON ALL TABLES IN SCHEMA config FROM readonly;
-REVOKE ALL ON ALL TABLES IN SCHEMA state FROM readonly;
-REVOKE ALL ON ALL TABLES IN SCHEMA logs FROM readonly;
-REVOKE ALL ON ALL TABLES IN SCHEMA utils FROM readonly;
-
-GRANT SELECT ON ALL TABLES IN SCHEMA config TO readonly, bot, shifter, admin;
-GRANT SELECT ON ALL TABLES IN SCHEMA state TO readonly, bot, shifter, admin;
-GRANT SELECT ON ALL TABLES IN SCHEMA logs TO readonly, bot, shifter, admin;
-GRANT SELECT ON ALL TABLES IN SCHEMA utils TO readonly, bot, shifter, admin;
-
-GRANT SELECT ON ALL SEQUENCES IN SCHEMA config TO readonly, bot, shifter, admin;
-GRANT SELECT ON ALL SEQUENCES IN SCHEMA state TO readonly, bot, shifter, admin;
-GRANT SELECT ON ALL SEQUENCES IN SCHEMA logs TO readonly, bot, shifter, admin;
-GRANT SELECT ON ALL SEQUENCES IN SCHEMA utils TO readonly, bot, shifter, admin;
-
-
--- =========================================================
--- 6. ROLE-SPECIFIC PERMISSIONS
+-- role specific permissions on selected tables
 -- =========================================================
 
 -- BOT: write access only where needed
@@ -446,26 +440,6 @@ GRANT USAGE, SELECT ON SEQUENCE state.postproc_job_id_seq      TO bot;
 GRANT UPDATE (status, midas_run_number) ON state.midas_run     TO bot;
 GRANT UPDATE (status)                   ON state.postproc_job  TO bot;
 
--- BOT logging
-GRANT INSERT ON logs.event_log TO bot;
-
 -- SHIFTER: broader control
--- configurations shall only be inserted by a shifter.
-GRANT INSERT                 ON ALL TABLES IN SCHEMA config TO shifter;
 -- a shifter may mark a configuration as faulty
 GRANT UPDATE (do_not_use) ON config.configuration TO shifter;
-
--- a shifter shall be able modify all scheduled runs.
-GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA state  TO shifter;
-
--- a shifter shall only append to the log
-GRANT INSERT                 ON ALL TABLES IN SCHEMA logs   TO shifter;
-
--- ADMIN: full control
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA config TO admin;
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA state  TO admin;
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA logs   TO admin;
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA utils  TO admin;
-
--- Prevent accidental updates/deletes on logs (extra safety layer)
-REVOKE UPDATE, DELETE ON logs.event_log FROM PUBLIC;
