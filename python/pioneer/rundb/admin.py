@@ -10,13 +10,10 @@ class db_admin_tool:
         self.admin_pwd  = input("DB admin password: ")
 
     def connect(self, db_name = config.DB_NAME):
-        return psycopg2.connect(
-            dbname = db_name,
-            user = self.admin_user,
-            password = self.admin_pwd,
-            host = config.DB_HOST,
-            port = config.DB_PORT
-        )
+        """
+        Simplified connection to the DB as admin user
+        """
+        return config.connect(user = self.admin_user, password = self.admin_pwd, db_name = db_name)
     
     def backup_db(self) -> bool:
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -86,7 +83,7 @@ class db_admin_tool:
             )
             exists = admin_cursor.fetchone()[0]
         if (exists):
-            print(f"Database {config} already exists")
+            print(f"Database {config.DB_NAME} already exists")
             return False
         
         with admin_connection.cursor() as admin_cursor:
