@@ -1,10 +1,10 @@
 from midas.sequencer import SequenceClient
 
-import pioneer.rundb.interface as interface
+from pioneer.rundb.interface import interface
 db_interface = interface(user = "bot", password = "bot")
 
 def load_config_to_odb(seq : SequenceClient):
-    aConfig = db_interface.load_config()
+    aConfig = db_interface.find_next_config()
     if aConfig is None:
         return None
     seq.sequencer_msg(f"Loaded configuration {aConfig.__repr__()}")

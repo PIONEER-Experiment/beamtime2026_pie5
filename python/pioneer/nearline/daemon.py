@@ -1,5 +1,6 @@
 
 import pioneer.rundb.interface
+import pioneer.nearline.jobs as nl_jobs
 
 import midas.client        # connect to MIDAS ODB
 import argparse            # parsing command line arguments
@@ -20,6 +21,29 @@ kDefaultNumJobs  = 3
 kDbUser = "bot"
 kDbPwd  = "bot"
 
+class NearlineQueue:
+    def __init__(self, name : str = None, maxJobs : int = 1):
+        self.name : str  = name
+        self.maxJobs :int = maxJobs
+        self.active : list[nl_jobs.BaseJob] = list()
+
+    def get_finshed(self) -> list[nl_jobs.BaseJob]:
+        completed = list()
+        for aJob in self.active:
+            rc = aJob.poll()
+            if rc is None:
+                # This job is still running
+                continue
+            completed.append(aJob)
+        for j in completed:
+            self.active.remove(j)
+        return completed
+
+    def getOpenSlots(self) -> int:
+        return self.maxJobs - len(self.active)
+
+    def add(self, aJob : nl_jobs.BaseJob) -> None:
+        self.active.append(aJob)
 
 class NearlineDaemon:
     def __init__(self, args):
@@ -28,10 +52,17 @@ class NearlineDaemon:
         else:
             njobs = kDefaultNumJobs
 
+        self.queues = {
+            "nearline": NearlineQueue("nearline", njobs),
+            "backup"  : NearlineQueue("backup",   1),
+            "remote"  : NearlineQueue("remote",   1),
+            "cleanup" : NearlineQueue("cleanup",  1)
+        }
+
         if (args.midas):
             # Create the MIDAS client for status monitoring, warnings and restarting
             # this is technically not required but considered a neat feature.
-            self.client = midas.client.MidasClient(args.midas_client, host_name = args.midas_host, expt_name = args.midas_expt)   
+            self.client = midas.client.MidasClient(args.midas_client, host_name = args.midas_host, expt_name = args.midas_expt)
 
             invoking_call = [sys.executable, os.path.realpath(sys.argv[0]), "--midas"]
             if (args.midas_client):
@@ -41,25 +72,32 @@ class NearlineDaemon:
             if (args.midas_expt):
                 invoking_call += ["--midas-expt", args.midas_expt]
 
-            start_cmd = " ".join(shlex.quote(arg) for arg in invoking_call)     
+            start_cmd = " ".join(shlex.quote(arg) for arg in invoking_call)
             self.client.odb_set(f"/Programs/{args.midas_client}/Start command", start_cmd)
             if not self.client.odb_exists("/Nearline"):
                 self.client.odb_set("/Nearline", {
                     "config" : {
-                        "jobs" : njobs,
-                        "schedule" : args.auto_schedule
+                        "Backup path" : "/Users/patrick/phasespace2026/playground/backup",
+                        "Remote path" : "/Users/patrick/phasespace2026/playground/remote",
+                        "Output path" : "/Users/patrick/phasespace2026/playground/nearline",
+                        "Num parallel jobs" : njobs
                         }
                 })
             elif (args.jobs):
-                self.client.odb_set("/Nearline/config/jobs", njobs)
+                self.client.odb_set("/Nearline/config/Num parallel jobs", njobs)
 
-            self.maxJobs = self.client.odb_get("/Nearline/config/jobs")
-            self.autoSchedule = self.client.odb_get("/Nearline/config/schedule")
+            self.queues['nearline'].maxJobs = self.client.odb_get("/Nearline/config/Num parallel jobs")
+            self.midas_logger_path    = self.client.odb_get("/Logger/Data dir")
+            self.backup_path          = self.client.odb_get("/Nearline/config/Backup path")
+            self.remote_path          = self.client.odb_get("/Nearline/config/Remote path")
+            self.nearline_output_path = self.client.odb_get("/Nearline/config/Output path")
         else:
             self.client = None;
-            self.maxJobs = njobs
-            self.autoSchedule = args.auto_schedule
-        self.active_processes = dict()
+            self.midas_logger_path = "/Users/patrick/phasespace2026/sequencer"
+            self.backup_path = "/Users/patrick/phasespace2026/playground/backup"
+            self.remote_path = "/Users/patrick/phasespace2026/playground/remote"
+            self.nearline_output_path = "/Users/patrick/phasespace2026/playground/nearline"
+
         self.sleep_time = 10
         self.db_interface = pioneer.rundb.interface.interface(user = kDbUser, password = kDbPwd)
 
@@ -73,62 +111,17 @@ class NearlineDaemon:
             pass
             # todo: get slack hook and set it up
 
-    def check_active_process_count(self):
-        finished = list()
-        for pid, payload in self.active_processes.items():
-            rc = payload["proc"].poll()
-            if rc is None:
-                # That one is still running
-                continue
+    def dispatch_job(self, queue : NearlineQueue, job_cfg):
+        job_cfg['job_type'] = queue.name
+        job_cfg['input']    = self.midas_logger_path
+        job_cfg['backup']   = self.backup_path
+        job_cfg['remote']   = self.remote_path
+        job_cfg['output']   = self.nearline_output_path
 
-            if rc == 0:
-                # Process terminated successfully
-                self.message(f"Nearline: Run {payload['run_id']} post-processed successfully")
-            else:
-                # Process failed. Alarm the shifter
-                self.message(f"Nearline: Run {payload['run_id']} postprocessing exited with RC {rc}", is_error = True, send_to_slack = True)
-            finished.append(pid)
+        theJob = nl_jobs.create_job(job_cfg, self.db_interface)
+        theJob.start()
+        queue.add(theJob)
 
-            # Update database
-            payload["rc"] = rc
-            self.finalise(payload)
-
-        for pid in finished:
-            del self.active_processes[pid]
-
-        return len(self.active_processes)
-    
-
-    def finalise(self, payload : dict):
-        # This method only updates the run state database.
-        # it must not mutate internal state.
-        new_status = "DONE" if payload.get("rc", 1) == 0 else "FAILED"
-        job_id = payload.get("job_id")
-        self.db_interface.update_postproc_status(job_id, new_status)
-
-        if (payload['rc'] == 0):
-            config_ids = []
-
-            config_ids.append(self.db_interface.add_new_configuration(
-                table = "dummy",
-                values = {
-                    "p1" : job_id,
-                    "p2" : job_id + 34
-                }
-            ))
-
-            if (self.autoSchedule):
-                job_id = self.db_interface.schedule_new_run(config_ids)
-                self.message(f"Created new run with ID {job_id}")
-
-    
-
-    def dispatch_job(self, job):
-        job["proc"] = subprocess.Popen(["sleep", "5"])
-        self.message(f"Dispatching job {job}")
-        job_id = job.get("job_id")
-        self.db_interface.update_postproc_status(job_id, "RUNNING")
-        self.active_processes[job["proc"].pid] = job
 
 
     def mainloop(self):
@@ -136,32 +129,44 @@ class NearlineDaemon:
             # Step 0: Communicate with midas if available
             if (self.client):
                 self.client.communicate(10)
-                self.maxJobs = self.client.odb_get("/Nearline/config/jobs")
-                self.autoSchedule = self.client.odb_get("/Nearline/config/schedule")
+
+                # Paths where things shall be going to
+                self.midas_logger_path    = self.client.odb_get("/Logger/Data dir")
+                self.backup_path          = self.client.odb_get("/Nearline/config/Backup path")
+                self.remote_path          = self.client.odb_get("/Nearline/config/Remote path")
+                self.nearline_output_path = self.client.odb_get("/Nearline/config/Output path")
+
+                # Update max number of jobs in nearline queue
+                self.queues['nearline'].maxJobs = self.client.odb_get("/Nearline/config/Num parallel jobs")
                 # all midas communication and midas-related stuff goes here.
 
-            # Step 1: Check all active subprocesses
-            n_active = self.check_active_process_count()
+            # Iterate queues
+            for aQueue in self.queues.values():
 
-            if (n_active < self.maxJobs):
-                jobs_to_dispatch = self.db_interface.find_pending_postproc_jobs(max_jobs = self.maxJobs - n_active)
-                for job in jobs_to_dispatch:
-                    self.dispatch_job(job)
+                # Step 1: Identify finished jobs in all queues
+                finished_jobs = aQueue.get_finshed()
+                for aJob in finished_jobs:
+                    aJob.finalise()
+
+                # Step 2: Dispatch new jobs should there be open slots.
+                numOpen = aQueue.getOpenSlots()
+                if (numOpen > 0):
+                    newConfigs = self.db_interface.find_pending_postproc_jobs(job_type = aQueue.name, max_jobs = numOpen)
+                    for aConfig in newConfigs:
+                        self.dispatch_job(aQueue, aConfig)
 
             time.sleep(self.sleep_time)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Minimal CLI for DB + MIDAS config")
+    parser = argparse.ArgumentParser(description="Good Luck Have Fun - I did not yet write documentation for this")
     parser.add_argument("--midas", action = "store_true")
     parser.add_argument("--midas-client", default=kMidasClientName, help="Midas client name")
     parser.add_argument("--midas-host", default=kMidasHostName, help="Midas host name")
     parser.add_argument("--midas-expt", default=kMidasExptName, help="Midas experiment name")
-    parser.add_argument("-j", "--jobs", type = int, help="Number of parallel nearline analysis processes to run in parallel")
-    parser.add_argument("-s", "--auto-schedule", action = "store_true")
+    parser.add_argument("-j", "--jobs", type = int, help="Number of nearline analysis processes to run in parallel")
 
 
     NLD = NearlineDaemon(parser.parse_args())
     NLD.mainloop()
 
-    

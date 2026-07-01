@@ -12,18 +12,32 @@ class interface:
         self.user = user
         self.password = password
 
-    def load_config(self) -> dict | None:
+    def find_next_config(self) -> dict | None:
         conn = connect(self.user, self.password)
-        with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cursor:
 
-            # Find next job
+        with conn.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT 
-                    mr.id as job_id,
-                    mrc.priority,
+                SELECT id FROM state.midas_run WHERE status='PENDING' ORDER BY priority ASC LIMIT 1
+                """
+            )
+            next_job = cursor.fetchone()
+        conn.close()
+
+        if (next_job is None):
+            return None
+
+        return self.load_config(next_job[0])
+
+    def load_config(self, job_id) -> dict | None:
+        conn = connect(self.user, self.password)
+        with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cursor:
+            # Find job configuration
+            cursor.execute(
+                """
+                SELECT
                     cfg.id as config_id,
-                    cfg.config_type as config_type,
+                    cfg.config_type,
                     cfg.do_not_use
                 FROM
                     state.midas_run AS mr
@@ -32,37 +46,26 @@ class interface:
                        JOIN
                     config.configuration AS cfg ON cfg.id = mrc.config_id
                 WHERE
-                    mr.id = (
-                        SELECT id FROM state.midas_run
-                        WHERE status='PENDING'
-                        ORDER BY priority ASC
-                        LIMIT 1
-                    )
+                    mr.id = %s
                 ORDER BY mrc.priority
-                """
+                """, (job_id, )
             )
-            
+
             configs = cursor.fetchall()
 
         if (len(configs) == 0):
             print("empty configuration list")
             return None;
         print(configs)
-        
+
         configuration = dict()
 
-
-        job_id = None
         with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cur:
             for cfg in configs:
                 table = cfg["config_type"]
                 if (table in configuration.keys()):
                     raise ValueError(f"Found double reference to device {table}")
                 config_id = cfg["config_id"]
-                if job_id is None:
-                    job_id = cfg["job_id"]
-                elif job_id != cfg["job_id"]:
-                    raise RuntimeError("Mixup of job IDs observed. Database corrupted?")
 
                 if cfg["do_not_use"]:
                     raise ValueError(
@@ -89,39 +92,37 @@ class interface:
         configuration["job_id"] = job_id
 
         return configuration
-    
-    def end_of_midas_run(self, job_id : int, run_id : int, schedule_post_processing : bool = True) -> bool:
+
+    def end_of_midas_run(self, job_id : int, run_number : int, schedule_post_processing : bool = True) -> bool:
         conn = connect(self.user, self.password)
         with conn.cursor() as cursor:
             # Mark the run in the job-list as complete
-            cursor.execute(f"UPDATE state.midas_run SET status = 'DONE', midas_run_number = {run_id} WHERE id = {job_id}")
+            cursor.execute(f"UPDATE state.midas_run SET status = 'DONE', midas_run_number = {run_number} WHERE id = {job_id}")
 
             # Schedule the analysis jobs.
             if (schedule_post_processing):
-                tasks = ['NEARLINE', 'BACKUP', 'REMOTE', 'CLEANUP']
+                tasks = ['nearline', 'backup', 'remote', 'cleanup']
                 task_ids = dict()
                 for task in tasks:
                     cursor.execute(
                         """INSERT INTO state.postproc_job (midas_run_id, job_type, priority, status)
                            VALUES (%s, %s, %s, 'PENDING') RETURNING id"""
-                           , (job_id, task, run_id)
+                           , (job_id, task, run_number)
                         )
                     task_ids[task] = cursor.fetchone()[0]
-                
+
                 # Lock cleanup until all other processes completed
-                cleanup_id = task_ids['CLEANUP']
+                cleanup_id = task_ids['cleanup']
                 for anID in task_ids.values():
                     if (anID == cleanup_id):
                         continue
-                    cursor.execute("INSERT INTO state.postproc_depends VALUES (%d, %d)", cleanup_id, anID)
-                    
-                    
+                    cursor.execute("INSERT INTO state.postproc_depends VALUES (%s, %s)", (cleanup_id, anID))
 
         conn.commit()
         conn.close()
         return True
-    
-    def add_new_configuration(self, table : str, values : dict) -> dict:
+
+    def add_new_configuration(self, table : str, values : dict) -> int | None:
         """
         Insert a new configuration to the database.
 
@@ -134,7 +135,7 @@ class interface:
         """
 
         if not values:
-            return {}
+            return None
 
         conn = connect(self.user, self.password)
 
@@ -174,7 +175,7 @@ class interface:
         finally:
             conn.close()
         return inserted_id
-    
+
     def schedule_new_run(self, configs : list) -> int:
         """
         Schedule a new run in the midas_run table
@@ -185,12 +186,12 @@ class interface:
         `priority` shall be increased by 1 w.r.t. largest value of any `PENDING`
         job. `status` shall be `PENDING`
 
-        Returns: 
+        Returns:
         Job ID of the newly created job.
         """
 
         if not configs:
-            raise ValueError("Payload cannot be empty")
+            raise ValueError("No configuration for run provided")
 
         conn = connect(self.user, self.password)
         try:
@@ -224,7 +225,7 @@ class interface:
             conn.close()
 
         return run_id
-    
+
     def update_postproc_status(self, job_id : int, new_status : str) -> bool:
         conn = connect(user = self.user, password = self.password)
         retVal = True
@@ -236,11 +237,12 @@ class interface:
         conn.close()
         return retVal
 
-    def find_pending_postproc_jobs(self, max_jobs : int = 1) -> list:
+    def find_pending_postproc_jobs(self, job_type : str, max_jobs : int = 1) -> list:
         """
         Find jobs in the `state.postproc_job` table
 
         Parameters:
+        - `job_type` : Select jobs of this type only.
         - `max_jobs`: The maximum number of jobs to be returned.
 
         Returns:
@@ -256,10 +258,12 @@ class interface:
             cursor.execute(
                     """
                     WITH claimed AS (
-                        SELECT id, midas_run_id, job_type
-                        FROM state.postproc_job
-                        WHERE status = 'PENDING'
-                        ORDER BY priority ASC
+                        SELECT ppj.id, ppj.midas_run_id, mr.midas_run_number
+                        FROM state.postproc_job AS ppj
+                        JOIN state.midas_run AS mr ON ppj.midas_run_id = mr.id
+                        WHERE ppj.status = 'PENDING'
+                        AND ppj.job_type = %s
+                        ORDER BY ppj.priority ASC
                         LIMIT %s
                         FOR UPDATE SKIP LOCKED
                     )
@@ -267,12 +271,12 @@ class interface:
                     SET status = 'CLAIMED'
                     FROM claimed
                     WHERE s.id = claimed.id
-                    RETURNING 
+                    RETURNING
                         claimed.id as job_id,
                         claimed.midas_run_id as run_id,
-                        claimed.job_type as job_type
-                    """, (max_jobs,))
+                        claimed.midas_run_number as midas_run_number
+                    """, (job_type, max_jobs,))
             results = cursor.fetchall()
         conn.close()
-            
+
         return results
