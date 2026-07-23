@@ -606,15 +606,60 @@ CREATE TABLE IF NOT EXISTS logs.slow_control (
     log_time TIMESTAMPTZ DEFAULT now(), -- time at which the log was created
     upd_time TIMESTAMPTZ NOT NULL,      -- time at which the ODB value was last updated
     channel TEXT,                       -- slow control parameter monitored
+    label TEXT,                         -- the name given the SC parameter in the frontend
     reading TEXT                        -- value of sc parameter monitored
 
     CHECK ( reason IN (
         'BOR',      -- Begin of run
         'EOR',      -- End of run
         'UPDATE',   -- The ODB value has changed significantly
-        'PERIODIC'  -- Time since last log entry exceeded timeout
+        'PERIODIC', -- Time since last log entry exceeded timeout
+        'ENABLE',   -- This channel got newly added.
+        'DISABLE',  -- This channel got disabled.
+        'VANISHED'  -- This channel vanished completely
         ))
 );
+
+CREATE TABLE IF NOT EXISTS logs.last_sc_update(
+    channel TEXT PRIMARY KEY,            -- channel
+    upd_time TIMESTAMPTZ NOT NULL,       -- last recorded update time
+    log_time TIMESTAMPTZ DEFAULT now()   -- time at which this record was added
+);
+
+CREATE OR REPLACE FUNCTION logs.filter_slow_control_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    last_upd timestamptz;
+BEGIN
+    IF NEW.reason NOT IN ('BOR', 'EOR', 'ENABLE', 'DISABLE', 'VANISHED') THEN
+        SELECT upd_time
+          INTO last_upd
+          FROM logs.last_sc_update
+         WHERE channel = NEW.channel FOR UPDATE;
+
+        IF FOUND AND last_upd = NEW.upd_time THEN
+            RETURN NULL;
+        END IF;
+    END IF;
+
+    INSERT INTO logs.last_sc_update(channel, upd_time)
+    VALUES (NEW.channel, NEW.upd_time)
+    ON CONFLICT (channel)
+    DO UPDATE SETdb_iface
+        upd_time = EXCLUDED.upd_time
+        log_time = now()
+    ;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER slow_control_filter
+BEFORE INSERT ON logs.slow_control
+FOR EACH ROW
+EXECUTE FUNCTION logs.filter_slow_control_insert();
 
 
 -- =========================================================

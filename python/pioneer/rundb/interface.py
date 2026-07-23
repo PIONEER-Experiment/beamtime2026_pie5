@@ -407,8 +407,8 @@ class interface:
             with conn.cursor() as cursor:
                 for entry in log_values:
                     cursor.execute(
-                        """INSERT INTO logs.slow_control (midas_run_number, reason, upd_time, channel, reading) VALUES (%s, %s, %s, %s, %s)""",
-                        (midas_run_number, reason, entry.get('upd_time'), entry.get('channel'), entry.get('reading'))
+                        """INSERT INTO logs.slow_control (midas_run_number, reason, upd_time, channel, label, reading) VALUES (%s, %s, %s, %s, %s, %s)""",
+                        (midas_run_number, reason, entry.get('upd_time'), entry.get('channel'), entry.get('label'), entry.get('reading'))
                     )
             conn.commit()
             conn.close()
