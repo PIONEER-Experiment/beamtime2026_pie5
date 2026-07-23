@@ -2,7 +2,7 @@
 -- 1. ROLES
 -- =========================================================
 
--- DB roles 
+-- DB roles
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'readonly') THEN
@@ -172,22 +172,40 @@ GRANT ALL PRIVILEGES ON SEQUENCES TO admin;
 CREATE TABLE IF NOT EXISTS utils.status (
     name TEXT PRIMARY KEY,           -- Name of the status stored in other tables
     description TEXT,                -- a verbose description of the status
-    isSuccess BOOLEAN DEFAULT NULL,  -- flag to signal that this shall be treated as successful completion 
-    isFailure BOOLEAN DEFAULT NULL   -- flag to signal that the job execution will never succeed.
+    isSuccess BOOLEAN DEFAULT false, -- flag to signal that this shall be treated as successful completion
+    isFailure BOOLEAN DEFAULT false, -- flag to signal that the job execution will never succeed.
+    isPending BOOLEAN DEFAULT false, -- flag to signal that this job is awaiting execution but has not been touched yet.
+    isRunning BOOLEAN DEFAULT false, -- flag to signal that this job is currently executed.
+    isUser    BOOLEAN DEFAULT false  -- flag to signal that the status has been assigned due to user intervention
 );
 
--- Define possible states here and now such that they are available for other tables to use.
-INSERT INTO utils.status (name, description, isSuccess, isFailure) VALUES
-    ('HOLDING'  , 'Put on hold by user interaction',                          false, false),
-    ('PENDING'  , 'Waiting for resources to become available',                false, false),
-    ('DEPENDING', 'Depends on a job that did neither succeed nor fail',       false, false),
-    ('CLAIMED'  , 'Locked and should change to RUNNING immediately',          false, false),
-    ('RUNNING'  , 'Execution started and termination was not registered yet', false, false),
-    ('DONE'     , 'Job completed successfully (return code 0)',               true , false),
-    ('FAILED'   , 'Job terminated with any return code other than 0',         false, true ),
-    ('BLOCKED'  , 'Job has a dependency that will never be met',              false, true ),
-    ('CANCELLED', 'Cancelled by user interaction',                            false, true )
-;
+
+-- pending states
+INSERT INTO utils.status (name, description, isPending) VALUES
+    ('HOLDING'  , 'Put on hold by user interaction',                          true),
+    ('PENDING'  , 'Waiting for resources to become available',                true),
+    ('DEPENDING', 'Depends on a job that did neither succeed nor fail',       true)
+ON CONFLICT (name) DO NOTHING;
+
+INSERT INTO utils.status (name, description, isRunning) VALUES
+    ('CLAIMED'  , 'Locked and should change to RUNNING immediately',          true),
+    ('RUNNING'  , 'Execution started and termination was not registered yet', true),
+    ('RUNSDONE' , 'Jobs in Sequence completed, ready for postprocessing',     true),
+    ('PPROC'    , 'Job Sequence in post-processing',                          true)
+ON CONFLICT (name) DO NOTHING;
+
+INSERT INTO utils.status (name, description, isSuccess) VALUES
+    ('DONE'     , 'Job completed successfully (return code 0)',               true)
+ON CONFLICT (name) DO NOTHING;
+
+INSERT INTO utils.status (name, description, isFailure) VALUES
+    ('FAILED'   , 'Job terminated with any return code other than 0',         true),
+    ('BLOCKED'  , 'Job has a dependency that will never be met',              true),
+    ('ERROR'    , 'An error occured, user investigation required',            true),
+    ('CANCELLED', 'Cancelled by user interaction',                            true)
+ON CONFLICT (name) DO NOTHING;
+
+UPDATE utils.status SET isUser = true WHERE name IN ('HOLDING', 'CANCELLED');
 
 CREATE OR REPLACE FUNCTION utils.is_success(s TEXT)
 RETURNS BOOLEAN AS $$
@@ -199,13 +217,28 @@ RETURNS BOOLEAN AS $$
     SELECT isFailure FROM utils.status WHERE name = s;
 $$ LANGUAGE SQL STABLE;
 
+CREATE OR REPLACE FUNCTION utils.is_user(s TEXT)
+RETURNS BOOLEAN AS $$
+    SELECT isUser FROM utils.status WHERE name = s;
+$$ LANGUAGE SQL STABLE;
+
+CREATE OR REPLACE FUNCTION utils.is_pending(s TEXT)
+RETURNS BOOLEAN AS $$
+    SELECT isPending FROM utils.status WHERE name = s;
+$$ LANGUAGE SQL STABLE;
+
+CREATE OR REPLACE FUNCTION utils.is_running(s TEXT)
+RETURNS BOOLEAN AS $$
+    SELECT isRunning FROM utils.status WHERE name = s;
+$$ LANGUAGE SQL STABLE;
+
 -- Right now, all transitions are allowed, so a job could go from any state to any other state.
 -- Let's for now assume that shifters have the brain to not mess up fatally by switching a random
 -- job from BLOCKED to RUNNING without making the actual state change.
 
 -- -------------------------
 -- CONFIG SCHEMA
--- 
+--
 -- Note: Each configurable device shall gets its own table
 -- Any specific table shall use a primary key that doubles as
 -- foreign key in config.configuration.
@@ -225,9 +258,51 @@ CREATE TABLE IF NOT EXISTS config.dummy (
     p2 TEXT
 );
 
+-- Detector position table
+CREATE TABLE IF NOT EXISTS config.target_position (
+    id INT PRIMARY KEY REFERENCES config.configuration(id), -- Reference to the main configuration table
+    seq_id INT DEFAULT 0,                                   -- helper to encode position sequences that are often executed together, e.g. 5 point measurement
+    xpos FLOAT,                                             -- x position where the target should be placed, in mm
+    ypos FLOAT                                              -- y position where the target should be placed, in mm
+);
+
+WITH positions(rn, seq_id, xpos, ypos) AS (
+    SELECT *
+    FROM (
+        VALUES
+            (1, 1,  0.0,   0.0),    -- single point measurement, centre only
+            (2, 2,  0.0,   0.0),    -- 5 point measurement, centre
+            (3, 2, 17.0,  17.0),    -- 5 point measurement, top right
+            (4, 2,-17.0,  17.0),    -- 5 point measurement, top left
+            (5, 2, 17.0, -17.0),    -- 5 point measurement, bottom right
+            (6, 2,-17.0, -17.0)     -- 5 point measurement, bottom left
+    ) v(rn, seq_id, xpos, ypos)
+),
+configs AS (
+    INSERT INTO config.configuration (config_type)
+    SELECT 'target_position'
+    FROM positions
+    ORDER BY rn
+    RETURNING id
+),
+config_ids AS (
+    SELECT id, row_number() OVER (ORDER BY id) AS rn
+    FROM configs
+)
+INSERT INTO config.target_position (id, seq_id, xpos, ypos)
+SELECT c.id, p.seq_id, p.xpos, p.ypos
+FROM config_ids c
+JOIN positions p USING (rn);
+
 -- -------------------------
 -- STATE SCHEMA
 -- -------------------------
+
+CREATE TABLE IF NOT EXISTS state.run_sequence (
+    id SERIAL PRIMARY KEY,
+    status TEXT REFERENCES utils.status(name),
+    on_complete TEXT
+);
 
 -- state.midas_run is a table for scheduling runs for
 -- the pythonic sequencer. Priority defines the order
@@ -251,6 +326,12 @@ CREATE TABLE IF NOT EXISTS state.midas_run_config (
     run_id INT REFERENCES state.midas_run(id),
     config_id INT REFERENCES config.configuration(id),
     priority INT
+);
+
+CREATE TABLE IF NOT EXISTS state.runs_in_sequence (
+    id SERIAL PRIMARY KEY,
+    seq_id INT REFERENCES state.run_sequence(id),
+    midas_run_id INT REFERENCES state.midas_run(id)
 );
 
 -- list of postprocessing jobs.
@@ -335,24 +416,104 @@ BEGIN
     END IF;
 
     -- pending if all dependencies are success
-    IF EXISTS (SELECT 1 FROM state.postproc_depends WHERE pp_job_id = p_job_id)
-       AND NOT EXISTS (
-           SELECT 1
-           FROM state.postproc_depends d
-           JOIN state.postproc_job j ON j.id = d.depends_on
-           WHERE d.pp_job_id = p_job_id
-             AND NOT utils.is_success(j.status)
+    IF NOT EXISTS ( -- no dependency exists
+            SELECT 1
+            FROM state.postproc_depends
+            WHERE pp_job_id = p_job_id
+        )
+        OR NOT EXISTS ( -- no dependcy that is not in success state, aka all dependencies succeeded.
+            SELECT 1
+            FROM state.postproc_depends d
+            JOIN state.postproc_job j ON j.id = d.depends_on
+            WHERE d.pp_job_id = p_job_id
+              AND NOT utils.is_success(j.status)
        )
     THEN
         UPDATE state.postproc_job
         SET status = 'PENDING'
         WHERE id = p_job_id
-          AND status NOT IN ('HOLDING', 'CANCELLED');
+          AND NOT utils.is_user(status)          -- protect user-assigned states
+          AND status IS DISTINCT FROM 'PENDING'; -- do not reassign the same state and fire extra triggers
     ELSE
         UPDATE state.postproc_job
         SET status = 'DEPENDING'
         WHERE id = p_job_id
-          AND status NOT IN ('HOLDING', 'CANCELLED');
+          AND NOT utils.is_user(status)            -- protect user-assigned states
+          AND status IS DISTINCT FROM 'DEPENDING'; -- do not reassign the same state and fire extra triggers
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION state.recompute_sequence_state(aSeqID INT)
+RETURNS VOID AS $$
+BEGIN
+
+    -- check if any run associated with this sequence failed in any capacity.
+    IF EXISTS ( -- check status of the midas run itself, aka the sequencer part.
+            SELECT 1
+            FROM state.runs_in_sequence AS ris
+            JOIN state.midas_run AS mr ON ris.midas_run_id = mr.id
+            WHERE ris.seq_id = aSeqID AND utils.is_failure(mr.status)
+        )
+        OR EXISTS ( -- check the status of the nearline postprocessing of the midas run
+            SELECT 1
+            FROM state.runs_in_sequence AS ris
+            JOIN state.postproc_job AS ppj ON ris.midas_run_id = ppj.midas_run_id
+            WHERE ris.seq_id = aSeqID AND ppj.job_type = 'nearline' AND utils.is_failure(ppj.status)
+        )
+    THEN
+        UPDATE state.run_sequence SET status = 'FAILED' WHERE id = aSeqID;
+        RETURN;
+    END IF;
+
+    -- check if ALL midas runs are in a pending state.
+    -- This does not require checking post-processing as those
+    -- by their very nature only spawn after the midas run completed.
+    IF NOT EXISTS (
+            SELECT 1
+            FROM state.runs_in_sequence AS ris
+            JOIN state.midas_run AS mr ON ris.midas_run_id = mr.id
+            WHERE ris.seq_id = aSeqID AND NOT utils.is_pending(mr.status)
+        )
+    THEN
+        UPDATE state.run_sequence SET status = 'PENDING' WHERE id = aSeqID;
+        RETURN;
+    END IF;
+
+    -- check if all runs are in a success state
+    -- check if any run associated with this sequence failed in any capacity.
+    IF NOT EXISTS ( -- check status of the midas run itself, aka the sequencer part.
+            SELECT 1
+            FROM state.runs_in_sequence AS ris
+            JOIN state.midas_run AS mr ON ris.midas_run_id = mr.id
+            WHERE ris.seq_id = aSeqID AND NOT utils.is_success(mr.status)
+        )
+        AND NOT EXISTS ( -- check the status of the nearline postprocessing of the midas run
+            SELECT 1
+            FROM state.runs_in_sequence AS ris
+            JOIN state.postproc_job AS ppj ON ris.midas_run_id = ppj.midas_run_id
+            WHERE ris.seq_id = aSeqID AND ppj.job_type = 'nearline' AND NOT utils.is_success(ppj.status)
+        )
+    THEN
+        -- just update to `RUNSDONE` if we are currently in status `RUNNING`. We have no intention
+        -- of overwriting any other state futher down the line, e.g. `PPROC` or `DONE`
+
+        UPDATE state.run_sequence
+        SET status = CASE
+                        WHEN on_complete is NULL THEN 'DONE' -- All jobs in the sequence are done and there is nothing to do on completion. We are all done
+                        ELSE 'RUNSDONE'                      -- All jobs in the sequence are done and there is some other job to be scheduled on completion of the sequence.
+                     END
+        WHERE
+            id = aSeqID
+            AND (status = 'RUNNING'             -- default path that should be taken by the statemachine
+                                 OR utils.is_pending(status)  -- This one would be very weird where all runs suddenly go from pending to success.
+                                                              -- May happen if a user manually progresses the state machine
+                                 OR utils.is_failure(status)  -- This sequence had a failed run and now all are in success state.
+                                                              -- This path is taken if a shifter fixed a failed run.
+            );
+        RETURN;
+    ELSE
+        UPDATE state.run_sequence SET status = 'RUNNING' WHERE id = aSeqID;
     END IF;
 END;
 $$ LANGUAGE plpgsql;
@@ -372,7 +533,7 @@ AFTER INSERT OR DELETE ON state.postproc_depends
 FOR EACH ROW
 EXECUTE FUNCTION state.trg_dep_change();
 
-CREATE OR REPLACE FUNCTION state.trg_status_change()
+CREATE OR REPLACE FUNCTION state.trg_pp_status_change()
 RETURNS trigger AS $$
 DECLARE
     r RECORD;
@@ -390,28 +551,62 @@ BEGIN
         PERFORM state.recompute_job_state(r.pp_job_id);
     END LOOP;
 
+    -- recompute sequence state
+    FOR r IN
+        SELECT seq_id
+        FROM state.runs_in_sequence
+        WHERE midas_run_id = NEW.midas_run_id
+    LOOP
+        PERFORM state.recompute_sequence_state(r.seq_id);
+    END LOOP;
+
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER status_change
+CREATE TRIGGER pp_status_change
 AFTER UPDATE OF status ON state.postproc_job
 FOR EACH ROW
-EXECUTE FUNCTION state.trg_status_change();
+EXECUTE FUNCTION state.trg_pp_status_change();
 
+CREATE OR REPLACE FUNCTION state.trg_mr_status_change()
+RETURNS trigger AS $$
+DECLARE
+    r RECORD;
+BEGIN
+    IF NEW.status = OLD.status THEN
+        RETURN NEW;
+    END IF;
 
+    -- recompute sequence state
+    FOR r IN
+        SELECT seq_id
+        FROM state.runs_in_sequence
+        WHERE midas_run_id = NEW.id
+    LOOP
+        PERFORM state.recompute_sequence_state(r.seq_id);
+    END LOOP;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER mr_status_change
+AFTER UPDATE OF status ON state.midas_run
+FOR EACH ROW
+EXECUTE FUNCTION state.trg_mr_status_change();
 
 -- -------------------------
 -- LOGS SCHEMA (mostly append-only)
 -- -------------------------
 CREATE TABLE IF NOT EXISTS logs.slow_control (
-    id BIGSERIAL PRIMARY KEY,          -- internal primary key
-    midas_run_number INT,              -- run number to which this log entry belongs
-    reason TEXT NOT NULL,              -- what caused this log entry (see below)
-    log_time TIMESTAMP DEFAULT now(),  -- time at which the log was created
-    upd_time TIMESTAMP NOT NULL,       -- time at which the ODB value was last updated
-    odb_key TEXT,                      -- slow control parameter monitored
-    odb_val TEXT                       -- value of sc parameter monitored
+    id BIGSERIAL PRIMARY KEY,           -- internal primary key
+    midas_run_number INT,               -- run number to which this log entry belongs
+    reason TEXT NOT NULL,               -- what caused this log entry (see below)
+    log_time TIMESTAMPTZ DEFAULT now(), -- time at which the log was created
+    upd_time TIMESTAMPTZ NOT NULL,      -- time at which the ODB value was last updated
+    channel TEXT,                       -- slow control parameter monitored
+    reading TEXT                        -- value of sc parameter monitored
 
     CHECK ( reason IN (
         'BOR',      -- Begin of run
@@ -431,14 +626,19 @@ GRANT INSERT ON config.configuration   TO bot;
 GRANT INSERT ON state.midas_run        TO bot;
 GRANT INSERT ON state.postproc_job     TO bot;
 GRANT INSERT ON state.postproc_depends TO bot;
+GRANT INSERT ON state.run_sequence     TO bot;
+GRANT INSERT ON state.runs_in_sequence TO bot;
 
 GRANT USAGE, SELECT ON SEQUENCE config.configuration_id_seq    TO bot;
 GRANT USAGE, SELECT ON SEQUENCE state.midas_run_id_seq         TO bot;
 GRANT USAGE, SELECT ON SEQUENCE state.midas_run_config_id_seq  TO bot;
 GRANT USAGE, SELECT ON SEQUENCE state.postproc_job_id_seq      TO bot;
+GRANT USAGE, SELECT ON SEQUENCE state.run_sequence_id_seq      TO bot;
+GRANT USAGE, SELECT ON SEQUENCE state.runs_in_sequence_id_seq  TO bot;
 
 GRANT UPDATE (status, midas_run_number) ON state.midas_run     TO bot;
 GRANT UPDATE (status)                   ON state.postproc_job  TO bot;
+GRANT UPDATE (status)                   ON state.run_sequence  TO bot;
 
 -- SHIFTER: broader control
 -- a shifter may mark a configuration as faulty

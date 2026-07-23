@@ -1,6 +1,6 @@
-import psycopg2
 import subprocess
 import datetime
+from pathlib import Path
 
 import pioneer.rundb.config as config
 
@@ -14,7 +14,7 @@ class db_admin_tool:
         Simplified connection to the DB as admin user
         """
         return config.connect(user = self.admin_user, password = self.admin_pwd, db_name = db_name)
-    
+
     def backup_db(self) -> bool:
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"backup_{ts}.dump"
@@ -85,7 +85,7 @@ class db_admin_tool:
         if (exists):
             print(f"Database {config.DB_NAME} already exists")
             return False
-        
+
         with admin_connection.cursor() as admin_cursor:
             admin_cursor.execute(
                 f"CREATE DATABASE {config.DB_NAME}"
@@ -98,7 +98,7 @@ class db_admin_tool:
         print("Building tables in database", config.DB_NAME)
         input("Press enter to continue")
 
-        with open("db_config.sql", "r") as f:
+        with open(Path(__file__).resolve().parent / "db_config.sql", "r") as f:
             sql = f.read()
 
         theConnection = self.connect()

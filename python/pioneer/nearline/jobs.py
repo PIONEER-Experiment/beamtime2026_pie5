@@ -26,10 +26,18 @@ class BaseJob:
         self.db = iface
         self.proc = None
         self.rc = None
+        self.table = config.get("table", "postproc_job")
 
     def build_command(self):
         # This function should be overwritten by the actual job description
         raise NotImplementedError
+
+    @property
+    def processing_status(self):
+        # You can overwrite this for advanced multi-step jobs
+        # end of sequence jobs may use PPROC to mark the
+        # post-processing stage.
+        return "RUNNING"
 
     def start(self):
         cmd = self.build_command()
@@ -38,7 +46,7 @@ class BaseJob:
             self.proc = subprocess.Popen(['sleep', '2'])
         else:
             self.proc = subprocess.Popen(cmd)
-        self.db.update_postproc_status(self.config['job_id'], 'RUNNING')
+        self.db.update_status(self.table, self.config['job_id'], self.processing_status)
         return self.proc
 
     def poll(self):
@@ -51,9 +59,9 @@ class BaseJob:
         if self.rc is None:
             raise RuntimeError("Finalise called before job was finished")
         status = 'DONE' if self.rc == 0 else 'FAILED'
-        self.db.update_postproc_status(self.config['job_id'], status)
+        self.db.update_status(self.table, self.config['job_id'], status)
 
-    def input_files(self):
+    def raw_midas_files(self):
         parent_path = Path(self.config['input'])
         run_number = self.config['midas_run_number']
         if glob_input_files:
@@ -85,7 +93,7 @@ class RsyncJob(BaseJob):
     that SSH keys are configured for remote transfers.
     """
     def build_command(self):
-        return ['rsync', '-av', *self.input_files(), self.config[self.config['job_type'].lower()]]
+        return ['rsync', '-av', *self.raw_midas_files(), self.config[self.config['job_type'].lower()]]
 
 class GaudiJob(BaseJob):
     """
@@ -119,8 +127,26 @@ class CleanJob(BaseJob):
     completed and the raw data was backed up to HDD and remote locations.
     """
     def build_command(self):
-        input_files = self.input_files()
+        input_files = self.raw_midas_files()
         return ['rm', '-rf', *input_files]
+
+
+class MergeJob(BaseJob):
+    """
+    Combine a bunch of individual histograms to form a combined measurement.
+    This is a wrapper around `hadd`
+    """
+    def build_command(self):
+        input_path = Path(self.config["input"])
+        cmd = ['hadd', self.config["output"]]
+        for r in self.config["midas_run_numbers"]:
+            cmd.append(input_path / f"run{r:05d}.root")
+        return cmd;
+
+    @property
+    def processing_status(self):
+        return 'PPROC'
+
 
 
 def create_job(config, iface) -> BaseJob:
@@ -140,7 +166,8 @@ def create_job(config, iface) -> BaseJob:
         "backup"  : RsyncJob,
         "gaudi"   : GaudiJob,
         "nearline": GaudiJob,
-        "cleanup" : CleanJob
+        "cleanup" : CleanJob,
+        "merge"   : MergeJob
     }
     alloc_name = config['job_type'].lower()
     if alloc_name not in job_list.keys():

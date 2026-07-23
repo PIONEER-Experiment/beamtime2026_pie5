@@ -12,7 +12,7 @@ class interface:
         self.user = user
         self.password = password
 
-    def find_next_config(self) -> dict | None:
+    def find_next_run_config(self) -> dict | None:
         conn = connect(self.user, self.password)
 
         with conn.cursor() as cursor:
@@ -27,9 +27,9 @@ class interface:
         if (next_job is None):
             return None
 
-        return self.load_config(next_job[0])
+        return self.load_run_config(next_job[0])
 
-    def load_config(self, job_id) -> dict | None:
+    def load_run_config(self, job_id) -> dict | None:
         conn = connect(self.user, self.password)
         with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cursor:
             # Find job configuration
@@ -92,6 +92,39 @@ class interface:
         configuration["job_id"] = job_id
 
         return configuration
+
+    def load_config(self, table_name : str, cfg_id : int) -> dict | None:
+        conn = connect(self.user, self.password)
+        with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cursor:
+            table_ident = psycopg2.sql.Identifier(table_name)
+            query = psycopg2.sql.SQL(
+                    "SELECT * FROM config.{table} WHERE id = {value}"
+                ).format(
+                    table=table_ident,
+                    value=psycopg2.sql.Placeholder(),
+                )
+            cursor.execute(
+                query, (cfg_id,)
+            )
+            config = cursor.fetchone()
+        return dict(config) if config is not None else None
+
+    def load_config_sequence(self, table_name : str, seq_id : int):
+        conn = connect(self.user, self.password)
+        with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cursor:
+            table_ident = psycopg2.sql.Identifier(table_name)
+
+            query = psycopg2.sql.SQL(
+                    "SELECT * FROM config.{table} WHERE seq_id = {value}"
+                ).format(
+                    table=table_ident,
+                    value=psycopg2.sql.Placeholder(),
+                )
+            cursor.execute(
+                query, (seq_id,)
+            )
+            configs = cursor.fetchall()
+        return configs
 
     def end_of_midas_run(self, job_id : int, run_number : int, schedule_post_processing : bool = True) -> bool:
         conn = connect(self.user, self.password)
@@ -203,8 +236,10 @@ class interface:
                 max_priority = cursor.fetchone()[0]
                 priority = 1 if max_priority is None else max_priority + 1
 
+                # We enter right into status 'PENDING' despite not having all sub-configurations
+                # registered. This is fine as it becomes visible only after committing down below.
                 cursor.execute(
-                    "INSERT INTO state.midas_run (priority, status) VALUES (%s, 'CONFIG') RETURNING id",
+                    "INSERT INTO state.midas_run (priority, status) VALUES (%s, 'PENDING') RETURNING id",
                     (priority, )
                 )
                 run_id = cursor.fetchone()[0]
@@ -215,16 +250,100 @@ class interface:
                         (run_id, config, icon)
                     )
 
-                cursor.execute(
-                    "UPDATE state.midas_run SET status = 'PENDING' WHERE id = %s",
-                    (run_id, )
-                )
-
             conn.commit()
         finally:
             conn.close()
 
         return run_id
+
+    def register_sequence(self, run_ids : list, on_complete : str) -> bool:
+        conn = connect(user = self.user, password = self.password)
+
+        with conn.cursor() as cursor:
+            # Step 1: Add sequence
+            cursor.execute(
+                "INSERT INTO state.run_sequence (status, on_complete) VALUES ('PENDING', %s) RETURNING id", (on_complete, )
+            )
+            seq_id = cursor.fetchone()[0]
+            for run_id in run_ids:
+                cursor.execute(
+                    "INSERT INTO state.runs_in_sequence (seq_id, midas_run_id) VALUES (%s, %s)", (seq_id, run_id)
+                )
+        conn.commit()
+        conn.close()
+        return True
+
+    def find_sequences(self, status : str, limit : int = 1) -> list[dict]:
+        conn = connect(user = self.user, password = self.password)
+        with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute(
+                "SELECT * FROM state.run_sequence WHERE status = %s LIMIT %s", (status, limit)
+            )
+            seqs = cursor.fetchall()
+        return [dict(s) for s in seqs]
+
+    def claim_sequences(self, limit : int = 1) -> list[dict]:
+        conn = connect(user = self.user, password = self.password)
+        with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute(
+                    """
+                    WITH claimed AS (
+                        SELECT id
+                        FROM state.run_sequence
+                        WHERE status = 'RUNSDONE'
+                        LIMIT %s
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE state.run_sequence s
+                    SET status = 'CLAIMED'
+                    FROM claimed
+                    WHERE s.id = claimed.id
+                    RETURNING
+                        s.*
+                    """, (limit,))
+            seqs = cursor.fetchall()
+        conn.commit()
+        conn.close()
+        return [dict(s) for s in seqs]
+
+    def get_sequence_entry(self, id : int) -> dict | None:
+        conn = connect(user = self.user, password = self.password)
+        with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute(
+                "SELECT * FROM state.run_sequence WHERE id = %s", (id, )
+            )
+            result = cursor.fetchone()
+        return dict(result) if result is not None else result
+
+    def get_all_runs_in_sequence(self, id : int) -> list[int]:
+        conn = connect(user = self.user, password = self.password)
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT midas_run_id FROM state.runs_in_sequence WHERE seq_id = %s", (id, )
+            )
+            run_ids = cursor.fetchall()
+        return [r[0] for r in run_ids]
+
+
+    def update_status(self, table : str, id : int, new_status : str) -> bool:
+        conn = connect(user = self.user, password = self.password)
+        retVal = True
+        with conn.cursor() as cursor:
+            table_ident = psycopg2.sql.Identifier(table)
+            query = psycopg2.sql.SQL(
+                    "UPDATE state.{table} SET status = {status} WHERE id = {value}"
+                ).format(
+                    table=table_ident,
+                    status = psycopg2.sql.Placeholder(),
+                    value=psycopg2.sql.Placeholder(),
+                )
+            cursor.execute(
+                query, (new_status, id)
+            )
+        conn.commit()
+        conn.close()
+        return retVal
+
 
     def update_postproc_status(self, job_id : int, new_status : str) -> bool:
         conn = connect(user = self.user, password = self.password)
@@ -280,3 +399,18 @@ class interface:
         conn.close()
 
         return results
+
+    def log_sc_values(self, midas_run_number : int, reason : str, log_values : list[dict]) -> None:
+        conn = connect(user = self.user, password = self.password)
+        if reason in ('BOR', 'EOR'):
+            # begin of run or end of run, log everything
+            with conn.cursor() as cursor:
+                for entry in log_values:
+                    cursor.execute(
+                        """INSERT INTO logs.slow_control (midas_run_number, reason, upd_time, channel, reading) VALUES (%s, %s, %s, %s, %s)""",
+                        (midas_run_number, reason, entry.get('upd_time'), entry.get('channel'), entry.get('reading'))
+                    )
+            conn.commit()
+            conn.close()
+        else:
+            pass

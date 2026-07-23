@@ -15,11 +15,3 @@ def connect(user = "readonly", password = "readonly", db_name = DB_NAME):
         port=DB_PORT,
     )
 
-# Debugging stuff below
-
-if __name__ == "__main__":
-    from pioneer.rundb.interface import interface
-    iface = interface("bot", "bot")
-    acfg = iface.load_config()
-    print("End of debug")
-    print(acfg.__repr__())
