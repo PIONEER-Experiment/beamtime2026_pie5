@@ -67,13 +67,13 @@ class NearlineDaemon:
         # this is technically not required but considered a neat feature.
         self.client = midas.client.MidasClient(args.midas_client, host_name = args.midas_host, expt_name = args.midas_expt)
 
-        invoking_call = [sys.executable, os.path.realpath(sys.argv[0]), "--midas"]
-        if (args.midas_client):
-            invoking_call += ["--midas-client", args.midas_client]
-        if (args.midas_host):
-            invoking_call += ["--midas-host", args.midas_host]
-        if (args.midas_expt):
-            invoking_call += ["--midas-expt", args.midas_expt]
+        invoking_call = [
+            sys.executable,
+            os.path.realpath(sys.argv[0]),
+            "--midas-client", args.midas_client,
+            "--midas-host", args.midas_host,
+            "--midas-expt", args.midas_expt
+        ]
 
         start_cmd = " ".join(shlex.quote(arg) for arg in invoking_call)
         self.client.odb_set(f"/Programs/{args.midas_client}/Start command", start_cmd)
@@ -95,7 +95,19 @@ class NearlineDaemon:
         self.remote_path          = pathlib.Path(self.client.odb_get("/Nearline/config/Remote path"))
         self.nearline_output_path = pathlib.Path(self.client.odb_get("/Nearline/config/Output path"))
 
-        self.sleep_time = 10
+        self.client.register_transition_callback(
+            transition = midas.TR_START,
+            sequence = 998,
+            callback = self.start_of_run_callback
+        )
+
+        self.client.register_transition_callback(
+            transition = midas.TR_STOP,
+            sequence = 2,
+            callback = self.end_of_run_callback
+        )
+
+        self.sleep_time = 1000
         self.db_interface = pioneer.rundb.interface.interface(user = kDbUser, password = kDbPwd)
 
         # Proper mini twin initialisation goes here.
@@ -141,7 +153,7 @@ class NearlineDaemon:
 
     def communicate_with_midas(self):
         if (self.client):
-                self.client.communicate(10)
+                self.client.communicate(self.sleep_time)
 
                 # Paths where things shall be going to
                 self.midas_logger_path    = pathlib.Path(self.client.odb_get("/Logger/Data dir"))
@@ -190,11 +202,32 @@ class NearlineDaemon:
             mrs.set_subsequence(nl_run.five_point_sequence(self.db_interface))
             mrs.schedule()
 
+    def start_of_run_callback(self, client, run_number):
+        run_db_pk = 0
+        if client.odb_exists("/Runinfo/Run DB PK"):
+            run_db_pk = client.odb_get("/Runinfo/Run DB PK")
+
+        if run_db_pk == 0:
+            # if MIDAS is unaware of a run in the table, register a new run
+            run_db_pk = self.db_interface.register_run(status = "RUNNING")
+            client.odb_set("/Runinfo/Run DB PK", run_db_pk)
+
+        self.db_interface.start_of_midas_run(
+            run_id = run_db_pk,
+            run_number =  run_number
+        )
+        return midas.status_codes['SUCCESS']
+
+    def end_of_run_callback(self, client, run_number):
+        run_db_pk = client.odb_get("/Runinfo/Run DB PK")
+        client.odb_set("/Runinfo/Run DB PK", 0)
+        self.db_interface.end_of_midas_run(run_db_pk)
+        return midas.status_codes['SUCCESS']
 
 
     def mainloop(self):
         while True:
-            # Step 1: Communicate with midas if available
+            # Step 1: Communicate with midas
             self.communicate_with_midas()
 
             # Step 2: Iterate nearline job queues
@@ -205,9 +238,6 @@ class NearlineDaemon:
 
             # Step 4: Poll update strategies for new configuration
             self.check_for_updates()
-
-            time.sleep(self.sleep_time)
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Good Luck Have Fun - I did not yet write documentation for this")

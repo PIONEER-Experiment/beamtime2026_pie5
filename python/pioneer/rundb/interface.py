@@ -126,21 +126,63 @@ class interface:
             configs = cursor.fetchall()
         return configs
 
-    def end_of_midas_run(self, job_id : int, run_number : int, schedule_post_processing : bool = True) -> bool:
+    def register_run(self, status : str) -> int:
+        conn = connect(self.user, self.password)
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO state.midas_run (status) VALUES (%s) RETURNING id",
+                (status, )
+            )
+            run_id = cursor.fetchone()[0]
+        conn.commit()
+        conn.close()
+        return run_id
+
+    def start_of_midas_run(self, run_id : int, run_number : int):
         conn = connect(self.user, self.password)
         with conn.cursor() as cursor:
             # Mark the run in the job-list as complete
-            cursor.execute(f"UPDATE state.midas_run SET status = 'DONE', midas_run_number = {run_number} WHERE id = {job_id}")
+            cursor.execute(
+                """
+                UPDATE state.midas_run
+                SET
+                    status = 'RUNNING',
+                    midas_run_number = %s
+                WHERE id = %s
+                """,
+                (run_number, run_id)
+            )
+        conn.commit()
+        conn.close()
+
+    def end_of_midas_run(self, run_id : int, schedule_post_processing : bool = True) -> bool:
+        conn = connect(self.user, self.password)
+        with conn.cursor() as cursor:
+            # Mark the run in the job-list as complete
+            cursor.execute(
+                """
+                UPDATE state.midas_run
+                SET
+                    status = 'DONE'
+                WHERE id = %s
+                RETURNING midas_run_number
+                """,
+                (run_id,)
+            )
+            result = cursor.fetchone()
+            if result is None:
+                return False
 
             # Schedule the analysis jobs.
             if (schedule_post_processing):
+                run_number = result[0]
                 tasks = ['nearline', 'backup', 'remote', 'cleanup']
                 task_ids = dict()
                 for task in tasks:
                     cursor.execute(
                         """INSERT INTO state.postproc_job (midas_run_id, job_type, priority, status)
                            VALUES (%s, %s, %s, 'PENDING') RETURNING id"""
-                           , (job_id, task, run_number)
+                           , (run_id, task, run_number)
                         )
                     task_ids[task] = cursor.fetchone()[0]
 
