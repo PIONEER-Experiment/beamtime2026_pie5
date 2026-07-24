@@ -6,7 +6,7 @@ import time
 
 from dataclasses import dataclass
 
-from midas import client
+import midas.client
 from pioneer.rundb.interface import interface as db_iface
 
 kMidasClientName = "pioneer_logger"
@@ -41,12 +41,12 @@ class Channel:
 class Logger:
     def __init__(self, args):
         self.db_iface = db_iface("bot", "bot")
-        self.client = client.MidasClient(
+        self.client = midas.client.MidasClient(
             client_name=args.midas_client,
             host_name=args.midas_host,
             expt_name=args.midas_expt,
         )
-        self.sleep_time = 1.0
+        self.sleep_time = 1000
 
         self.known_equipment     = dict()
         self.last_equipment_read = dict()
@@ -72,8 +72,8 @@ class Logger:
 
     def log_vanished_equipment(self, eq_name : str, this_run : int):
         # Someone erased the ODB entry for this equipment.
-        # As this was not properly logged, let's figure out when we
-        # last saw an update to this equipment.
+        # As this was not properly logged, assign the last
+        # time communicated with it.
         self.log_channel_state_change(
             channel_list = self.known_equipment[eq_name],
             this_run = this_run,
@@ -136,7 +136,6 @@ class Logger:
         equipment = dict()
         for channel, _, _ in self.iter_channels(equips = equips):
             equipment.setdefault(channel.equipment, set()).add(channel)
-db_iface
         for eq_name, val in equips.items():
             enabled = val['Common']['Enabled']
             if not enabled:
@@ -186,18 +185,34 @@ db_iface
 
         self.db_iface.log_sc_values(this_run, reason, log_entries)
 
+    def log_bor_callback(self, client, run_number):
+        self.log(reason = "BOR")
+
+    def log_eor_callback(self, client, run_number):
+        self.log(reason = "EOR")
+
     # ---------------------------------------------------------------------
     def mainloop(self):
         self.initialise_inventory(self.client.odb_get("/Equipment"))
+        self.client.register_transition_callback(
+            transition = midas.TR_START,
+            sequence = 999,
+            callback = self.log_bor_callback
+        )
+        self.client.register_transition_callback(
+            transition = midas.TR_STOP,
+            sequence = 1,
+            callback = self.log_eor_callback
+        )
+
         while True:
             try:
-                self.client.communicate(10)
+                self.client.communicate(self.sleep_time)
                 equips = self.client.odb_get("/Equipment")
                 self.update_inventory(equips)
                 self.log(reason = "UPDATE", equips = equips)
             except Exception:
                 logging.exception("Logger iteration failed.")
-            time.sleep(self.sleep_time)
 
 
 def main():
@@ -205,7 +220,6 @@ def main():
     parser.add_argument("--midas-client", default=kMidasClientName)
     parser.add_argument("--midas-host", default=kMidasHostName)
     parser.add_argument("--midas-expt", default=kMidasExptName)
-    parser.add_argument("--mode", default="daemon", choices=[ "daemon", "BOR", "EOR"])
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -215,12 +229,7 @@ def main():
     )
 
     with Logger(args) as logger:
-        if args.mode == "daemon":
-            logger.mainloop()
-        elif args.mode in ('BOR', 'EOR'):
-            logger.log(reason = args.mode)
-        else:
-            raise NotImplementedError(f"Mode {args.mode} is not implemented.")
+        logger.mainloop()
 
 
 if __name__ == "__main__":
