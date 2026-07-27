@@ -605,6 +605,7 @@ CREATE TABLE IF NOT EXISTS logs.slow_control (
     reason TEXT NOT NULL,               -- what caused this log entry (see below)
     log_time TIMESTAMPTZ DEFAULT now(), -- time at which the log was created
     upd_time TIMESTAMPTZ NOT NULL,      -- time at which the ODB value was last updated
+    equipment TEXT,                     -- the equipment this parameter is attributed to
     channel TEXT,                       -- slow control parameter monitored
     label TEXT,                         -- the name given the SC parameter in the frontend
     reading TEXT                        -- value of sc parameter monitored
@@ -647,8 +648,8 @@ BEGIN
     INSERT INTO logs.last_sc_update(channel, upd_time)
     VALUES (NEW.channel, NEW.upd_time)
     ON CONFLICT (channel)
-    DO UPDATE SETdb_iface
-        upd_time = EXCLUDED.upd_time
+    DO UPDATE SET
+        upd_time = EXCLUDED.upd_time,
         log_time = now()
     ;
 
@@ -684,6 +685,8 @@ GRANT USAGE, SELECT ON SEQUENCE state.runs_in_sequence_id_seq  TO bot;
 GRANT UPDATE (status, midas_run_number) ON state.midas_run     TO bot;
 GRANT UPDATE (status)                   ON state.postproc_job  TO bot;
 GRANT UPDATE (status)                   ON state.run_sequence  TO bot;
+
+GRANT UPDATE (upd_time, log_time) ON logs.last_sc_update TO bot;
 
 -- SHIFTER: broader control
 -- a shifter may mark a configuration as faulty

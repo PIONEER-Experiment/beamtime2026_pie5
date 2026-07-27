@@ -444,15 +444,11 @@ class interface:
 
     def log_sc_values(self, midas_run_number : int, reason : str, log_values : list[dict]) -> None:
         conn = connect(user = self.user, password = self.password)
-        if reason in ('BOR', 'EOR'):
-            # begin of run or end of run, log everything
-            with conn.cursor() as cursor:
-                for entry in log_values:
-                    cursor.execute(
-                        """INSERT INTO logs.slow_control (midas_run_number, reason, upd_time, channel, label, reading) VALUES (%s, %s, %s, %s, %s, %s)""",
-                        (midas_run_number, reason, entry.get('upd_time'), entry.get('channel'), entry.get('label'), entry.get('reading'))
-                    )
-            conn.commit()
-            conn.close()
-        else:
-            pass
+        with conn.cursor() as cursor:
+            for entry in log_values:
+                cursor.execute(
+                    """INSERT INTO logs.slow_control (midas_run_number, reason, upd_time, equipment, channel, label, reading) VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    (midas_run_number, reason, entry.get('upd_time'), entry.get('equipment'), entry.get('channel'), entry.get('label'), entry.get('reading'))
+                )
+        conn.commit()
+        conn.close()
