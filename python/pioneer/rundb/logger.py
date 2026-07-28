@@ -124,7 +124,7 @@ class Logger:
             )
 
     def name_update_callback(self, client, path, value):
-        this_run = self.client.odb_get("Runinfo/Run number")
+        this_run = self.client.odb_get("/Runinfo/Run number")
         equip : Equipment = self.known_equipment[path.split("/")[2]]
         upd_time = self.client.odb_last_update_time(path)
         old_channels = equip.channel_list
@@ -193,7 +193,20 @@ class Logger:
                 continue
             old_val = equip.channel_cache[channel].last_val
             thr     = upd_thr[channel.index]
-            if abs(old_val - new_val) > thr or not is_valid(old_val):
+            try:
+                # Try a numeric difference
+                diff = abs(old_val - new_val)
+            except TypeError:
+                # No numeric difference can be extracted,
+                # any deviation shall be considered above threshold.
+                above_thr = (old_val != new_val)
+            else:
+                # If you have valid numeric values to compute a difference
+                # but you can't compare to the thr type, your ODB is in
+                # places it should not be, which rightfully deserves a TypeError
+                above_thr = diff > thr
+
+            if above_thr or not is_valid(old_val):
                 log_entries.append({
                     "upd_time"  : upd_time,
                     "equipment" : channel.equipment,
@@ -204,7 +217,7 @@ class Logger:
                 equip.channel_cache[channel].last_val = new_val
                 equip.channel_cache[channel].last_upd = upd_time
 
-        this_run = self.client.odb_get("Runinfo/Run number")
+        this_run = self.client.odb_get("/Runinfo/Run number")
         self.db_iface.log_sc_values(this_run, "UPDATE", log_entries)
         equip.last_read_time = datetime.datetime.now(datetime.timezone.utc)
 
@@ -256,7 +269,7 @@ class Logger:
         # As this was not properly logged, assign the last
         # time communicated with it.
         equip : Equipment = self.known_equipment[eq_name]
-        this_run = self.client.odb_get("Runinfo/Run number")
+        this_run = self.client.odb_get("/Runinfo/Run number")
         self.log_channel_state_change(
             channel_list = equip.channel_list,
             this_run = this_run,

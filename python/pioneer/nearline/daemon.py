@@ -13,10 +13,23 @@ import time
 import pathlib
 
 # define some default parameters
-
 kMidasClientName = "NearlineDaemon"
-kMidasHostName   = "localhost"
-kMidasExptName   = "test"
+kMidasHostName   = os.environ.get('MIDAS_SERVER_HOST', 'localhost')
+kMidasExptName   = os.environ.get('MIDAS_EXPT_NAME'  , None)
+if kMidasExptName is None:
+    # Try the expttab file
+    exptab = os.environ.get('MIDAS_EXPTAB', None)
+    if exptab is not None:
+        exptab_path = pathlib.Path(exptab)
+        if exptab_path.exists():
+            with exptab_path.open("r") as f:
+                lines = f.readlines()
+            n_lines = len(lines)
+            if n_lines == 1:
+                # there is exactly one unique line, which now shall provide a default value.
+                kMidasExptName = lines[0].split()[0]
+
+
 kDefaultNumJobs  = 3
 
 # define DB credentials
@@ -80,9 +93,9 @@ class NearlineDaemon:
         if not self.client.odb_exists("/Nearline"):
             self.client.odb_set("/Nearline", {
                 "config" : {
-                    "Backup path" : "/Users/patrick/phasespace2026/playground/backup",
-                    "Remote path" : "/Users/patrick/phasespace2026/playground/remote",
-                    "Output path" : "/Users/patrick/phasespace2026/playground/nearline",
+                    "Backup path" : os.environ.get("NEARLINE_BACKUP_DIR", ""),
+                    "Remote path" : os.environ.get("NEARLINE_REMOTE", ""),
+                    "Output path" : os.environ.get("NEARLINE_DIR", ""),
                     "Num parallel jobs" : njobs
                     }
             })

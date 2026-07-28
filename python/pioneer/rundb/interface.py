@@ -62,15 +62,23 @@ class interface:
 
         with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cur:
             for cfg in configs:
-                table = cfg["config_type"]
-                if (table in configuration.keys()):
-                    raise ValueError(f"Found double reference to device {table}")
-                config_id = cfg["config_id"]
+                try:
+                    table = cfg["config_type"]
+                    if (table in configuration.keys()):
+                        raise ValueError(f"Found double reference to device {table}")
+                    config_id = cfg["config_id"]
 
-                if cfg["do_not_use"]:
-                    raise ValueError(
-                        f"Job {job_id} tries to access configuration {config_id} marked as DO_NOT_USE"
-                    )
+                    if cfg["do_not_use"]:
+                        raise ValueError(
+                            f"Job {job_id} tries to access configuration {config_id} marked as DO_NOT_USE"
+                        )
+                except ValueError:
+                    # Something is wrong with this run. Let's put it in error state right now
+                    cur.execute("UPDATE state.midas_run SET status='ERROR' WHERE id = %s", (job_id, ))
+                    conn.commit()
+
+                    # Raise the error again for the calling instance to deal with it.
+                    raise
 
                 query = f"""
                     SELECT *
