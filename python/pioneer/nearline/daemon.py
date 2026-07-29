@@ -143,8 +143,13 @@ class NearlineDaemon:
         job_cfg['output']   = self.nearline_output_path
 
         theJob = nl_jobs.create_job(job_cfg, self.db_interface)
-        theJob.start()
-        queue.add(theJob)
+        try:
+            theJob.start()
+        except Exception as e:
+            msg = f"Job {job_cfg['job_id']} failed to start: {e}"
+            self.message(msg, is_error = True, send_to_slack = True)
+        else:
+            queue.add(theJob)
 
     def build_and_dispatch_seq(self, seq_cfg : dict):
         on_complete = seq_cfg['on_complete'].split()
@@ -154,15 +159,16 @@ class NearlineDaemon:
             seq_cfg['job_type'] = "merge"
             seq_cfg['job_id'] = seq_cfg['id']
             seq_cfg['table'] = 'run_sequence'
-            seq_cfg['midas_run_numbers'] = self.db_interface.get_all_runs_in_sequence(seq_cfg['id'])
+            seq_cfg['midas_run_ids'] = self.db_interface.get_all_runs_in_sequence(seq_cfg['id'])
             theJob = nl_jobs.create_job(seq_cfg, self.db_interface)
             theJob.start()
             self.sequence_queue.add(theJob)
         elif "mt_add" in on_complete:
             # This sequence does not merge but adds all runs
             # As this operation is fast, we'll do it right here
-            for mrn in self.db_interface.get_all_runs_in_sequence(seq_cfg['id']):
-                self.mt_interface.AddContext(self.nearline_output_path / f"run{mrn:05d}.root")
+            run_ids = self.db_interface.get_all_runs_in_sequence(seq_cfg['id'])
+            files = self.db_interface.find_files(run_ids, "root")
+            self.mt_interface.AddContextFiles(files)
 
     def communicate_with_midas(self):
         if (self.client):
@@ -215,6 +221,28 @@ class NearlineDaemon:
             mrs.set_subsequence(nl_run.five_point_sequence(self.db_interface))
             mrs.schedule()
 
+    def filename_change_callback(self, client, path, value):
+        # path should be
+        # /Logger/Channels/<log_channel>/Settings/Current filename
+        log_channel = path.split("/")[3]
+        self.finish_file(log_channel)
+        run_db_pk = 0
+        if client.odb_exists("/Runinfo/Run DB PK"):
+            run_db_pk = client.odb_get("/Runinfo/Run DB PK")
+        self.db_interface.open_file(f"logger_{log_channel}", run_db_pk, value)
+
+    # Small sub-routine to properly close out a file writing for a
+    # specific channel. May be called either from filename_change_callback
+    # in a sub-run setting where the next subrun started or as the
+    # run terminates.
+    def finish_file(self, channel):
+        ids = self.db_interface.close_files_in_channel(channel)
+        for i in ids:
+            # Schedule the nearline analysis job right now as we finished
+            # writing the file. This may give a head start in cases where
+            # multiple subruns are produced.
+            self.db_interface.schedule_postproc_job_on_file(i, 'nearline')
+
     def start_of_run_callback(self, client, run_number):
         run_db_pk = 0
         if client.odb_exists("/Runinfo/Run DB PK"):
@@ -233,6 +261,9 @@ class NearlineDaemon:
 
     def end_of_run_callback(self, client, run_number):
         run_db_pk = client.odb_get("/Runinfo/Run DB PK")
+        logger_channels = self.client.odb_get("/Logger/Channels", just_key_list = True)
+        for log_channel in logger_channels:
+            self.finish_file(log_channel)
         client.odb_set("/Runinfo/Run DB PK", 0)
         self.db_interface.end_of_midas_run(run_db_pk)
         return midas.status_codes['SUCCESS']

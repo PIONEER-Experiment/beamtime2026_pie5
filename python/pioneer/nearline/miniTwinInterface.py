@@ -8,6 +8,10 @@ class miniTwinInterface:
         self.has_new_context = False # This is used as mock-up.
         self.last_context = "None"
 
+    def AddContextFiles(self, files : list[dict]):
+        self.has_new_context = True
+        self.last_context = len(files)
+
     def AddContext(self, ctxt):
         # This function should actually pass the context to the minitwin
         print("Received context: ", ctxt)

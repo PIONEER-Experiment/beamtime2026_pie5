@@ -328,6 +328,18 @@ CREATE TABLE IF NOT EXISTS state.midas_run_config (
     priority INT
 );
 
+-- This table is used because people anticipate the concept of
+-- subruns, where the trivial mapping run_id -> run{run_id : 5d}.mid.lz4
+-- stops working. Hence a table that maps run_id -> files associated
+CREATE TABLE IF NOT EXISTS state.file_list (
+    id SERIAL PRIMARY KEY,                      -- internal primary key
+    run_id INT REFERENCES state.midas_run(id),  -- id of the attributed midas run in this DB
+    filebase TEXT NOT NULL,                     -- the base name of the file (e.g. run00042)
+    fileext  TEXT NOT NULL,                     -- the extionsion of the file (e.g. mid.lz4)
+    producer TEXT DEFAULT NULL,                 -- producer of the file (e.g. logger_0 for midas logger channel 0)
+    status TEXT REFERENCES utils.status(name)   -- status the file is currently in
+);
+
 CREATE TABLE IF NOT EXISTS state.runs_in_sequence (
     id SERIAL PRIMARY KEY,
     seq_id INT REFERENCES state.run_sequence(id),
@@ -338,10 +350,30 @@ CREATE TABLE IF NOT EXISTS state.runs_in_sequence (
 CREATE TABLE IF NOT EXISTS state.postproc_job (
     id SERIAL PRIMARY KEY,
     midas_run_id INT REFERENCES state.midas_run(id),
+    file_id INT REFERENCES state.file_list(id),
     job_type TEXT,
     priority INT,
     status TEXT REFERENCES utils.status(name)
 );
+
+CREATE OR REPLACE FUNCTION state.set_postproc_job_priority()
+RETURNS trigger AS $$
+BEGIN
+    IF NEW.priority IS NULL THEN
+        SELECT COALESCE(MAX(priority), 0) + 1
+        INTO NEW.priority
+        FROM state.postproc_job j
+        WHERE utils.is_pending(j.status);
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER set_postproc_job_priority
+BEFORE INSERT ON state.postproc_job
+FOR EACH ROW
+EXECUTE FUNCTION state.set_postproc_job_priority();
 
 CREATE INDEX idx_postproc_job_status
 ON state.postproc_job(status);

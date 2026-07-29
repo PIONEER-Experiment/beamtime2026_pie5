@@ -163,6 +163,39 @@ class interface:
         conn.commit()
         conn.close()
 
+    def schedule_postproc_job(self, run_id : int, task : str):
+        conn = connect(self.user, self.password)
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO state.postproc_job (midas_run_id, job_type, status)
+                VALUES (%s, %s, 'PENDING') RETURNING id
+                """, (run_id, task)
+            )
+            job_id = cursor.fetchone()[0]
+        conn.commit()
+        conn.close()
+        return job_id
+
+    def schedule_postproc_job_on_file(self, file_id : int, task : str):
+        conn = connect(self.user, self.password)
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO
+                    state.postproc_job (midas_run_id, file_id, job_type, status)
+                SELECT fl.run_id, fl.id, %s, 'PENDING'
+                FROM state.file_list AS fl
+                WHERE fl.id = %s
+                RETURNING id
+                """, (task, file_id)
+            )
+            # this throws if the file id is missing
+            job_id = cursor.fetchone()[0]
+        conn.commit()
+        conn.close()
+        return job_id
+
     def end_of_midas_run(self, run_id : int, schedule_post_processing : bool = True) -> bool:
         conn = connect(self.user, self.password)
         with conn.cursor() as cursor:
@@ -181,25 +214,32 @@ class interface:
             if result is None:
                 return False
 
-            # Schedule the analysis jobs.
-            if (schedule_post_processing):
-                run_number = result[0]
-                tasks = ['nearline', 'backup', 'remote', 'cleanup']
-                task_ids = dict()
-                for task in tasks:
-                    cursor.execute(
-                        """INSERT INTO state.postproc_job (midas_run_id, job_type, priority, status)
-                           VALUES (%s, %s, %s, 'PENDING') RETURNING id"""
-                           , (run_id, task, run_number)
-                        )
-                    task_ids[task] = cursor.fetchone()[0]
+        # Schedule the analysis jobs.
+        if (schedule_post_processing):
+            self.schedule_postproc_job(run_id, 'backup')
+            self.schedule_postproc_job(run_id, 'remote')
 
-                # Lock cleanup until all other processes completed
-                cleanup_id = task_ids['cleanup']
-                for anID in task_ids.values():
-                    if (anID == cleanup_id):
-                        continue
-                    cursor.execute("INSERT INTO state.postproc_depends VALUES (%s, %s)", (cleanup_id, anID))
+        # Create the cleanup job. This one does feature dependencies
+        # Hence a more complex fill that the typical schedule_postproc_job
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                WITH new_job AS (
+                    INSERT INTO state.postproc_job (midas_run_id, job_type, status)
+                    VALUES (%s, 'cleanup', 'PENDING')
+                    RETURNING id, midas_run_id
+                )
+                INSERT INTO state.postproc_depends (pp_job_id, depends_on)
+                SELECT
+                    new_job.id,
+                    ppj.id
+                FROM new_job
+                JOIN state.postproc_job AS ppj
+                ON ppj.midas_run_id = new_job.midas_run_id
+                WHERE ppj.id <> new_job.id;
+                """,
+                (run_id,),
+            )
 
         conn.commit()
         conn.close()
@@ -449,6 +489,82 @@ class interface:
         conn.close()
 
         return results
+
+    def open_file(self, writer : str, run_id : int, file_name : str):
+        # Note: partition will split on the first dot, most pathlib utils on the last.
+        # We want to split on the first dot to separate
+        # run00042.mid.lz4 -> (run00042, mid.lz4)
+        file_base, _, file_ext = file_name.partition('.')
+
+        conn = connect(self.user, self.password)
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO state.file_list (run_id, filebase, fileext, producer, status)
+                VALUES (%s, %s, %s, %s, 'RUNNING') RETURNING id
+                """, (run_id, file_base, file_ext, writer)
+            )
+            result = cursor.fetchone()
+        conn.commit()
+        conn.close()
+        return result[0] if result else None
+
+    def close_files_in_channel(self, logger_channel : int):
+        conn = connect(self.user, self.password)
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE state.file_list
+                SET status = 'DONE'
+                WHERE utils.is_running(status)
+                AND producer = %s
+                RETURNING id
+                """, (f"logger_{logger_channel}", )
+            )
+            file_ids = cursor.fetchall()
+        conn.commit()
+        conn.close()
+        return [i[0] for i in file_ids]
+
+    def update_file_status(self, file_id : int, status : str):
+        conn = connect(self.user, self.password)
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE state.file_list SET status = %s WHERE id = %s", (status, file_id))
+        conn.commit()
+        conn.close()
+
+    def find_files(self, run_ids : int | list[int], extensions : str | list[str]):
+        if isinstance(extensions, str):
+            extensions = [extensions]
+        if isinstance(run_ids, int):
+            run_ids = [run_ids]
+        conn = connect(self.user, self.password)
+        with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT * FROM state.file_list
+                WHERE run_id = ANY(%s) AND fileext = ANY(%s)
+                ORDER BY filebase
+                """, (run_ids, extensions)
+            )
+            result = cursor.fetchall()
+        conn.close()
+        return result
+
+    def find_job_file(self, job_id : int):
+        conn = connect(self.user, self.password)
+        with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT fl.* FROM state.file_list AS fl
+                JOIN state.postproc_job AS ppj
+                ON ppj.file_id = fl.id
+                WHERE ppj.id = %s
+                """, (job_id,)
+            )
+            result = cursor.fetchone()
+        conn.close()
+        return result
 
     def log_sc_values(self, midas_run_number : int, reason : str, log_values : list[dict]) -> None:
         conn = connect(user = self.user, password = self.password)

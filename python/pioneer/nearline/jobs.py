@@ -60,18 +60,21 @@ class BaseJob:
             raise RuntimeError("Finalise called before job was finished")
         status = 'DONE' if self.rc == 0 else 'FAILED'
         self.db.update_status(self.table, self.config['job_id'], status)
+        return status
 
-    def raw_midas_files(self):
+    def raw_midas_files(self, include_sidecars = False):
         parent_path = Path(self.config['input'])
-        run_number = self.config['midas_run_number']
-        if glob_input_files:
-            return list(parent_path.glob(f"run{run_number:05d}.mid.*"))
-        else:
-            return [
-                parent_path / f"run{run_number:05d}.mid.lz4",
-                parent_path / f"run{run_number:05d}.mid.crc32c",
-                parent_path / f"run{run_number:05d}.mid.lz4.crc32c",
-            ]
+        run_id = self.config['job_id']
+        file_list = self.db.find_files(run_id, "mid.lz4")
+        files = list()
+        for aFile in file_list:
+            files.append(parent_path / f"{aFile['filebase']}.mid.lz4")
+            if include_sidecars:
+                files.extend([
+                    parent_path / f"{aFile['filebase']}.mid.crc32c",
+                    parent_path / f"{aFile['filebase']}.mid.lz4.crc32c",
+                ])
+        return files
 
     @property
     def job_type(self):
@@ -93,32 +96,55 @@ class RsyncJob(BaseJob):
     that SSH keys are configured for remote transfers.
     """
     def build_command(self):
-        return ['rsync', '-av', *self.raw_midas_files(), self.config[self.config['job_type'].lower()]]
+        return ['rsync', '-av', *self.raw_midas_files(include_sidecars = True), self.config[self.config['job_type'].lower()]]
 
 class GaudiJob(BaseJob):
     """
     This launches nearline processing on a midas file and represents
     the backbone of the nearline software.
     """
+    def __init__(self, config, iface):
+        super().__init__(config, iface)
+        self.infile = self.db.find_job_file(config['job_id'])
+        self.out_file_id = None
+
     def format_config_file(self) -> Path:
         template_path = Path(__file__).resolve().parent / "template_config.py"
+        if self.infile is None:
+            raise RuntimeError("input file not found in database")
+
+        input_file_path  = Path(self.config['input'])  / f"{self.infile['filebase']}.{self.infile['fileext']}"
+        out_file_name = f"{self.infile['filebase']}.{self.infile['fileext']}"
+        output_file_path = Path(self.config['output']) / out_file_name
+        cfg_file_name = f"{self.infile['filebase']}.py"
 
         cfg_template = Template(template_path.read_text())
         cfg_str = cfg_template.substitute(
-            author = "Me"
+            author   = "Me",
+            in_file  = input_file_path,
+            out_file = output_file_path
         )
 
-        opt_file = Path(self.config['output']) / f"config{self.config['midas_run_number']:05d}.py"
+        opt_file = Path(self.config['output']) / cfg_file_name
         opt_file.write_text(cfg_str)
 
         return opt_file
 
     def build_command(self):
         opt_file = self.format_config_file()
+        return ['gaudirun.py', str(opt_file)]
 
-        return [
-            'gaudirun.py', str(opt_file)
-        ]
+    def start(self):
+        # start job first, then register the file to the database.
+        # if job start throws, the file is not entered to the database.
+        result = super().start()
+        self.out_file_id = self.db.open_file('nearline', self.config['run_id'], f"{self.infile['filebase']}.root")
+        return result
+
+    def finalise(self):
+        status = super().finalise()
+        self.db.update_file_status(self.out_file_id, status)
+        return status
 
 class CleanJob(BaseJob):
     """
@@ -127,20 +153,19 @@ class CleanJob(BaseJob):
     completed and the raw data was backed up to HDD and remote locations.
     """
     def build_command(self):
-        input_files = self.raw_midas_files()
+        input_files = self.raw_midas_files(include_sidecars = True)
         return ['rm', '-rf', *input_files]
 
 
 class MergeJob(BaseJob):
     """
     Combine a bunch of individual histograms to form a combined measurement.
-    This is a wrapper around `hadd`
+    This is a wrapper around `hadd`. It does not take care of any normalisation.
     """
     def build_command(self):
         input_path = Path(self.config["input"])
         cmd = ['hadd', self.config["output"]]
-        for r in self.config["midas_run_numbers"]:
-            cmd.append(input_path / f"run{r:05d}.root")
+        cmd.extend([input_path / f"{f['filebase']}.root" for f in self.db.find_files(self.config['midas_run_ids'], "root")])
         return cmd;
 
     @property
