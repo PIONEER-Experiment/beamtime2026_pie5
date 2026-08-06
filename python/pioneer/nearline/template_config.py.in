@@ -1,0 +1,92 @@
+# Note, this file is provided as first placeholder that goes beyond
+# "here be a config file". This is not yet ready for production.
+
+from pathlib import Path
+
+# formatting happens here.
+# Note that placeholders are all inside strings.
+# if anything else is required, cast them from strings
+# rather than just assuming everyone being smart enough
+# to guess the right type you intended to be used.
+# Also, substituting inside strings makes this template
+# fully correct python for pylance and any other tool
+# that tries to guess python syntax.
+author     = "$author"
+in_file    = Path("$in_file")
+out_file   = Path("$out_file")
+
+
+# here be gaudi imports
+
+# Configurables from Gaudi itself
+from Configurables import (
+    EvtDataSvc,
+    EvtPersistencySvc,
+)
+
+from Gaudi.Configuration import *
+
+# Configurables from shared gaudi library
+from shared.PiGaudiSharedSvcConf import (
+    PIAOutputStream,
+    PIDataModelSvc,
+    PIHeaderSvc,
+)
+
+
+from pi_midas.PIONEER_MIDAS_READERConf import (
+    PIMidasSelector,
+    PIMidasConversionSvc,
+    PIMidasDecoder,
+    PITMidasMusip,
+)
+
+# here be services
+services = []
+services.append(PIHeaderSvc())
+selector = PIMidasSelector("EventSelector")
+selector.file = in_file
+selector.require = "any"
+selector.banks = ["H000"]
+services.append(selector)
+
+services.append(PIMidasConversionSvc("ConversionSvc"))
+services.append(EvtDataSvc())
+services.append(PIDataModelSvc())
+
+header_svc = PIHeaderSvc()
+header_svc.files = ["geoheader.root"]
+services.append(header_svc)
+
+persistency = EvtPersistencySvc()
+persistency.CnvServices = ["PIMidasConversionSvc/ConversionSvc"]
+services.append(persistency)
+
+audit = AuditorSvc()
+audit.Auditors += [ChronoAuditor()]
+services.append(audit)
+
+# here be productive algorithm
+algorithms = []
+decoder = PIMidasDecoder()
+musipTool = PITMidasMusip()
+musipTool.quadPixelPitch = 0.080
+decoder.decoders = [musipTool]
+decoder.AuditExecute = True
+algorithms.append(decoder)
+
+# here be the actual reconstruction flow
+
+# here be dragons hoarding outputs
+outputs = []
+out_stream = PIAOutputStream()
+out_stream.destination = out_file
+outputs.append(out_stream)
+
+# here be the the application manager knitting things together
+theManager = ApplicationMgr()
+theManager.EvtMax = -1
+theManager.OutputLevel = INFO
+theManager.TopAlg = algorithms
+theManager.ExtSvc = services
+theManager.OutStream = outputs
