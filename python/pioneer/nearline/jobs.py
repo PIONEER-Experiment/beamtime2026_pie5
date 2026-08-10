@@ -1,4 +1,6 @@
+import os
 import subprocess
+import sys
 
 from pathlib import Path
 from string import Template
@@ -9,10 +11,16 @@ from pioneer.rundb.interface import interface as db_interface
 # by using glob. Otherwise, an explicit list is used.
 glob_input_files = False
 
-# Set this flag to True for debugging purpose only. It will
-# print the shell command instead of executing it and execute
-# a sleep command instead.
-dry_run_all_jobs = True
+# Job types listed here execute their real command; every other type prints the
+# command and runs a short sleep instead (the old dry_run_all_jobs behaviour,
+# now per-type). The default enables only 'nearline': on the bench, 'cleanup'
+# would rm -rf the raw run files and 'merge' calls an hadd that is not
+# installed, so they must stay dry until each is deliberately enabled with e.g.
+#   NEARLINE_REAL_JOBS=nearline,backup
+REAL_JOB_TYPES = frozenset(
+    t.strip()
+    for t in os.environ.get("NEARLINE_REAL_JOBS", "nearline").split(",")
+    if t.strip())
 
 class BaseJob:
     """
@@ -41,8 +49,8 @@ class BaseJob:
 
     def start(self):
         cmd = self.build_command()
-        if (dry_run_all_jobs):
-            print(" ".join([str(c) for c in cmd]))
+        if self.job_type.lower() not in REAL_JOB_TYPES:
+            print("dry run:", " ".join([str(c) for c in cmd]))
             self.proc = subprocess.Popen(['sleep', '2'])
         else:
             self.proc = subprocess.Popen(cmd)
@@ -146,6 +154,45 @@ class GaudiJob(BaseJob):
         self.db.update_file_status(self.out_file_id, status)
         return status
 
+class WdScalarJob(BaseJob):
+    """
+    Nearline processing for the UW wavedream bench: run the scalar-extraction
+    script over the raw midas file, producing <filebase>.scalars.json in the
+    nearline output directory. Structure mirrors GaudiJob (file registration
+    included) so swapping the real Gaudi pipeline back in stays a one-line
+    change in create_job.
+
+    Environment: NEARLINE_SCALAR_SCRIPT must point at the extraction script
+    (wavedream-scalar-readout/analysis/extract_scalars.py); WDS_PYTHON selects
+    the interpreter, falling back to the daemon's own.
+    """
+    def __init__(self, config, iface):
+        super().__init__(config, iface)
+        self.infile = self.db.find_job_file(config['job_id'])
+        self.out_file_id = None
+
+    def build_command(self):
+        if self.infile is None:
+            raise RuntimeError("input file not found in database")
+        python = os.environ.get("WDS_PYTHON", sys.executable)
+        script = os.environ["NEARLINE_SCALAR_SCRIPT"]
+        in_path  = Path(self.config['input'])  / f"{self.infile['filebase']}.{self.infile['fileext']}"
+        out_path = Path(self.config['output']) / f"{self.infile['filebase']}.scalars.json"
+        return [python, script, str(in_path), '--out', str(out_path)]
+
+    def start(self):
+        # start job first, then register the file to the database.
+        # if job start throws, the file is not entered to the database.
+        result = super().start()
+        self.out_file_id = self.db.open_file('nearline', self.config['run_id'], f"{self.infile['filebase']}.scalars.json")
+        return result
+
+    def finalise(self):
+        status = super().finalise()
+        self.db.update_file_status(self.out_file_id, status)
+        return status
+
+
 class CleanJob(BaseJob):
     """
     Call a simple cleanup routine that removes the input files.
@@ -190,7 +237,9 @@ def create_job(config, iface) -> BaseJob:
         "remote"  : RsyncJob,
         "backup"  : RsyncJob,
         "gaudi"   : GaudiJob,
-        "nearline": GaudiJob,
+        # The bench nearline stage is scalar extraction; the Gaudi pipeline
+        # stays reachable under its own name.
+        "nearline": WdScalarJob,
         "cleanup" : CleanJob,
         "merge"   : MergeJob
     }

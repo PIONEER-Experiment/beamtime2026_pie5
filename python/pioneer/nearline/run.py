@@ -102,6 +102,21 @@ def five_point_sequence(iface : db_interface):
     mrs.set_on_complete("merge mt_add")
     return mrs
 
+
+def bench_sequence(iface : db_interface, seq_id : int = 1, on_complete : str = "mt_add"):
+    """The UW wavedream bench variant of five_point_sequence.
+
+    seq_id selects the target_position pattern: 1 is the centre-only single
+    run (fast loop turnaround), 2 the production 5-point pattern. on_complete
+    omits 'merge' by default -- the bench nearline stage produces per-run
+    scalars.json files that the daemon's mt_add branch aggregates itself, and
+    there are no ROOT histograms to hadd.
+    """
+    mrs = midas_run_sequence(iface)
+    mrs.set_config_seq("target_position", seq_id)
+    mrs.set_on_complete(on_complete)
+    return mrs
+
 if __name__ == "__main__":
     iface = db_interface("bot", "bot")
 
