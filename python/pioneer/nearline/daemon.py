@@ -2,10 +2,11 @@
 import pioneer.rundb.interface
 import pioneer.nearline.jobs as nl_jobs
 import pioneer.nearline.run as nl_run
-from pioneer.nearline.miniTwinInterface import miniTwinInterface as mt_iface
+from pioneer.nearline.beamtune_client import NearlineTwinInterface
 
 import midas.client        # connect to MIDAS ODB
 import argparse            # parsing command line arguments
+import json                # nearline scalar payloads
 import os                  # os.path.join
 import sys                 # identify executable and obtain complete list of arguments passed
 import shlex               # To parse the start_cmd
@@ -120,11 +121,30 @@ class NearlineDaemon:
             callback = self.end_of_run_callback
         )
 
+        # Without these watches no file ever enters state.file_list: the
+        # filename_change_callback below is what records each file mlogger
+        # opens, and finish_file()/the nearline jobs all key off those rows.
+        for log_channel in self.client.odb_get("/Logger/Channels", just_key_list = True):
+            self.client.odb_watch(
+                f"/Logger/Channels/{log_channel}/Settings/Current filename",
+                self.filename_change_callback
+            )
+
         self.sleep_time = 1000
         self.db_interface = pioneer.rundb.interface.interface(user = kDbUser, password = kDbPwd)
 
-        # Proper mini twin initialisation goes here.
-        self.mt_interface = mt_iface()
+        # The tuning service ("minitwin"). Same four methods as the old
+        # miniTwinInterface mock; it never raises and never blocks for long,
+        # which mainloop depends on. initial_knobs mirrors the wdscalar
+        # backend's initial_currents so the first context can be built even
+        # if the service is unreachable at that moment.
+        self.mt_interface = NearlineTwinInterface(
+            base_url = os.environ.get("BEAMTUNE_URL", "http://127.0.0.1:8420"),
+            file_root = self.nearline_output_path,
+            config_type = "dummy",
+            value_format = str,          # config.dummy columns are TEXT
+            initial_knobs = {"p1": 5.0, "p2": 5.0},
+        )
 
 
     def message(self, msg, is_error = False, send_to_slack = False):
@@ -164,11 +184,38 @@ class NearlineDaemon:
             theJob.start()
             self.sequence_queue.add(theJob)
         elif "mt_add" in on_complete:
-            # This sequence does not merge but adds all runs
-            # As this operation is fast, we'll do it right here
+            # This sequence does not merge but adds all runs.
+            # As this operation is fast, we'll do it right here: read the
+            # per-run scalars.json the nearline jobs produced, aggregate the
+            # objective, and hand the whole thing to the tuning service
+            # inline -- no shared-filesystem assumption on the service side.
             run_ids = self.db_interface.get_all_runs_in_sequence(seq_cfg['id'])
-            files = self.db_interface.find_files(run_ids, "root")
-            self.mt_interface.AddContextFiles(files)
+            files = self.db_interface.find_files(run_ids, "scalars.json")
+            runs, unreadable = [], []
+            for row in files:
+                path = self.nearline_output_path / f"{row['filebase']}.{row['fileext']}"
+                try:
+                    runs.append(json.loads(path.read_text()))
+                except (OSError, ValueError) as e:
+                    unreadable.append(f"{path} ({e})")
+            if unreadable:
+                self.message(
+                    f"Sequence {seq_cfg['id']}: skipping unreadable scalar files: "
+                    + "; ".join(unreadable), is_error = True)
+            values = [r['sum_rate_hz'] for r in runs
+                      if isinstance(r.get('sum_rate_hz'), (int, float))]
+            ctxt = {
+                "context_id": f"wds-seq{seq_cfg['id']:05d}",
+                "run_ids": run_ids,
+                "inline": {"scalars": {"runs": runs}},
+            }
+            if values:
+                ctxt["objective"] = {"name": "sum_scaler_rate",
+                                     "value": sum(values) / len(values)}
+            self.mt_interface.AddContext(ctxt)
+            # Close the sequence out. Without this it stays CLAIMED forever
+            # and the state machine never records the loop as finished.
+            self.db_interface.update_status("run_sequence", seq_cfg['id'], "DONE")
 
     def communicate_with_midas(self):
         if (self.client):
@@ -199,7 +246,6 @@ class NearlineDaemon:
                     self.dispatch_job(aQueue, aConfig)
 
     def iterate_sequences(self):
-        print("iterate_sequences")
         finished_jobs = self.sequence_queue.get_finshed()
         for aJob in finished_jobs:
             print("Finalising job")
@@ -218,18 +264,38 @@ class NearlineDaemon:
         if len(new_configs) > 0:
             mrs = nl_run.midas_run_sequence(self.db_interface)
             mrs.set_config_list("dummy", new_configs)
-            mrs.set_subsequence(nl_run.five_point_sequence(self.db_interface))
+            # NEARLINE_TARGET_SEQ selects runs per scan point: 1 (default) is
+            # the centre-only single run, 2 the production 5-point pattern.
+            mrs.set_subsequence(nl_run.bench_sequence(
+                self.db_interface,
+                seq_id = int(os.environ.get("NEARLINE_TARGET_SEQ", "1"))))
             mrs.schedule()
 
     def filename_change_callback(self, client, path, value):
         # path should be
         # /Logger/Channels/<log_channel>/Settings/Current filename
-        log_channel = path.split("/")[3]
-        self.finish_file(log_channel)
-        run_db_pk = 0
-        if client.odb_exists("/Runinfo/Run DB PK"):
-            run_db_pk = client.odb_get("/Runinfo/Run DB PK")
-        self.db_interface.open_file(f"logger_{log_channel}", run_db_pk, value)
+        #
+        # Guarded: this runs inside client.communicate(), where an escaped
+        # exception (a DB hiccup, most likely) would take the whole daemon
+        # down with it.
+        try:
+            log_channel = path.split("/")[3]
+            self.finish_file(log_channel)
+            run_db_pk = 0
+            if client.odb_exists("/Runinfo/Run DB PK"):
+                run_db_pk = client.odb_get("/Runinfo/Run DB PK")
+            if run_db_pk == 0:
+                # mlogger announces the new filename at an earlier transition
+                # sequence than our TR_START callback, so on a manually
+                # started run the PK may not exist yet. Register the run here
+                # rather than insert a file row with a violating run_id = 0;
+                # start_of_run_callback then finds the PK already set.
+                run_db_pk = self.db_interface.register_run(status = "RUNNING")
+                client.odb_set("/Runinfo/Run DB PK", run_db_pk)
+            self.db_interface.open_file(f"logger_{log_channel}", run_db_pk, value)
+        except Exception as e:
+            self.message(f"filename_change_callback failed for {path}: {e!r}",
+                         is_error = True)
 
     # Small sub-routine to properly close out a file writing for a
     # specific channel. May be called either from filename_change_callback
@@ -271,17 +337,23 @@ class NearlineDaemon:
 
     def mainloop(self):
         while True:
-            # Step 1: Communicate with midas
+            # Step 1: Communicate with midas. Deliberately unguarded: losing
+            # MIDAS is fatal, and should be.
             self.communicate_with_midas()
 
-            # Step 2: Iterate nearline job queues
-            self.iterate_nearline_queues()
-
-            # Step 3: Iterate on sequences, identifying the ones that are completed.
-            self.iterate_sequences()
-
-            # Step 4: Poll update strategies for new configuration
-            self.check_for_updates()
+            # Steps 2-4 all touch the run database (and, in step 4, the
+            # tuning service). Each is guarded individually so a transient
+            # outage of either degrades this iteration instead of killing
+            # the daemon -- which is also the DAQ's transition handler.
+            for step in (
+                    self.iterate_nearline_queues,   # Step 2: job queues
+                    self.iterate_sequences,         # Step 3: completed sequences
+                    self.check_for_updates):        # Step 4: new configurations
+                try:
+                    step()
+                except Exception as e:
+                    self.message(f"{step.__name__} failed: {e!r}; continuing",
+                                 is_error = True)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Good Luck Have Fun - I did not yet write documentation for this")
