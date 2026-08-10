@@ -16,4 +16,7 @@ source "$SCRIPT_DIR/wdscalers-db-env.sh"
 
 export PYTHONPATH="$REPO/python${PYTHONPATH:+:$PYTHONPATH}"
 
-exec "$WDS_PYTHON" -m pioneer.rundb.logger --midas-expt "$WDS_EXPT_NAME"
+# --midas-host "" = attach to the local shared memory. The logger's built-in
+# default is "localhost", which is not local at all in MIDAS terms: it selects
+# the mserver RPC path, and no mserver runs on this machine.
+exec "$WDS_PYTHON" -m pioneer.rundb.logger --midas-expt "$WDS_EXPT_NAME" --midas-host ""

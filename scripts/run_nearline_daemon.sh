@@ -36,5 +36,7 @@ export NEARLINE_TARGET_SEQ="${NEARLINE_TARGET_SEQ:-1}"
 # The tuning service.
 export BEAMTUNE_URL="${BEAMTUNE_URL:-http://127.0.0.1:8420}"
 
+# --midas-host "" = attach to the local shared memory rather than the mserver
+# RPC path that the "localhost" default would select (no mserver runs here).
 exec "$WDS_PYTHON" "$REPO/python/pioneer/nearline/daemon.py" \
-    --midas-expt "$WDS_EXPT_NAME" -j 1
+    --midas-expt "$WDS_EXPT_NAME" --midas-host "" -j 1
