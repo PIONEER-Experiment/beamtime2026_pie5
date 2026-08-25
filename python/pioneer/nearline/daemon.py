@@ -155,6 +155,7 @@ class NearlineDaemon:
         on_complete = seq_cfg['on_complete'].split()
         if "merge" in on_complete:
             seq_cfg['input'] = self.nearline_output_path
+            seq_cfg['cfg_file'] = self.nearline_output_path / f"seq{seq_cfg['id']:05d}.json" 
             seq_cfg['output'] = self.nearline_output_path / f"seq{seq_cfg['id']:05d}.root"
             seq_cfg['job_type'] = "merge"
             seq_cfg['job_id'] = seq_cfg['id']

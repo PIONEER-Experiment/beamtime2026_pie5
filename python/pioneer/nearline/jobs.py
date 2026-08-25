@@ -1,4 +1,6 @@
 import subprocess
+import sys
+import json
 
 from pathlib import Path
 from string import Template
@@ -45,7 +47,7 @@ class BaseJob:
             print(" ".join([str(c) for c in cmd]))
             self.proc = subprocess.Popen(['sleep', '2'])
         else:
-            self.proc = subprocess.Popen(cmd)
+            self.proc = subprocess.Popen(cmd, start_new_session = True)
         self.db.update_status(self.table, self.config['job_id'], self.processing_status)
         return self.proc
 
@@ -159,13 +161,27 @@ class CleanJob(BaseJob):
 
 class MergeJob(BaseJob):
     """
-    Combine a bunch of individual histograms to form a combined measurement.
-    This is a wrapper around `hadd`. It does not take care of any normalisation.
+    Combine nearline ROOT files belonging to a run sequence.
+    The exact logic is detailed in `combine_files.py`
     """
-    def build_command(self):
+
+    def build_job_description_file(self):
         input_path = Path(self.config["input"])
-        cmd = ['hadd', self.config["output"]]
-        cmd.extend([input_path / f"{f['filebase']}.root" for f in self.db.find_files(self.config['midas_run_ids'], "root")])
+        config = {
+            "output" : str(self.config["output"]),
+            "runs"   : {
+                f"{run_id}" : [str(input_path / f"{f['filebase']}.root") for f in self.db.find_files([run_id], "root")]
+                for run_id in self.config['midas_run_ids']
+            }
+        }
+        cfg_file_path = Path(self.config['cfg_file'])
+        with cfg_file_path.open("w") as f:
+            json.dump(config, f, indent = 2)
+
+        return cfg_file_path
+
+    def build_command(self):
+        cmd = [sys.executable, "-m", "pioneer.nearline.combine_files", str(self.build_job_description_file())]
         return cmd;
 
     @property
