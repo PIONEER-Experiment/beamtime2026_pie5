@@ -1,8 +1,8 @@
 
 
-import psycopg2
-import psycopg2.sql
-import psycopg2.extras
+import psycopg
+import psycopg.sql
+import psycopg.rows
 
 from pioneer.rundb.config import connect
 
@@ -31,7 +31,7 @@ class interface:
 
     def load_run_config(self, job_id) -> dict | None:
         conn = connect(self.user, self.password)
-        with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cursor:
+        with conn.cursor(row_factory = psycopg.rows.dict_row) as cursor:
             # Find job configuration
             cursor.execute(
                 """
@@ -60,7 +60,7 @@ class interface:
 
         configuration = dict()
 
-        with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cur:
+        with conn.cursor(row_factory = psycopg.rows.dict_row) as cur:
             for cfg in configs:
                 try:
                     table = cfg["config_type"]
@@ -103,13 +103,13 @@ class interface:
 
     def load_config(self, table_name : str, cfg_id : int) -> dict | None:
         conn = connect(self.user, self.password)
-        with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cursor:
-            table_ident = psycopg2.sql.Identifier(table_name)
-            query = psycopg2.sql.SQL(
+        with conn.cursor(row_factory = psycopg.rows.dict_row) as cursor:
+            table_ident = psycopg.sql.Identifier(table_name)
+            query = psycopg.sql.SQL(
                     "SELECT * FROM config.{table} WHERE id = {value}"
                 ).format(
                     table=table_ident,
-                    value=psycopg2.sql.Placeholder(),
+                    value=psycopg.sql.Placeholder(),
                 )
             cursor.execute(
                 query, (cfg_id,)
@@ -119,14 +119,14 @@ class interface:
 
     def load_config_sequence(self, table_name : str, seq_id : int):
         conn = connect(self.user, self.password)
-        with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cursor:
-            table_ident = psycopg2.sql.Identifier(table_name)
+        with conn.cursor(row_factory = psycopg.rows.dict_row) as cursor:
+            table_ident = psycopg.sql.Identifier(table_name)
 
-            query = psycopg2.sql.SQL(
+            query = psycopg.sql.SQL(
                     "SELECT * FROM config.{table} WHERE seq_id = {value}"
                 ).format(
                     table=table_ident,
-                    value=psycopg2.sql.Placeholder(),
+                    value=psycopg.sql.Placeholder(),
                 )
             cursor.execute(
                 query, (seq_id,)
@@ -265,7 +265,7 @@ class interface:
         try:
             with conn.cursor() as cursor:
                 # Create the parent table entry first
-                table_ident = psycopg2.sql.Identifier(table)
+                table_ident = psycopg.sql.Identifier(table)
                 cursor.execute(
                     "INSERT INTO config.configuration (config_type) VALUES (%s) RETURNING id",
                     (table, )
@@ -276,15 +276,15 @@ class interface:
                 value_list = [values[col] for col in columns]
 
 
-                columns_ident = psycopg2.sql.SQL(', ').join(
-                    psycopg2.sql.Identifier(col) for col in columns
+                columns_ident = psycopg.sql.SQL(', ').join(
+                    psycopg.sql.Identifier(col) for col in columns
                 )
-                placeholders = psycopg2.sql.SQL(', ').join(
-                    psycopg2.sql.Placeholder() for _ in columns
+                placeholders = psycopg.sql.SQL(', ').join(
+                    psycopg.sql.Placeholder() for _ in columns
                 )
 
 
-                query = psycopg2.sql.SQL(
+                query = psycopg.sql.SQL(
                     "INSERT INTO config.{table} ({columns}) VALUES ({values}) RETURNING id"
                 ).format(
                     table=table_ident,
@@ -365,7 +365,7 @@ class interface:
 
     def find_sequences(self, status : str, limit : int = 1) -> list[dict]:
         conn = connect(user = self.user, password = self.password)
-        with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cursor:
+        with conn.cursor(row_factory = psycopg.rows.dict_row) as cursor:
             cursor.execute(
                 "SELECT * FROM state.run_sequence WHERE status = %s LIMIT %s", (status, limit)
             )
@@ -374,7 +374,7 @@ class interface:
 
     def claim_sequences(self, limit : int = 1) -> list[dict]:
         conn = connect(user = self.user, password = self.password)
-        with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cursor:
+        with conn.cursor(row_factory = psycopg.rows.dict_row) as cursor:
             cursor.execute(
                     """
                     WITH claimed AS (
@@ -398,7 +398,7 @@ class interface:
 
     def get_sequence_entry(self, id : int) -> dict | None:
         conn = connect(user = self.user, password = self.password)
-        with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cursor:
+        with conn.cursor(row_factory = psycopg.rows.dict_row) as cursor:
             cursor.execute(
                 "SELECT * FROM state.run_sequence WHERE id = %s", (id, )
             )
@@ -419,13 +419,13 @@ class interface:
         conn = connect(user = self.user, password = self.password)
         retVal = True
         with conn.cursor() as cursor:
-            table_ident = psycopg2.sql.Identifier(table)
-            query = psycopg2.sql.SQL(
+            table_ident = psycopg.sql.Identifier(table)
+            query = psycopg.sql.SQL(
                     "UPDATE state.{table} SET status = {status} WHERE id = {value}"
                 ).format(
                     table=table_ident,
-                    status = psycopg2.sql.Placeholder(),
-                    value=psycopg2.sql.Placeholder(),
+                    status = psycopg.sql.Placeholder(),
+                    value=psycopg.sql.Placeholder(),
                 )
             cursor.execute(
                 query, (new_status, id)
@@ -463,7 +463,7 @@ class interface:
         """
         conn = connect(user = self.user, password = self.password)
         conn.autocommit = True
-        with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cursor:
+        with conn.cursor(row_factory = psycopg.rows.dict_row) as cursor:
             cursor.execute(
                     """
                     WITH claimed AS (
@@ -539,7 +539,7 @@ class interface:
         if isinstance(run_ids, int):
             run_ids = [run_ids]
         conn = connect(self.user, self.password)
-        with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cursor:
+        with conn.cursor(row_factory = psycopg.rows.dict_row) as cursor:
             cursor.execute(
                 """
                 SELECT * FROM state.file_list
@@ -553,7 +553,7 @@ class interface:
 
     def find_job_file(self, job_id : int):
         conn = connect(self.user, self.password)
-        with conn.cursor(cursor_factory = psycopg2.extras.RealDictCursor) as cursor:
+        with conn.cursor(row_factory = psycopg.rows.dict_row) as cursor:
             cursor.execute(
                 """
                 SELECT fl.* FROM state.file_list AS fl
