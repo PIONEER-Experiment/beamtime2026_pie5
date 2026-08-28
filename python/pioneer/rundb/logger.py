@@ -177,6 +177,7 @@ class Logger:
             # No update threshold provided. This is typical for demand/request values.
             # We assume that any change is user-driven and thereby should be logged.
             upd_thr = [ 0 for _ in value_list ]
+        upd_thr = assert_list(upd_thr)
 
         if len(upd_thr) < len(value_list):
             print("Size mismatch detected between update thresholds and value dimension for equipment", equip.name)
