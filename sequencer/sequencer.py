@@ -2,17 +2,15 @@ from midas.sequencer import SequenceClient
 import midas
 
 from pioneer.rundb.interface import interface
+from pioneer.sequencer.config_loader import load_config
+
 db_interface = interface(user = "bot", password = "bot")
 
 def load_config_to_odb(seq : SequenceClient):
     aConfig = db_interface.find_next_run_config()
     if aConfig is None:
         return False
-    # Add code here that pushes each configuration to the ODB.
-    # it might be reasonable to outsource this to dedicated python
-    # modules that get imported
-    seq.sequencer_msg(f"Loaded configuration {aConfig.__repr__()}")
-    seq.odb_set("/Runinfo/Run DB PK", int(aConfig['job_id']))
+    load_config(seq, aConfig, sequential = True)
     return True
 
 def execute_run(seq : SequenceClient):
