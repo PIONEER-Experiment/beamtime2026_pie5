@@ -18,12 +18,21 @@ def load_config_to_odb(seq : SequenceClient):
 def execute_run(seq : SequenceClient):
     numOfEvents = seq.get_param("nEv")
     seq.start_run()
+    run_id = seq.odb_get("/Runinfo/Run DB PK")
+    run_nr = seq.odb_get("/Runinfo/Run number")
+    # call start of midas run here as fail save.
+    # The nearline daemon should have registered during transition
+    db_interface.start_of_midas_run(run_id, run_nr)
+
     # This is where the actual run happens.
     # The wait_seconds needs to be replaced by a more reasonable
     # wait until completion logic, e.g. total number of events
     # sent by a specific frontend or some integrated beam quantity.
     seq.wait_seconds(numOfEvents)
     seq.stop_run()
+    # Again, fail save as the nearline daemon should have scheduled
+    # picked up everything during transition.
+    db_interface.end_of_midas_run(run_id)
     return True
 
 def define_params(seq : SequenceClient):

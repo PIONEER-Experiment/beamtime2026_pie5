@@ -378,6 +378,10 @@ EXECUTE FUNCTION state.set_postproc_job_priority();
 CREATE INDEX idx_postproc_job_status
 ON state.postproc_job(status);
 
+CREATE UNIQUE INDEX postproc_job_run_type_unique
+ON state.postproc_job(midas_run_id, file_id, job_type)
+NULLS NOT DISTINCT;
+
 -- a dependency table. Make sure some jobs reach DONE status
 -- before starting some other job. You want the cleanup to
 -- start only after the raw data has been processed, backed up

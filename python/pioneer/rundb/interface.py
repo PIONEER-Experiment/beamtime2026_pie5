@@ -169,7 +169,7 @@ class interface:
             cursor.execute(
                 """
                 INSERT INTO state.postproc_job (midas_run_id, job_type, status)
-                VALUES (%s, %s, 'PENDING') RETURNING id
+                VALUES (%s, %s, 'PENDING') ON CONFLICT DO NOTHING RETURNING id
                 """, (run_id, task)
             )
             job_id = cursor.fetchone()[0]
@@ -187,6 +187,7 @@ class interface:
                 SELECT fl.run_id, fl.id, %s, 'PENDING'
                 FROM state.file_list AS fl
                 WHERE fl.id = %s
+                ON CONFLICT DO NOTHING
                 RETURNING id
                 """, (task, file_id)
             )
@@ -205,41 +206,59 @@ class interface:
                 UPDATE state.midas_run
                 SET
                     status = 'DONE'
-                WHERE id = %s
+                WHERE id = %s AND status IS DISTINCT FROM 'DONE'
                 RETURNING midas_run_number
                 """,
                 (run_id,)
             )
             result = cursor.fetchone()
             if result is None:
-                return False
+                # No update was done. This is either because
+                # a) no such run exists (bad)
+                # b) it was already updated (fine)
+                cursor.execute(
+                    """
+                    SELECT 1 FROM state.midas_run WHERE id = %s
+                    """, (run_id, )
+                )
+                result2 = cursor.fetchone()
 
-        # Schedule the analysis jobs.
+                # roll back and close the connection for good measure
+                conn.rollback()
+                conn.close()
+                if result2 is None:
+                    # run id does not exist, return False
+                    return False
+                else:
+                    # run id exists, but was already in 'DONE' state.
+                    return True
+
         if (schedule_post_processing):
+            # Schedule the backup jobs.
             self.schedule_postproc_job(run_id, 'backup')
             self.schedule_postproc_job(run_id, 'remote')
 
-        # Create the cleanup job. This one does feature dependencies
-        # Hence a more complex fill that the typical schedule_postproc_job
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                WITH new_job AS (
-                    INSERT INTO state.postproc_job (midas_run_id, job_type, status)
-                    VALUES (%s, 'cleanup', 'PENDING')
-                    RETURNING id, midas_run_id
+            # Create the cleanup job. This one does feature dependencies
+            # Hence a more complex fill than the typical schedule_postproc_job
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    WITH new_job AS (
+                        INSERT INTO state.postproc_job (midas_run_id, job_type, status)
+                        VALUES (%s, 'cleanup', 'PENDING') ON CONFLICT DO NOTHING
+                        RETURNING id, midas_run_id
+                    )
+                    INSERT INTO state.postproc_depends (pp_job_id, depends_on)
+                    SELECT
+                        new_job.id,
+                        ppj.id
+                    FROM new_job
+                    JOIN state.postproc_job AS ppj
+                    ON ppj.midas_run_id = new_job.midas_run_id
+                    WHERE ppj.id <> new_job.id;
+                    """,
+                    (run_id,),
                 )
-                INSERT INTO state.postproc_depends (pp_job_id, depends_on)
-                SELECT
-                    new_job.id,
-                    ppj.id
-                FROM new_job
-                JOIN state.postproc_job AS ppj
-                ON ppj.midas_run_id = new_job.midas_run_id
-                WHERE ppj.id <> new_job.id;
-                """,
-                (run_id,),
-            )
 
         conn.commit()
         conn.close()
