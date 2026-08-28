@@ -717,6 +717,10 @@ GRANT USAGE, SELECT ON SEQUENCE state.runs_in_sequence_id_seq  TO bot;
 GRANT UPDATE (status, midas_run_number) ON state.midas_run     TO bot;
 GRANT UPDATE (status)                   ON state.postproc_job  TO bot;
 GRANT UPDATE (status)                   ON state.run_sequence  TO bot;
+-- The daemon closes file rows at end-of-run (close_files_in_channel) and
+-- records job results on them (update_file_status); without this the EOR
+-- callback dies on permission denied and the run never leaves RUNNING.
+GRANT UPDATE (status)                   ON state.file_list     TO bot;
 
 GRANT UPDATE (upd_time, log_time) ON logs.last_sc_update TO bot;
 
