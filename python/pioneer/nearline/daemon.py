@@ -200,7 +200,6 @@ class NearlineDaemon:
                     self.dispatch_job(aQueue, aConfig)
 
     def iterate_sequences(self):
-        print("iterate_sequences")
         finished_jobs = self.sequence_queue.get_finshed()
         for aJob in finished_jobs:
             print("Finalising job")
