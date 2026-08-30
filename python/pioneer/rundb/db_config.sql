@@ -297,7 +297,8 @@ JOIN positions p USING (rn);
 -- Degrader position table
 -- This one relies on a 1 dimensional stage change degrader thicknesses
 CREATE TABLE IF NOT EXISTS config.degrader_position(
-    id INT PRIMARY KEY REFERENCES config.configuration(id), -- Reference to the main configuration table
+    id INT PRIMARY KEY REFERENCES config.configuration(id),  -- Reference to the main configuration table
+    seq_id INT DEFAULT 0,                                    -- helper to encode position sequences that are often executed together, e.g. full degrader scan
     xpos FLOAT,                                              -- position at which the stage has to be placed.
     comment TEXT                                             -- comment people may want to add. not used by the state machine.
 );
