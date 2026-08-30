@@ -303,6 +303,39 @@ CREATE TABLE IF NOT EXISTS config.degrader_position(
     comment TEXT                                             -- comment people may want to add. not used by the state machine.
 );
 
+CREATE TABLE IF NOT EXISTS config.pim1_epics (
+    id INT PRIMARY KEY REFERENCES config.configuration(id),
+    seq_id INT DEFAULT 0,
+    QTA11 FLOAT NOT NULL,
+    QTB11 FLOAT NOT NULL,
+    QTB12 FLOAT NOT NULL,
+    "FS11-L" INT NOT NULL,
+    "FS11-R" INT NOT NULL,
+    "FS11-O" INT NOT NULL,
+    "FS11-U" INT NOT NULL,
+    ASM11 FLOAT NOT NULL,
+    TS11 FLOAT NOT NULL,
+    TS12 FLOAT NOT NULL,
+    KSD11 INT NOT NULL,
+    QSL11 FLOAT NOT NULL,
+    QSL12 FLOAT NOT NULL,
+    "FS13RL-L" INT NOT NULL,
+    "FS13RL-R" INT NOT NULL,
+    QSL13 FLOAT NOT NULL,
+    QSL14 FLOAT NOT NULL,
+    "FS12-L" INT NOT NULL,
+    "FS12-R" INT NOT NULL,
+    "FS12-O" INT NOT NULL,
+    "FS12-U" INT NOT NULL,
+    ASM12 FLOAT NOT NULL,
+    TS21 FLOAT NOT NULL,
+    TS22 FLOAT NOT NULL,
+    QSL15 FLOAT NOT NULL,
+    QSL16 FLOAT NOT NULL,
+    QSL17 FLOAT NOT NULL,
+    QSL18 FLOAT NOT NULL
+);
+
 -- -------------------------
 -- STATE SCHEMA
 -- -------------------------
