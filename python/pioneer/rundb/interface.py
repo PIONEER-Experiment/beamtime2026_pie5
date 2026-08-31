@@ -86,12 +86,12 @@ class interface:
                     WHERE id = %s
                 """
 
-                print(query)
                 cur.execute(query, (config_id,))
                 row = cur.fetchone()
 
                 if row is not None:
                     row.pop("id", None)
+                    row.pop("seq_id", None)
                     configuration[table] = row
 
         # done reading DB, close connection
@@ -172,7 +172,11 @@ class interface:
                 VALUES (%s, %s, 'PENDING') ON CONFLICT DO NOTHING RETURNING id
                 """, (run_id, task)
             )
-            job_id = cursor.fetchone()[0]
+            result = cursor.fetchone()
+            if result is not None:
+                job_id = result[0]
+            else:
+                job_id = -1
         conn.commit()
         conn.close()
         return job_id
@@ -191,8 +195,11 @@ class interface:
                 RETURNING id
                 """, (task, file_id)
             )
-            # this throws if the file id is missing
-            job_id = cursor.fetchone()[0]
+            result = cursor.fetchone()
+            if result is not None:
+                job_id = result[0]
+            else:
+                job_id = -1
         conn.commit()
         conn.close()
         return job_id
