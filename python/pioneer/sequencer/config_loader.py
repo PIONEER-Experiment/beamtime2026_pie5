@@ -1,5 +1,5 @@
 from midas.sequencer import SequenceClient
-import midas
+import pioneer.sequencer.config_validate as cfg_val
 
 """
 Load a single value directly to the specified ODB path
@@ -8,7 +8,7 @@ return an empty list of validation requirements.
 """
 def load_value(seq : SequenceClient, cfg_key : str,  value : int):
     seq.odb_set(config_odb_paths[cfg_key], value)
-    return []
+    return None
 
 
 """
@@ -23,38 +23,48 @@ def load_arcus_config(seq : SequenceClient, cfg_key : str, aConfig : dict):
     # Set Demand Value
     seq.odb_set(config_odb_paths[cfg_key] + "/Variables/Demand", xpos_in_steps)
 
-    return [
-        {
-            "path"         : config_odb_paths[cfg_key] + "/Variables/Measured",
-            "op"           : "==",
-            "target"       : xpos_in_steps,
-            "timeout_secs" : 60
-        }
-    ]
+    return cfg_val.ODBRequirement(
+                seq = seq,
+                path = config_odb_paths[cfg_key] + "/Variables/Measured",
+                op = "==",
+                target =  xpos_in_steps,
+                timeout = 60
+            )
 
 def load_isel_config(seq : SequenceClient, cfg_key : str,   aConfig : dict):
-    return []
+    return None
 
 def load_beam_config(seq : SequenceClient, cfg_key : str,  aConfig : dict):
-    odb_path = config_odb_paths[cfg_key]
-    ch_names = seq.odb_get(odb_path + "/Settings/Names")
-    ca_demand = seq.odb_get(odb_path + "/Settings/CA Demand")
-    thresholds = seq.odb_get(odb_path + "/Settings/Update Threshold Measured")
+    writeable_device_types = [
+        1, # Magnets
+        2, # Beam blocker
+        4, # Separator
+        5, # Slits
+    ]
+    # 3 (PSA) and 6 (Value) are not considerd writable
+
+    odb_path    = config_odb_paths[cfg_key]
+    ca_names    = seq.odb_get(odb_path + "/Settings/CA Name")
+    ca_demand   = seq.odb_get(odb_path + "/Settings/CA Demand")
+    dev_type    = seq.odb_get(odb_path + "/Settings/Device type")
+    thresholds  = seq.odb_get(odb_path + "/Settings/Update Threshold Measured")
     demand_vals = seq.odb_get(odb_path + "/Variables/Demand")
 
-    if len(ch_names) != len(ca_demand):
-        raise RuntimeError("ODB Corrupted: EPICS names and CA Demand arrays have different dimension")
+    ch_names = [f"{cn}{cd}" for cn, cd in zip(ca_names, ca_demand)]
+
+    if len(ch_names) != len(dev_type):
+        raise RuntimeError("ODB Corrupted: EPICS names and device type arrays have different dimension")
     elif len(ch_names) != len(thresholds):
         raise RuntimeError("ODB Corrupted: EPICS names and Update Threshold Measured arrays have different dimension")
     elif len(ch_names) != len(demand_vals):
-        raise RuntimeError("ODB Currupted: EPCIS names and demand values have different dimensions")
+        raise RuntimeError("ODB Corrupted: EPCIS names and demand values have different dimensions")
 
     missing = set(aConfig.keys()) - set(ch_names)
     if missing:
         raise ValueError(f"Requested config keys have no ODB counterpart: {missing}")
 
     for ch_index, this_name in enumerate(ch_names):
-        if not ca_demand[ch_index]:
+        if dev_type[ch_index] not in writeable_device_types:
             # informative channel we can't write.
             # Those should not participate in configuration writing.
             continue
@@ -64,20 +74,22 @@ def load_beam_config(seq : SequenceClient, cfg_key : str,  aConfig : dict):
         demand_vals[ch_index] = this_val
 
     seq.odb_set(odb_path + "/Variables/Demand", demand_vals)
-    return [
-        {
-            "path"                : odb_path + f"/Variables/Measured[{i}]",
-            "op"                  : "between",
-            "target"              : demand_vals[i] - thresholds[i],
-            "between_uper_target" : demand_vals[i] + thresholds[i],
-            # Require the value to be stable in case at some point,
-            # we decide to use some cycling sequence and we'll be
-            # moving past the value first to approach from the other side.
-            "stable_for_n_secs"   : 5,
-            "timeout_secs"        : 60
-        }
-        for i, requestable in enumerate(ca_demand) if requestable
-    ]
+    return cfg_val.ODBRequirementCollection(
+        seq = seq,
+        name = f"Beamline ({cfg_key})",
+        requirements= [
+            cfg_val.ODBRequirement(
+                seq = seq,
+                path = odb_path + f"/Variables/Measured[{i}]",
+                op = "between",
+                target = demand_vals[i] - thresholds[i],
+                upper =  demand_vals[i] + thresholds[i],
+            )
+            for i, dt in enumerate(dev_type) if dt in writeable_device_types
+        ],
+        stable_for = 5,
+        timeout = 60
+    )
 
 def non_exist_warn(seq : SequenceClient, cfg_key : str, aConfig : dict):
     seq.sequencer_msg(f"No method to load configuration {cfg_key} is available", wait = True)
@@ -101,17 +113,17 @@ config_odb_paths = {
 }
 
 def load_config(seq : SequenceClient, config : dict, sequential = True):
-    end_waits = []
+    end_require = cfg_val.ODBRequirementCollection(
+        seq = seq,
+        name = "Configuration",
+        requirements = []
+    )
     for cfg_key in config.keys():
         wait_conditions = config_dispatch.get(cfg_key, non_exist_warn)(seq, cfg_key, config[cfg_key])
-        if sequential:
-            for wc in wait_conditions:
-                seq.wait_odb(**wc)
-        else:
-            end_waits.extend(wait_conditions)
+        if wait_conditions:
+            if sequential:
+                wait_conditions.wait()
+            else:
+                end_require.requirements.append(wait_conditions)
 
-    # We iterate the end_waits in sequential and parallel mode
-    # While not envisioned now, we might at some point add things
-    # to it, even in sequential mode.
-    for wc in end_waits:
-        seq.wait_odb(**wc)
+    end_require.wait()
