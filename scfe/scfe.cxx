@@ -16,6 +16,8 @@
 #include <midas.h>
 #include <mfe.h>
 #include "arcus_stage_fe.h"
+#include "isel_fe.h"
+
 #include "pi_generic.h"
 
 /*-- Globals -------------------------------------------------------*/
@@ -48,9 +50,33 @@ DEVICE_DRIVER arcus_stage_driver[] = {
    {""}
 };
 
+DEVICE_DRIVER isel_driver[] = {
+   {"ISEL XYTable", isel_fe, 2, NULL, DF_INPUT | DF_OUTPUT | DF_PRIO_DEVICE | DF_MULTITHREAD},
+   {""}
+};
+
 BOOL equipment_common_overwrite = TRUE;
 
 EQUIPMENT equipment[] = {
+    {"XYTable",                       /* equipment name */
+    {7, 0,                             /* event ID, trigger mask */
+     "SYSTEM",                         /* event buffer */
+     EQ_SLOW,                          /* equipment type */
+     0,                                /* event source */
+     "MIDAS",                          /* format */
+     TRUE,                             /* enabled */
+     RO_RUNNING | RO_TRANSITIONS,      /* read when running and on transitions */
+     60000,                            /* read every 60 sec */
+     0,                                /* stop run after this event limit */
+     0,                                /* number of sub events */
+     10,                               /* log history at most every ten seconds */
+     "", "", ""} ,
+    cd_pi_gen_read,                       /* readout routine */
+    cd_pi_gen,                            /* class driver main routine */
+    isel_driver,                       /* device driver list */
+    NULL,                              /* init string */
+    },
+
     {"Degrader",                       /* equipment name */
     {6, 0,                             /* event ID, trigger mask */
      "SYSTEM",                         /* event buffer */

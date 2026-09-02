@@ -11,6 +11,7 @@ add_executable(scfe
                 pi_generic.cxx
                 scfe.cxx
                 arcus_stage_fe.cxx
+                isel_fe.cxx
             )
 
 target_include_directories(scfe PRIVATE ${MIDASSYS}/include)
