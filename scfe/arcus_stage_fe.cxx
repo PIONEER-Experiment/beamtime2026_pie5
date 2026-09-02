@@ -195,6 +195,10 @@ INT arcus_read(ARCUS_STAGE_FE_INFO* info)
             info->values.demand[i]   = (float)ss_nan();
             info->values.status[i]   = as_float(pi_gen_status_t::kDISCONNECT);
         }
+    } else if (now - info->last_read >= std::chrono::seconds(10)) {
+        for (size_t i = 0; i < kNumChannels; ++i) {
+            info->values.status[i]   = as_float(pi_gen_status_t::kTIMEOUT);
+        }
     }
     return FE_SUCCESS;
 }
