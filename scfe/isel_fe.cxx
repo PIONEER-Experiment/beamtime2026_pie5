@@ -174,8 +174,11 @@ INT isel_fe_read(ISEL_FE_INFO* info)
         }
         // Socket error?
         std::cerr << "Encountered socket error while draining: errno = " << errno << std::endl;
-        info->values.status[0]   = as_float(pi_gen_status_t::kERROR);
-        info->values.status[1]   = as_float(pi_gen_status_t::kERROR);
+        for (size_t i = 0; i < kNumChannels; ++i) {
+            info->values.measured[i] = (float)ss_nan();
+            info->values.demand[i]   = (float)ss_nan();
+            info->values.status[i]   = as_float(pi_gen_status_t::kERROR);
+        }
         return FE_ERR_HW;
     }
 
@@ -216,8 +219,10 @@ INT isel_fe_read(ISEL_FE_INFO* info)
     }
 
     if (now - info->last_read >= std::chrono::seconds(60)) {
-        info->values.status[0]   = as_float(pi_gen_status_t::kDISCONNECT);
-        info->values.status[1]   = as_float(pi_gen_status_t::kDISCONNECT);
+        for (size_t i = 0; i < kNumChannels; ++i) {
+            info->values.measured[i] = (float)ss_nan();
+            info->values.status[i]   = as_float(pi_gen_status_t::kDISCONNECT);
+        }
     }
     return FE_SUCCESS;
 }
@@ -225,7 +230,7 @@ INT isel_fe_read(ISEL_FE_INFO* info)
 INT isel_fe_get(ISEL_FE_INFO *info, INT channel, float *pvalue, INT cmd)
 {
     INT status = isel_fe_read(info);
-    if (status != FE_SUCCESS || channel < 0 || channel >= kNumChannels) {
+    if (channel < 0 || channel >= kNumChannels) {
         *pvalue = (float)ss_nan();
         return status;
     }
@@ -243,7 +248,7 @@ INT isel_fe_get(ISEL_FE_INFO *info, INT channel, float *pvalue, INT cmd)
         default:
             *pvalue = (float)ss_nan();
     }
-    return FE_SUCCESS;
+    return status;
 }
 
 INT isel_fe_set(ISEL_FE_INFO *info, INT channel, float value)
