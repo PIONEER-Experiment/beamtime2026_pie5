@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string>

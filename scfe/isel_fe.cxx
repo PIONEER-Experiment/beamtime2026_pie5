@@ -164,7 +164,6 @@ INT isel_fe_read(ISEL_FE_INFO* info)
         char str[1024]{};
         ssize_t n = recv(info->sock, str, sizeof(str), MSG_DONTWAIT);
         if (n > 0) {
-            std::cout << "received " << str << "while draining (n = " << n << ")" << std::endl;
             // discard a DGRAM
             continue;
         }
@@ -196,7 +195,6 @@ INT isel_fe_read(ISEL_FE_INFO* info)
         // We did receive new data
         char str[1024]{};
         size_t nBytes = recv(info->sock, str, sizeof(str), 0);
-        std::cout << str << std::endl;
         // format of str should be
         // 0XXXXXXYYYYYYZZZZZZ or similar.
         if (nBytes == 19 && str[0] == '0') {
@@ -253,8 +251,6 @@ INT isel_fe_get(ISEL_FE_INFO *info, INT channel, float *pvalue, INT cmd)
 
 INT isel_fe_set(ISEL_FE_INFO *info, INT channel, float value)
 {
-    std::cout << "isel_fe_set called with channel " << channel << " and value " << value << std::endl;
-
     if (channel >= 0 && channel < kNumChannels) {
         info->values.demand[channel] = value;
         long xreq = (info->values.demand[0] + info->settings.centre_x) * info->settings.steps_per_mm;
@@ -263,7 +259,6 @@ INT isel_fe_set(ISEL_FE_INFO *info, INT channel, float value)
                                      + std::to_string(info->settings.speed) + ","
                                      + std::to_string(yreq) + ","
                                      + std::to_string(info->settings.speed) + "\r";
-        std::cout << request;
         sendto(info->sock, request.c_str(), request.size(), 0, (struct sockaddr *) &info->server_addr, sizeof(info->server_addr));
     }
 
@@ -284,14 +279,6 @@ INT isel_fe(INT cmd, ...)
 
     va_start(argptr, cmd);
     status = FE_SUCCESS;
-
-
-    auto it = commands.find(cmd);
-    if (it != commands.end()) {
-        std::cout << "ISEL GET: " << it->second << std::endl;
-    } else {
-        std::cout << "ISEL GET " << cmd << std::endl;
-    }
 
     switch(cmd) {
         case CMD_INIT:
