@@ -14,20 +14,19 @@ def load_value(seq : SequenceClient, cfg_key : str,  value : int):
 """
 Load the arcus stage configuration. This is currently a single value.
 Note that the run db configuration specifies a position in mm,
-the midas FE expects this in motor steps.
+the midas FE will assume a mm value and convert it internally to motor steps.
 """
 def load_arcus_config(seq : SequenceClient, cfg_key : str, aConfig : dict):
-    num_steps_per_mm = 800 # This value requires validation
-    xpos_in_steps = int(aConfig['xpos'] * num_steps_per_mm)
+    xpos = aConfig['xpos']
 
     # Set Demand Value
-    seq.odb_set(config_odb_paths[cfg_key] + "/Variables/Demand", xpos_in_steps)
+    seq.odb_set(config_odb_paths[cfg_key] + "/Variables/Demand", xpos)
 
     return cfg_val.ODBRequirement(
                 seq = seq,
                 path = config_odb_paths[cfg_key] + "/Variables/Measured",
                 op = "==",
-                target =  xpos_in_steps,
+                target =  xpos,
                 timeout = 60
             )
 
