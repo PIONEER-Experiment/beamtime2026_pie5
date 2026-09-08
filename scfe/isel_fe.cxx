@@ -21,7 +21,7 @@
 /// @todo adjust this to match actual settings in the experiment
 #define ISEL_SETTINGS_STRING "\
 Host = STRING : [32] 127.0.0.1\n\
-Port = INT32 : 5556\n\
+Port = INT32 : 4001\n\
 Speed = INT32 : 600\n\
 Steps per mm = INT32 : 160\n\
 Centre X = FLOAT : 0\n\
@@ -118,7 +118,7 @@ INT isel_fe_init(HNDLE hKey, void **pinfo, INT channels, INT(*bd) (INT cmd, ...)
     db_get_value(hDB, hKey, "Centre Y", &info->settings.centre_y, &size, TID_FLOAT32, FALSE);
 
     // Setup communication protocol.
-    info->sock = socket(AF_INET, SOCK_DGRAM, 0);
+    info->sock = socket(AF_INET, SOCK_STREAM, 0);
     if (info->sock < 0) {
         return FE_ERR_HW;
     }
@@ -132,6 +132,20 @@ INT isel_fe_init(HNDLE hKey, void **pinfo, INT channels, INT(*bd) (INT cmd, ...)
     info->server_addr.sin_family = AF_INET;
     info->server_addr.sin_port = htons(info->settings.port);
     memcpy((char*) &(info->server_addr.sin_addr), phe->h_addr, phe->h_length);
+
+    // Establish TCP connection
+    if (connect(info->sock,
+            reinterpret_cast<struct sockaddr*>(&info->server_addr),
+            sizeof(info->server_addr)) < 0) {
+        cm_msg(MERROR, "STAGE FE INIT",
+            "cannot connect to %s:%d: errno=%d",
+            info->settings.host,
+            info->settings.port,
+            errno);
+        close(info->sock);
+        info->sock = -1;
+        return FE_ERR_HW;
+    }
 
     // Transfer ownership to MIDAS now that all has succeeded.
     *pinfo = info.release();
@@ -164,26 +178,36 @@ INT isel_fe_read(ISEL_FE_INFO* info)
         char str[1024]{};
         ssize_t n = recv(info->sock, str, sizeof(str), MSG_DONTWAIT);
         if (n > 0) {
-            // discard a DGRAM
+            // discard
             continue;
         }
-        if (n == 0 || errno == EAGAIN || errno == EWOULDBLOCK) {
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             // socket fully drained
             break;
         }
-        // Socket error?
-        std::cerr << "Encountered socket error while draining: errno = " << errno << std::endl;
-        for (size_t i = 0; i < kNumChannels; ++i) {
-            info->values.measured[i] = (float)ss_nan();
-            info->values.demand[i]   = (float)ss_nan();
-            info->values.status[i]   = as_float(pi_gen_status_t::kERROR);
+        if (n == 0) {
+            // peer closed connection
+            std::cerr << "Peer closed connection" << std::endl;
+            for (size_t i = 0; i < kNumChannels; ++i) {
+                info->values.measured[i] = (float)ss_nan();
+                info->values.demand[i]   = (float)ss_nan();
+                info->values.status[i]   = as_float(pi_gen_status_t::kDISCONNECT);
+            }
+        } else {
+            // Socket error?
+            std::cerr << "Encountered socket error while draining: errno = " << errno << std::endl;
+            for (size_t i = 0; i < kNumChannels; ++i) {
+                info->values.measured[i] = (float)ss_nan();
+                info->values.demand[i]   = (float)ss_nan();
+                info->values.status[i]   = as_float(pi_gen_status_t::kERROR);
+            }
         }
         return FE_ERR_HW;
     }
 
     // send "read" to device
     constexpr char read_cmd[] = "@0p\r";
-    sendto(info->sock, read_cmd, sizeof(read_cmd), 0, (struct sockaddr *) &info->server_addr, sizeof(info->server_addr));
+    send(info->sock, read_cmd, sizeof(read_cmd) - 1 , 0);
 
     // Wait for data to arrive (no more than 1 second)
     fd_set readfds;
@@ -196,7 +220,7 @@ INT isel_fe_read(ISEL_FE_INFO* info)
         char str[1024]{};
         size_t nBytes = recv(info->sock, str, sizeof(str), 0);
         // format of str should be
-        // 0XXXXXXYYYYYYZZZZZZ or similar.
+        // 0XXXXXXYYYYYYZZZZZZ
         if (nBytes == 19 && str[0] == '0') {
             auto convert = [](const char* c) {
                 int val = std::stoi(std::string(c, c + 6), nullptr, 16);
@@ -259,7 +283,7 @@ INT isel_fe_set(ISEL_FE_INFO *info, INT channel, float value)
                                      + std::to_string(info->settings.speed) + ","
                                      + std::to_string(yreq) + ","
                                      + std::to_string(info->settings.speed) + "\r";
-        sendto(info->sock, request.c_str(), request.size(), 0, (struct sockaddr *) &info->server_addr, sizeof(info->server_addr));
+        send(info->sock, request.c_str(), request.size(), 0);
     }
 
     return FE_SUCCESS;
