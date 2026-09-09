@@ -22,7 +22,7 @@
 #define ISEL_SETTINGS_STRING "\
 Host = STRING : [32] 127.0.0.1\n\
 Port = INT32 : 4001\n\
-Speed = INT32 : 600\n\
+Speed = INT32 : 6000\n\
 Steps per mm = INT32 : 160\n\
 Centre X = FLOAT : 0\n\
 Centre Y = FLOAT : 0\n\
@@ -206,7 +206,7 @@ INT isel_fe_read(ISEL_FE_INFO* info)
     }
 
     // send "read" to device
-    constexpr char read_cmd[] = "@0p\r";
+    constexpr char read_cmd[] = "@0P\r";
     send(info->sock, read_cmd, sizeof(read_cmd) - 1 , 0);
 
     // Wait for data to arrive (no more than 1 second)
