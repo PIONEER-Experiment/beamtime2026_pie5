@@ -231,8 +231,8 @@ INT isel_fe_read(ISEL_FE_INFO* info)
             };
             float xval = convert(str + 1);
             float yval = convert(str + 7);
-            info->values.measured[0] = info->settings.centre_x + xval / info->settings.steps_per_mm;
-            info->values.measured[1] = info->settings.centre_y + yval / info->settings.steps_per_mm;
+            info->values.measured[0] = xval / info->settings.steps_per_mm - info->settings.centre_x;
+            info->values.measured[1] = yval / info->settings.steps_per_mm - info->settings.centre_y;
             /// @todo: Deal with proper status updates here
             info->values.status[0]   = as_float(pi_gen_status_t::kOK);
             info->values.status[1]   = as_float(pi_gen_status_t::kOK);
