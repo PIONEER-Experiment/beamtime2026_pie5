@@ -7,6 +7,20 @@ separate database from the run database in `../rundb/`, with its own schema and
 its own consumers, but it is administered the same way and during the same
 beamtime, which is why it lives beside it.
 
+It is a separate database because it is meant to be served **from a different
+machine**: the analysis/nearline host, not the DAQ host that serves `../rundb/`.
+Offline reconstruction has to resolve the constants a run was processed with
+whether or not the DAQ is up, and reprocessing outlives the beamtime the run
+database describes. One server for both would put a reco job's constants behind
+the availability of live DAQ state, and would tie the campaign store's lifetime
+to an operational database.
+
+The tables themselves would coexist without trouble — `schema_pg.sql` applies
+to an empty schema as readily as an empty database, and `PICondPgLayer` treats
+`options=-c search_path=cond` as a normal conninfo — so this is a deployment
+decision, not a schema constraint. It is the deployment that has to change
+first if the two are ever consolidated.
+
 The C++ that reads it is `shared/gaudi/conditions` in the offline software
 (`PICondSqliteLayer`, `PICondPgLayer`); the DDL here is that code's on-disk
 contract. See `shared/gaudi/conditions/CONDITIONS_TABLES.md` for the format and
