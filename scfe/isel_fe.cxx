@@ -26,6 +26,10 @@ Speed = INT32 : 6000\n\
 Steps per mm = INT32 : 160\n\
 Centre X = FLOAT : 0\n\
 Centre Y = FLOAT : 0\n\
+Rel Min X = FLOAT : -40.0 \n\
+Rel Max X = FLOAT :  40.0 \n\
+Rel Min Y = FLOAT : -40.0 \n\
+Rel Max Y = FLOAT :  40.0 \n\
 "
 
 /// @brief device settings stored in ODB
@@ -37,6 +41,10 @@ struct ISEL_SETTINGS{
     int steps_per_mm;
     float centre_x;
     float centre_y;
+    float min_x;
+    float max_x;
+    float min_y;
+    float max_y;
 };
 
 constexpr size_t kNumChannels = 2;
@@ -116,6 +124,10 @@ INT isel_fe_init(HNDLE hKey, void **pinfo, INT channels, INT(*bd) (INT cmd, ...)
     size = sizeof(float);
     db_get_value(hDB, hKey, "Centre X", &info->settings.centre_x, &size, TID_FLOAT32, FALSE);
     db_get_value(hDB, hKey, "Centre Y", &info->settings.centre_y, &size, TID_FLOAT32, FALSE);
+    db_get_value(hDB, hKey, "Rel Min X", &info->settings.min_x, &size, TID_FLOAT32, FALSE);
+    db_get_value(hDB, hKey, "Rel Max X", &info->settings.max_x, &size, TID_FLOAT32, FALSE);
+    db_get_value(hDB, hKey, "Rel Min Y", &info->settings.min_y, &size, TID_FLOAT32, FALSE);
+    db_get_value(hDB, hKey, "Rel Max Y", &info->settings.max_y, &size, TID_FLOAT32, FALSE);
 
     // Setup communication protocol.
     info->sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -273,12 +285,44 @@ INT isel_fe_get(ISEL_FE_INFO *info, INT channel, float *pvalue, INT cmd)
     return status;
 }
 
+namespace {
+    float check_in_range(float x, float xmin, float xmax) {
+        if (xmax < xmin) {
+            throw std::runtime_error("xmin larger that xmax");
+        }
+        x = std::min(x, xmax);
+        x = std::max(x, xmin);
+        return x;
+    }
+
+    // Absolute hardware limits of what the stage can do.
+    constexpr float kAbsMinX =   0;
+    constexpr float kAbsMinY =   0;
+    constexpr float kAbsMaxX = 500;
+    constexpr float kAbsMaxY = 500;
+
+    float checkAbsX(float x) {
+        // absulute hardware limits
+        return check_in_range(x, kAbsMinX, kAbsMaxX);
+    }
+    float checkAbsY(float x) {
+        // absulute hardware limits
+        return check_in_range(x, kAbsMinY, kAbsMaxY);
+    }
+};
+
 INT isel_fe_set(ISEL_FE_INFO *info, INT channel, float value)
 {
+
     if (channel >= 0 && channel < kNumChannels) {
+        if (channel == 0) {
+            value = check_in_range(value, info->settings.min_x, info->settings.max_x);
+        } else if (channel == 1) {
+            value = check_in_range(value, info->settings.min_y, info->settings.max_y);
+        }
         info->values.demand[channel] = value;
-        long xreq = (info->values.demand[0] + info->settings.centre_x) * info->settings.steps_per_mm;
-        long yreq = (info->values.demand[1] + info->settings.centre_y) * info->settings.steps_per_mm;
+        long xreq = checkAbsX(info->values.demand[0] + info->settings.centre_x) * info->settings.steps_per_mm;
+        long yreq = checkAbsY(info->values.demand[1] + info->settings.centre_y) * info->settings.steps_per_mm;
         std::string request = "@0M " + std::to_string(xreq) + ","
                                      + std::to_string(info->settings.speed) + ","
                                      + std::to_string(yreq) + ","
