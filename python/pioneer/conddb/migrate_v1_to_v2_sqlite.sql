@@ -1,0 +1,27 @@
+-- Migrate a SQLite conditions database from schema v1 to v2: NOT SUPPORTED.
+--
+-- This file is deliberately comment-only, so that cond_loader.py can name a
+-- real path when it refuses to write to a v1 SQLite database and the reader of
+-- that message finds this explanation.
+--
+-- SQLite's ALTER TABLE can rename a table or a column and add a column. It
+-- cannot add a CHECK constraint, a FOREIGN KEY, or a PRIMARY KEY to an
+-- existing table, and v2 is almost entirely constraints (see
+-- schema_sqlite.sql). The supported route is the twelve-step
+-- "recreate the table" recipe from the SQLite documentation -- which, for the
+-- four tables here, is exactly "create the v2 schema in a new file and copy
+-- every row across".
+--
+-- SQLite conditions databases in this project are build products, not stores
+-- of record: they are generated from JSON containers, and the JSON containers
+-- are what is committed (the campaign store is PostgreSQL). So the migration
+-- is a regeneration:
+--
+--     rm out/conditions.db
+--     python3 json2sqlite.py out/conditions.db a.json b.json ...
+--
+-- If a v1 .db is the only copy of some constants, dump it back to JSON first
+-- (its tables map one-to-one onto the container format), then reload with
+-- json2sqlite.py, which applies schema_sqlite.sql to the empty file. The load
+-- will reject data that violates the v2 invariants; that rejection is the
+-- point of the migration.
