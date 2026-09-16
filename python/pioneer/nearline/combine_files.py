@@ -48,6 +48,10 @@ def merge_sub_runs(input_files : list[str]):
         if not obj:
             raise ValueError(f"File {input_files[0]} does not contain {path}")
         headers[path] = obj.Clone()
+
+    odb_header = first_file.Get("ODBHeader")
+    beamline_config = odb_header.GetEntry[ROOT.PIODBBeamEntry]("/Equipment/EPICS")
+
     first_file.Close()
 
 
@@ -77,6 +81,8 @@ def merge_sub_runs(input_files : list[str]):
         raise ValueError("Invalid count of reference current pulses encountered")
     for h in histos.values():
         h.Scale ( 1. / ref_count)
+
+    headers['beam'] = beamline_config
 
     return headers, histos
 
