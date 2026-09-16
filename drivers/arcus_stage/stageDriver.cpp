@@ -158,7 +158,7 @@ bool StageDriver::connect_usb()
     usb_command("POL=16", out);
     usb_command("ACC=300", out);
 
-    usb_command("EO=1", out);
+    usb_command("EO=2", out);
     usb_command("ID", out);
 	printf("Arcus Product: %s\n",out);
 
@@ -167,20 +167,20 @@ bool StageDriver::connect_usb()
 
     usb_command("ABS", out);
 
-	usb_command("MSTX", out);
-	printf("MSTX: %s\n", out);
+	usb_command("MSTY", out);
+	printf("MSTY: %s\n", out);
 	
-	usb_command("LCAX=1000", out);
+	usb_command("LCAY=1000", out);
 
     std::cout << "Doing calibration movement to limit switch" << std::endl;
-	usb_command("LX-", out);
+	usb_command("LY-", out);
 	do {
 		usleep(1e5);
-		usb_command("MSTX", out);
+		usb_command("MSTY", out);
 	} while (out[0] != '0');
 
-	usb_command("PX", out);
-	printf("LX- PX: %s\n",out);
+	usb_command("PY", out);
+	printf("LY- PY: %s\n",out);
 
     std::cout << "Stage ready" << std::endl;
     return true;
@@ -225,15 +225,15 @@ void StageDriver::run_usb()
 
     while (true) {
         // read stuff from stage
-        usb_command("PX", buf);
+        usb_command("PY", buf);
         fCurrentX = atof(buf);
-        usb_command("MSTX", buf);
+        usb_command("MSTY", buf);
         fStatus = atoi(buf);
 
         // acion goes here:
 
         if (fEnabled && abs(fCurrentX - fRequestedX) > 1 && fStatus == 0) {
-            cmd = "X" + std::to_string(fRequestedX);
+            cmd = "Y" + std::to_string(fRequestedX);
             usb_command(cmd.c_str(), buf);
         }
 
