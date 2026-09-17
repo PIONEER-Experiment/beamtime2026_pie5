@@ -1,0 +1,5 @@
+# CAEN DT1470ET desktop HV supply (USB CDC-ACM) -> stable /dev/caen_hv0
+# Install: sudo cp 99-caen-hv.rules /etc/udev/rules.d/
+#          sudo udevadm control --reload-rules && sudo udevadm trigger
+# The DAQ user must be in the "dialout" group.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="21e1", ATTRS{idProduct}=="0003", SYMLINK+="caen_hv%n", MODE="0660", GROUP="dialout"
