@@ -152,13 +152,15 @@ bool StageDriver::connect_usb()
 	
 	// setup the device
 	
+    usb_command("EO=2", out);
     usb_command("LSPD=300", out);
 	usb_command("HSPD=3000", out);
 
-    usb_command("POL=16", out);
+    usb_command("POL=66", out);
+    usb_command("POLX=66", out);
+    usb_command("POLY=66", out);
     usb_command("ACC=300", out);
 
-    usb_command("EO=2", out);
     usb_command("ID", out);
 	printf("Arcus Product: %s\n",out);
 
@@ -263,8 +265,8 @@ void StageDriver::run_udp()
             reply.clear();
 
             if (isEqual(fBuffer[index], "READ")) {
-                reply = std::to_string(fRequestedX) + " ";
-                reply += std::to_string(fCurrentX) + " ";
+                reply = std::to_string(fCurrentX) + " ";
+                reply += std::to_string(fRequestedX) + " ";
                 reply += std::to_string(fStatus) + "\n";
             } else if (isEqual(fBuffer[index], "SET")) {
                 try {
