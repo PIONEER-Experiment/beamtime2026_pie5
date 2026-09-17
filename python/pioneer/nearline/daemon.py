@@ -96,7 +96,8 @@ class NearlineDaemon:
                     "Backup path" : os.environ.get("NEARLINE_BACKUP_DIR", ""),
                     "Remote path" : os.environ.get("NEARLINE_REMOTE", ""),
                     "Output path" : os.environ.get("NEARLINE_DIR", ""),
-                    "Num parallel jobs" : njobs
+                    "Num parallel jobs" : njobs,
+                    "MiniTwin URL" : "http://127.0.0.1:8420"
                     }
             })
         elif (args.jobs):
@@ -124,7 +125,9 @@ class NearlineDaemon:
         self.db_interface = pioneer.rundb.interface.interface(user = kDbUser, password = kDbPwd)
 
         # Proper mini twin initialisation goes here.
-        self.mt_interface = mt_iface()
+        self.mt_interface = mt_iface(
+            base_url = self.client.odb_get("/Nearline/config/MiniTwin URL")
+        )
 
 
     def message(self, msg, is_error = False, send_to_slack = False):
@@ -155,7 +158,7 @@ class NearlineDaemon:
         on_complete = seq_cfg['on_complete'].split()
         if "merge" in on_complete:
             seq_cfg['input'] = self.nearline_output_path
-            seq_cfg['cfg_file'] = self.nearline_output_path / f"seq{seq_cfg['id']:05d}.json" 
+            seq_cfg['cfg_file'] = self.nearline_output_path / f"seq{seq_cfg['id']:05d}.json"
             seq_cfg['output'] = self.nearline_output_path / f"seq{seq_cfg['id']:05d}.root"
             seq_cfg['job_type'] = "merge"
             seq_cfg['job_id'] = seq_cfg['id']
