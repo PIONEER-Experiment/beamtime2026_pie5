@@ -17,8 +17,11 @@
 #include <mfe.h>
 #include "arcus_stage_fe.h"
 #include "isel_fe.h"
+#include "caen_hv_fe.h"
+#include "hv_alarm.h"
 
 #include "pi_generic.h"
+#include "hv.h"
 
 /*-- Globals -------------------------------------------------------*/
 
@@ -52,6 +55,12 @@ DEVICE_DRIVER arcus_stage_driver[] = {
 
 DEVICE_DRIVER isel_driver[] = {
    {"ISEL XYTable", isel_fe, 2, NULL, DF_INPUT | DF_OUTPUT | DF_PRIO_DEVICE | DF_MULTITHREAD},
+   {""}
+};
+
+DEVICE_DRIVER caen_hv_driver[] = {
+   {"CAEN HV", caen_hv_fe, 4, NULL,
+    DF_MULTITHREAD | DF_PRIO_DEVICE | DF_HW_RAMP | DF_REPORT_STATUS | DF_REPORT_CHSTATE | DF_POLL_DEMAND},
    {""}
 };
 
@@ -96,6 +105,27 @@ EQUIPMENT equipment[] = {
     NULL,                              /* init string */
     },
 
+    {"CaenHV",                         /* equipment name */
+    {8, 0,                             /* event ID, trigger mask */
+     "SYSTEM",                         /* event buffer */
+     EQ_SLOW,                          /* equipment type */
+     0,                                /* event source */
+     "MIDAS",                          /* format */
+     TRUE,                             /* enabled */
+     RO_RUNNING | RO_TRANSITIONS,      /* read when running and on transitions */
+     60000,                            /* read every 60 sec */
+     1000,                             /* NOT an event limit here: the slow control
+                                          poll thread reuses this field as the device
+                                          poll period in ms (device_driver.cxx:48-55) */
+     0,                                /* number of sub events */
+     10,                               /* minimum CMD_IDLE interval in ms */
+     "", "", ""} ,
+    cd_hv_read,                           /* readout routine */
+    cd_hv,                                /* class driver main routine */
+    caen_hv_driver,                    /* device driver list */
+    NULL,                              /* init string */
+    },
+
    {""}
 };
 
@@ -115,6 +145,10 @@ INT interrupt_configure(INT cmd, INT source, POINTER_T adr)
 
 INT frontend_init()
 {
+   /* per-channel HV alarms, ODB thresholds and Variables/Polarity; runs on the
+      mfe main thread only. Never fatal: on failure it disables itself. */
+   hv_alarm_init("CaenHV", 4);
+
    return CM_SUCCESS;
 }
 
@@ -122,6 +156,8 @@ INT frontend_init()
 
 INT frontend_exit()
 {
+   hv_alarm_exit();
+
    return CM_SUCCESS;
 }
 
@@ -130,6 +166,10 @@ INT frontend_exit()
 INT frontend_loop()
 {
    ss_sleep(100);
+
+   /* HV alarm check, self-throttled to once per second */
+   hv_alarm_loop();
+
    return CM_SUCCESS;
 }
 
