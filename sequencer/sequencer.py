@@ -14,10 +14,10 @@ def load_config_to_odb(seq : SequenceClient):
     return True
 
 def execute_run(seq : SequenceClient):
-    numOfEvents = seq.get_param("nEv")
     seq.start_run()
     run_id = seq.odb_get("/Runinfo/Run DB PK")
     run_nr = seq.odb_get("/Runinfo/Run number")
+    num_ev = seq.odb_get("/Runinfo/Req number events")
     # call start of midas run here as fail save.
     # The nearline daemon should have registered during transition
     db_interface.start_of_midas_run(run_id, run_nr)

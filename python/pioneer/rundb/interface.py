@@ -93,11 +93,15 @@ class interface:
                     row.pop("id", None)
                     row.pop("seq_id", None)
                     configuration[table] = row
+        with conn.cursor() as cur:
+            cur.execute("SELECT requested_events FROM state.midas_run WHERE id = %s", (job_id, ))
+            num_ev = cur.fetch_one()[0]
 
         # done reading DB, close connection
         conn.close()
 
         configuration["job_id"] = job_id
+        configuration["num_ev"] = num_ev
 
         return configuration
 
@@ -325,7 +329,7 @@ class interface:
             conn.close()
         return inserted_id
 
-    def schedule_new_run(self, configs : list) -> int:
+    def schedule_new_run(self, num_ev :int,  configs : list) -> int:
         """
         Schedule a new run in the midas_run table
 
@@ -355,8 +359,12 @@ class interface:
                 # We enter right into status 'PENDING' despite not having all sub-configurations
                 # registered. This is fine as it becomes visible only after committing down below.
                 cursor.execute(
-                    "INSERT INTO state.midas_run (priority, status) VALUES (%s, 'PENDING') RETURNING id",
-                    (priority, )
+                    """
+                    INSERT INTO state.midas_run (priority, status, requested_events)
+                    VALUES (%s, 'PENDING', %s)
+                    RETURNING id
+                    """,
+                    (priority, num_ev)
                 )
                 run_id = cursor.fetchone()[0]
 

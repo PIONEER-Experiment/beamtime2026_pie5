@@ -97,6 +97,7 @@ def non_exist_warn(seq : SequenceClient, cfg_key : str, aConfig : dict):
 # this is the main entrance routine for loading configurations
 config_dispatch = {
     "job_id"            : load_value,
+    "num_ev"            : load_value,
     "degrader_position" : load_arcus_config,
     "target_position"   : load_isel_config,
     "pie5_epics"        : load_beam_config,
@@ -105,6 +106,7 @@ config_dispatch = {
 
 config_odb_paths = {
     "job_id"            : "/Runinfo/Run DB PK",
+    "num_ev"            : "/Runinfo/Req number events",
     "degrader_position" : "/Equipment/Degrader",
     "target_position"   : "",
     "pie5_epics"        : "/Equipment/EPICS",

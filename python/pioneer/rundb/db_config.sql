@@ -395,7 +395,8 @@ CREATE TABLE IF NOT EXISTS state.midas_run (
     id SERIAL PRIMARY KEY,                      -- This is the database key established when creating the entry
     priority INT,                               -- This is a priority value
     status TEXT REFERENCES utils.status(name),  -- Indicates the status of the job
-    midas_run_number INT                        -- run number assigned when actually run in midas
+    midas_run_number INT,                       -- run number assigned when actually run in midas
+    requested_events BIGINT DEFAULT 1000000     -- the number of events desired for this run
 );
 
 -- midas_run_config: child table of midas_run
