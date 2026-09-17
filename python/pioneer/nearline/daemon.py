@@ -271,17 +271,21 @@ class NearlineDaemon:
 
     def mainloop(self):
         while True:
-            # Step 1: Communicate with midas
-            self.communicate_with_midas()
+            try:
+                # Step 1: Communicate with midas
+                self.communicate_with_midas()
 
-            # Step 2: Iterate nearline job queues
-            self.iterate_nearline_queues()
+                # Step 2: Iterate nearline job queues
+                self.iterate_nearline_queues()
 
-            # Step 3: Iterate on sequences, identifying the ones that are completed.
-            self.iterate_sequences()
+                # Step 3: Iterate on sequences, identifying the ones that are completed.
+                self.iterate_sequences()
 
-            # Step 4: Poll update strategies for new configuration
-            self.check_for_updates()
+                # Step 4: Poll update strategies for new configuration
+                self.check_for_updates()
+
+            except Exception as e:
+                self.client.msg("Nearline Error" + e, is_error= True)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Good Luck Have Fun - I did not yet write documentation for this")
