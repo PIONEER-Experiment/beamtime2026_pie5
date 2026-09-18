@@ -28,3 +28,5 @@ installed (do not commit that downgrade upstream without checking it is still co
 For the CAEN HV equipment specifically — shifter instructions (setting voltages, alarms,
 `LOC:ERR`, testing without hardware) and the probe/emulator dev tools — see
 [`drivers/caen_hv/README.md`](drivers/caen_hv/README.md).
+
+Deployment of the CaenHV equipment on pinky: `drivers/caen_hv/DEPLOY-pinky.md`.
