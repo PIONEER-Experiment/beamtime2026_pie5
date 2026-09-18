@@ -105,11 +105,19 @@ def five_point_sequence(iface : db_interface):
     mrs.set_on_complete("merge mt_add")
     return mrs
 
+def degrader_scan(iface : db_interface):
+    mrs = midas_run_sequence(iface)
+    mrs.set_config_seq("degrader_position", 1) # Default degrader scan is marked with sequence number 1 in the runDB
+    return mrs
+
 if __name__ == "__main__":
     iface = db_interface("bot", "bot")
 
+    dscan = degrader_scan(iface)
+    dscan.set_subsequence(five_point_sequence(iface))
+
     mrs2 = midas_run_sequence(iface)
     mrs2.set_config_list("dummy", [{"p1" : "test1", "p2" : "test2"}, {"p1" : "test3", "p2" : "test4"}])
-    mrs2.set_subsequence(five_point_sequence(iface))
+    mrs2.set_subsequence(dscan)
 
     mrs2.schedule()
