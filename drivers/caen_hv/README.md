@@ -12,13 +12,18 @@ the PSI DAQ machine and inside the `pioneer-midas` / `testbeam-midas` container.
 | `99-caen-hv.rules` | udev rule giving the USB device a stable `/dev/caen_hv0` |
 | `tests/test_fake_with_probe.py` | stdlib `unittest`: drives the emulator through the probe's module API |
 
-## Protocol summary — **as documented, to be confirmed on hardware**
+## Protocol summary — **confirmed on hardware 2026-09-17 (DT1470ET fw 1.08)**
 
-Everything below is the published N1470-family ASCII protocol
-(N1470 / N1470ET / DT1470ET / R1470ET / DT55xxE). It has **not yet been checked against our
-unit**; verification step 1 of the plan (`caen_hv_probe.py info dump` on the real board) is
-what confirms it. If anything differs, fix `caen_hv_protocol.py` — both tools and the C++
-driver's constants follow from that one table.
+The published N1470-family ASCII protocol (N1470 / N1470ET / DT1470ET / R1470ET / DT55xxE),
+now checked against our unit: command and parameter names, board parameters, error replies
+and units are **exactly as documented**. The one surprise is the **reply formatting** — the
+board zero-pads every numeric value to a fixed width. Formats live per parameter in
+`Param.fmt` in `caen_hv_protocol.py`; the emulator renders replies through
+`format_value(value, par)` so the tests exercise the padding, and both tools parse integers
+with `int(x, 10)`.
+
+> **Never parse these with base 0** (`int(x, 0)` in Python, `strtol(.., 0)` / `%i` in C):
+> `VAL:02048` read as octal is 1064. This bit the C++ driver once already.
 
 Lines are `\r\n`-terminated; both tools accept `\r`, `\n` or `\r\n` and strip it.
 
@@ -39,24 +44,27 @@ field:
 | `#BD:00,VAL:ERR` | bad value (out of range, or `VSET > MAXV`) |
 | `#BD:00,LOC:ERR` | board is in **LOCAL** mode — every `SET` is refused |
 
-Channel parameters:
+Channel parameters (reply format as observed on fw 1.08):
 
-| MON | SET | unit | note |
-|---|---|---|---|
-| `VSET` | yes | V | set point, **magnitude** (polarity is a rear switch) |
-| `ISET` | yes | uA | current limit, board trips after `TRIP` seconds |
-| `VMON` | — | V | measured voltage |
-| `IMON` | — | uA | measured current |
-| `MAXV` | yes | V | hardware voltage limit (non-volatile on the board) |
-| `RUP` / `RDW` | yes | V/s | ramp-up / ramp-down speed |
-| `TRIP` | yes | s | over-current trip time |
-| `PDWN` | yes | `KILL`\|`RAMP` | power-down mode |
-| `POL` | — | `+`\|`-` | read-only, reversible by a physical switch |
-| `STAT` | — | integer | bitmask, see below |
-| — | `ON` / `OFF` | — | no `VAL` field |
+| MON | SET | unit | reply format | example | note |
+|---|---|---|---|---|---|
+| `VSET` | yes | V | `%06.1f` | `1100.0`, `0000.0` | set point, **magnitude** (polarity is a rear switch) |
+| `ISET` | yes | uA | `%07.2f` | `0400.00`, `0000.00` | current limit, board trips after `TRIP` seconds |
+| `VMON` | — | V | `%06.1f` | `0000.0` | measured voltage |
+| `IMON` | — | uA | `%07.2f` | `0000.00` | measured current |
+| `MAXV` | yes | V | `%04d` | `8100` | hardware voltage limit (non-volatile on the board) |
+| `RUP` / `RDW` | yes | V/s | `%03d` | `050` | ramp-up / ramp-down speed |
+| `TRIP` | yes | s | `%06.1f` | `0010.0` | over-current trip time |
+| `PDWN` | yes | — | `%s` | `RAMP`, `KILL` | power-down mode |
+| `POL` | — | — | `%s` | `+`, `-` | read-only, reversible by a physical switch |
+| `STAT` | — | integer | `%05d` | `02048` | bitmask, see below — **base 10** |
+| — | `ON` / `OFF` | — | — | — | no `VAL` field |
 
 Board parameters: MON `BDNAME BDNCH BDFREL BDSNUM BDCTR`(`LOCAL`\|`REMOTE`)
 `BDTERM BDILK BDILKM BDALARM`; SET `BDILKM`(`OPEN`\|`CLOSED`) and `BDCLR` (no `VAL`).
+Board replies are **not** padded: `BDNCH` is `4`, `BDALARM` is `0`, `BDFREL` is `1.08`,
+`BDSNUM` is `33997`, `BDCTR` is `REMOTE`/`LOCAL`, `BDILK` is `NO`/`YES`, `BDILKM` is
+`CLOSED`/`OPEN`.
 
 `STAT` bits:
 
@@ -67,6 +75,45 @@ Board parameters: MON `BDNAME BDNCH BDFREL BDSNUM BDCTR`(`LOCAL`\|`REMOTE`)
 | bit | 7 | 8 | 9 | 10 | 11 | 12 | 13 |
 |---|---|---|---|---|---|---|---|
 | name | `TRIP` | `OVP` | `OVT` | `DIS` | `KILL` | `ILK` | `NOCAL` |
+
+### MIDAS pitfall found during the hardware test
+
+`mfe.cxx:1348-1357` (`message_print()`) copies every `cm_msg` text into a 160-byte stack buffer
+with an unchecked `memcpy`; a message body of 159 characters or more (after the `[file:line:routine,LEVEL]`
+prefix) aborts the frontend with glibc's `*** buffer overflow detected ***`. Seen live on 2026-09-17 with a
+190-character alarm message. All messages in `caen_hv_fe.cxx` and `hv_alarm.cxx` are therefore kept
+under 120 characters; keep it that way when editing them, and note that channel names (up to 31 chars)
+and the serial port path (up to 63) are part of some messages. To be reported upstream to MIDAS.
+
+### Observed on our unit, 2026-09-17 (DT1470ET, fw 1.08, serial 33997)
+
+Defaults as found, identical with the board in `LOCAL` and in `REMOTE`, all four channels
+off: `VSET` `1100.0`, `ISET` `0400.00`, `MAXV` `8100`, `RUP`/`RDW` `050`, `TRIP` `0010.0`,
+`PDWN` `RAMP`, `POL` `-` on **all four** channels, `STAT` `02048` — i.e. bit 11, `KILL`.
+`BDFREL` `1.08`, `BDSNUM` `33997`, `BDALARM` `0`, `BDILK` `NO`, `BDILKM` `CLOSED`.
+
+Control test 2026-09-17 (channel 0, nothing connected, REMOTE, the channel's front switch moved
+from KILL to ON beforehand): `ChState[0]=1` switched the channel on — `STAT` 00001 (ON), `VMON`
+ramped to 49.8 V at RUP 50 V/s, `IMON` 0.20 uA; `ChState[0]=0` gave `STAT` 00005 (ON|RDW) while
+ramping down and 00000 once off. **Bits 10 and 11 report the channel's physical three-position switch**, observed by moving
+switches while the frontend was running: KILL → `STAT` 02048 (bit 11, KILL), OFF → 01024 (bit 10,
+DIS), ON → 00000 (channel enabled; remote `ChState` can now switch the HV on). A disabled channel
+**silently ignores** a remote switch-on: the board answers `CMD:OK` to `PAR:ON` but `STAT` stays
+01024 and `VMON` 0 (tested with `Demand` = 50 V). The frontend therefore re-reads `STAT` after every
+ON/OFF and logs an error when the board did not follow; if `ChStatus` shows 2048 or 1024 and the
+channel will not come on, flip the channel switch on the unit to ON. Both are intended operator states, so neither
+is in the default alarm `Status Mask`. Setting `VSET`, `MAXV`
+(software limit) and the alarm path (`Status Mask` incl. bit 11 → alarm within 3 s, auto-clear after
+`Clear After s`) were all exercised through the frontend on the real unit.
+
+Error replies confirmed verbatim: `#BD:00,CMD:ERR`, `#BD:00,CH:ERR`, `#BD:00,PAR:ERR`,
+`#BD:00,LOC:ERR`. A request addressed to the **wrong board address** gets **no reply at
+all** (the client must time out, not wait for an error) — the emulator does the same.
+
+Still inferred, **not** measured: the accepted **value ranges** used for `VAL:ERR`
+(`VSET`/`MAXV` 0–8100 V, `ISET` 0–3000 uA, `RUP`/`RDW` 1–500 V/s, `TRIP` 0–1000 s) and
+whether `SET VSET` above `MAXV` answers `VAL:ERR` (assumed) or clips (`--clip-vset`). Fix
+`caen_hv_protocol.py` when either is measured.
 
 Serial settings: **9600 8N1, raw**. The ET-generation boards enumerate as USB CDC-ACM
 (`/dev/ttyACM<n>`), which ignores the baud rate; the setting is kept so the same code works
@@ -252,8 +299,8 @@ real DT1470ET until verification step 1 (`caen_hv_probe.py info dump`) is run:
 | 7 | TRIP | tripped |
 | 8 | OVP | over power |
 | 9 | OVT | over temperature |
-| 10 | DIS | disabled |
-| 11 | KILL | killed |
+| 10 | DIS | disabled — channel switch in OFF position |
+| 11 | KILL | killed — channel switch in KILL position |
 | 12 | ILK | interlocked |
 | 13 | NOCAL | not calibrated |
 | 31 | (driver-private) | last STAT read failed ("stale"), not a board bit |
@@ -301,6 +348,7 @@ sleep 1; PORT=$(head -1 /tmp/caen_pty.txt); echo "$PORT"
 ./caen_hv_probe.py --port "$PORT" --yes set 0 ON
 
 # 4. after ~1 s VMON has ramped ~50 V (RUP = 50 V/s), STAT = ON,RUP, IMON = VMON uA
+#    all numeric fields come back zero-padded: VSET 0600.0, IMON 0050.10, STAT 00003
 sleep 1.2; ./caen_hv_probe.py --port "$PORT" dump
 
 # 5. error paths: read-only, missing --yes, unknown parameter, VSET > MAXV
@@ -315,13 +363,13 @@ kill %1; cat /tmp/caen_fake.log
 # 7. LOCAL mode: MON works, every SET answers LOC:ERR
 ./fake_caen_hv.py --local > /tmp/caen_pty2.txt 2>/dev/null &
 sleep 1; PORT2=$(head -1 /tmp/caen_pty2.txt)
-./caen_hv_probe.py --port "$PORT2" mon 0 VMON               # 0.0
+./caen_hv_probe.py --port "$PORT2" mon 0 VMON               # 0000.0
 ./caen_hv_probe.py --port "$PORT2" --yes set 0 VSET 100     # rc=1, #BD:00,LOC:ERR
 kill %1
 
 # 8. forced STAT bits: bit 3 = OVC
 ./fake_caen_hv.py --stat-bits 8 > /tmp/caen_pty3.txt 2>/dev/null &
-sleep 1; ./caen_hv_probe.py --port "$(head -1 /tmp/caen_pty3.txt)" mon 0 STAT   # 8
+sleep 1; ./caen_hv_probe.py --port "$(head -1 /tmp/caen_pty3.txt)" mon 0 STAT   # 00008
 kill %1
 ```
 
