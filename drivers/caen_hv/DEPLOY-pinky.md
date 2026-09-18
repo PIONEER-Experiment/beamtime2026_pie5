@@ -15,7 +15,7 @@ module, a custom page, and the probe/fake tools. Nothing in the existing equipme
 | Branch | all work is on `feature/caen-hv-frontend` (4 commits + a hardware-session commit) | `git log --oneline develop..feature/caen-hv-frontend` |
 | Event ID 8 free on pinky | IDs in use: 0,1,6,7,21,103,107,111,112,113,120,121,140,301,401,410 | `odbedit -e bt2026 -c 'ls -lr /Equipment' \| grep "Event ID"` — no `0x0008` |
 | Equipment name free | `Quad HV` exists (musip), `CaenHV` does not | `odbedit -e bt2026 -c 'ls /Equipment'` |
-| CMake version | `scfe/CMakeLists.txt` requires **3.37** | `cmake --version` on pinky — **check**; if older, build with the overlay trick in `scratch/caen-hv-standalone/build.sh` or lower the requirement in a local copy |
+| CMake version | `scfe/CMakeLists.txt` requires **3.37** | pinky has CMake **4.3.0** (checked 2026-09-18) — fine |
 | MIDAS tree | `hv.cxx` includes `mstrlcpy.h`, found under `$MIDASSYS/include/mscb` on the pioneer-midas image | `ls $MIDASSYS/include/mscb/mstrlcpy.h $MIDASSYS/include/mstrlcpy.h` — **check** which exists; `CMakeLists.txt` already adds both `include` and `include/mscb` |
 | `pi_scfe` | the ODB starts `SlowControl` with the command `pi_scfe`, but the CMake target installs `scfe` | `which pi_scfe; file $(which pi_scfe)` — **check** whether it is a symlink/wrapper to the built `scfe`, and where the build directory is |
 | USB | the DT1470ET must be on USB (ID `21e1:0003`), the board in **REMOTE** | `lsusb \| grep 21e1`, `ls -l /dev/ttyACM*` |
@@ -52,7 +52,7 @@ git checkout feature/caen-hv-frontend      # or develop once the PR is merged
 Build exactly as `SlowControl` is built today (**check** the existing build dir; the ODB says the
 binary was built from `/home/pinky/bt2026/beamtime2026_pie5/scfe/scfe.cxx`):
 ```bash
-export MIDASSYS=/home/pinky/packages/midas      # check: the MIDAS install pinky uses
+export MIDASSYS=/home/pinky/packages/midas      # confirmed 2026-09-18 (already set in pinky's login environment)
 cmake -S scfe -B scfe/build && cmake --build scfe/build -j4
 ```
 Zero errors expected; `hv.cxx` (MIDAS's own class driver) compiles from `$MIDASSYS`. If cmake
