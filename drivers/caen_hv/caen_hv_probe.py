@@ -179,10 +179,12 @@ class CaenHV:
         return self.command("SET", par.upper(), ch=ch, val=val)
 
     def mon_float(self, par: str, ch: int | None = None) -> float:
-        return float(self.mon(par, ch))
+        """MON a numeric parameter; the board's zero padding is harmless here."""
+        return proto.parse_float(self.mon(par, ch))
 
     def mon_int(self, par: str, ch: int | None = None) -> int:
-        return int(float(self.mon(par, ch)))
+        """MON an integer parameter, always base 10 (``VAL:02048`` is 2048)."""
+        return proto.parse_int(self.mon(par, ch))
 
     def n_channels(self) -> int:
         return self.mon_int("BDNCH")
@@ -235,8 +237,9 @@ def dump_text(dev: CaenHV, nch: int | None = None) -> str:
     rows = [channel_row(dev, ch) for ch in range(nch)]
     for row in rows:
         try:
-            row["STAT"] = f"{int(float(row['STAT']))}"
-            row["BITS"] = ",".join(proto.decode_stat(int(row["STAT"]))) or "-"
+            # keep the wire text (zero-padded) but decode it base 10
+            row["BITS"] = ",".join(proto.decode_stat(
+                proto.parse_int(row["STAT"]))) or "-"
         except ValueError:
             row["BITS"] = "-"
     columns = ("CH",) + proto.DUMP_PARAMS + ("BITS",)
@@ -254,8 +257,8 @@ def dump_text(dev: CaenHV, nch: int | None = None) -> str:
         lines.append("  ".join(f"{cell(row, ch, col):<{widths[col]}}"
                                for col in columns))
     lines.append("")
-    lines.append("units: V, uA, RUP/RDW V/s, TRIP s "
-                 "(as documented, to be confirmed on hardware)")
+    lines.append("units: V, uA, RUP/RDW V/s, TRIP s; values as the board sends "
+                 "them (zero-padded, fw 1.08)")
     return "\n".join(lines)
 
 

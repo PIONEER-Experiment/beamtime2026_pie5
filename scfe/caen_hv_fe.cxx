@@ -161,6 +161,18 @@ namespace caen_hv {
    /// @brief fallback when the ODB timeout setting is nonsense
    constexpr int kDefaultTimeoutMs = 500;
 
+   /// @brief settling time between a PAR:ON / PAR:OFF and the STAT re-read
+   ///        that confirms it [ms]
+   constexpr int kChStateSettleMs = 100;
+
+   /// @brief longest message body this driver hands to cm_msg
+   ///
+   /// MIDAS's frontend printer memcpy()s the body into a char[160] without a
+   /// bound check (mfe.cxx:1357), so anything from ~159 characters up kills
+   /// the frontend. 120 leaves room for the "[file:line:routine,LEVEL] "
+   /// prefix that message_print() strips and a safety margin.
+   constexpr size_t kMaxMsgLen = 120;
+
 }  // namespace caen_hv
 
 /*---- ODB settings ------------------------------------------------*/
@@ -284,6 +296,24 @@ static bool caen_hv_may_log(CAEN_HV_FE_INFO *info, const char *kind)
    return true;
 }
 
+/// @brief send a message whose body can never overrun MIDAS's printer
+///
+/// mfe.cxx's message_print() copies every cm_msg body into a fixed
+/// `char str[160]` with memcpy and no bound (mfe.cxx:1348-1357, the copy is at
+/// mfe.cxx:1357), so a body of ~159 characters or more aborts the whole
+/// frontend with glibc's "*** buffer overflow detected ***". Every format
+/// below is written to stay inside caen_hv::kMaxMsgLen, with an explicit
+/// precision on every runtime string (a port name is up to 63 characters, a
+/// strerror() text ~40, a board reply up to 1024). This macro truncates as a
+/// last line of defence. It is a macro, not a function, so __FILE__/__LINE__
+/// still point at the real call site.
+#define CAEN_HV_MSG(type, fmt, ...)                                            \
+   do {                                                                        \
+      char caen_hv_body_[caen_hv::kMaxMsgLen + 1];                             \
+      snprintf(caen_hv_body_, sizeof(caen_hv_body_), fmt __VA_OPT__(,) __VA_ARGS__); \
+      cm_msg(type, "caen_hv_fe", "%s", caen_hv_body_);                         \
+   } while (0)
+
 /// @brief reply timeout in ms, guarded against a nonsense ODB setting
 static int caen_hv_timeout_ms(const CAEN_HV_FE_INFO *info)
 {
@@ -357,8 +387,7 @@ static void caen_hv_port_lost(CAEN_HV_FE_INFO *info, const char *what, int err)
    // One message per loss, and rate limited on top so a flapping cable cannot
    // fill the message log every 5 s.
    if (was_connected && caen_hv_may_log(info, "lost")) {
-      cm_msg(MERROR, "caen_hv_fe", "lost connection to %s (%s, errno=%d), "
-             "retrying every %d s",
+      CAEN_HV_MSG(MERROR, "HV %.40s lost (%.20s, errno %d), retry %ds",
              info->settings.port, what, err,
              (int) caen_hv::kReopenInterval.count());
    }
@@ -388,8 +417,8 @@ static bool caen_hv_port_open(CAEN_HV_FE_INFO *info, bool quiet = false)
    if (fd < 0) {
       info->last_open_errno = errno;
       if (!quiet && caen_hv_may_log(info, "open")) {
-         cm_msg(MERROR, "caen_hv_fe", "cannot open %s: errno=%d (%s)",
-                info->settings.port, errno, strerror(errno));
+         CAEN_HV_MSG(MERROR, "cannot open HV %.40s: %.40s",
+                info->settings.port, strerror(errno));
       }
       return false;
    }
@@ -406,8 +435,7 @@ static bool caen_hv_port_open(CAEN_HV_FE_INFO *info, bool quiet = false)
    memset(&tio, 0, sizeof(tio));
    if (tcgetattr(fd, &tio) != 0) {
       if (caen_hv_may_log(info, "termios")) {
-         cm_msg(MERROR, "caen_hv_fe", "tcgetattr(%s) failed: errno=%d",
-                info->settings.port, errno);
+         CAEN_HV_MSG(MERROR, "tcgetattr %.40s: errno %d", info->settings.port, errno);
       }
       close(fd);
       return false;
@@ -422,8 +450,7 @@ static bool caen_hv_port_open(CAEN_HV_FE_INFO *info, bool quiet = false)
    tio.c_cc[VTIME] = 0;
    if (tcsetattr(fd, TCSANOW, &tio) != 0) {
       if (caen_hv_may_log(info, "termios")) {
-         cm_msg(MERROR, "caen_hv_fe", "tcsetattr(%s) failed: errno=%d",
-                info->settings.port, errno);
+         CAEN_HV_MSG(MERROR, "tcsetattr %.40s: errno %d", info->settings.port, errno);
       }
       close(fd);
       return false;
@@ -535,9 +562,8 @@ static void caen_hv_resync(CAEN_HV_FE_INFO *info)
 
       if (std::chrono::steady_clock::now() >= give_up) {
          if (caen_hv_may_log(info, "resync")) {
-            cm_msg(MERROR, "caen_hv_fe",
-                   "%s keeps sending unsolicited data, cannot resynchronise",
-                   info->settings.port);
+            CAEN_HV_MSG(MERROR,
+                   "HV %.40s babbling, cannot resync", info->settings.port);
          }
          return;    // desync stays set, we try again next time
       }
@@ -559,7 +585,7 @@ static bool caen_hv_write_all(CAEN_HV_FE_INFO *info, const std::string &req)
       auto now = std::chrono::steady_clock::now();
       if (now >= deadline) {
          if (caen_hv_may_log(info, "write")) {
-            cm_msg(MERROR, "caen_hv_fe", "write to %s did not complete in %d ms",
+            CAEN_HV_MSG(MERROR, "HV %.40s write timeout (%d ms)",
                    info->settings.port, timeout_ms);
          }
          return false;
@@ -581,8 +607,7 @@ static bool caen_hv_write_all(CAEN_HV_FE_INFO *info, const std::string &req)
             return false;
          }
          if (caen_hv_may_log(info, "write")) {
-            cm_msg(MERROR, "caen_hv_fe", "select for write on %s failed: errno=%d",
-                   info->settings.port, errno);
+            CAEN_HV_MSG(MERROR, "HV %.40s select-write: errno %d", info->settings.port, errno);
          }
          return false;
       }
@@ -603,8 +628,7 @@ static bool caen_hv_write_all(CAEN_HV_FE_INFO *info, const std::string &req)
          return false;
       }
       if (caen_hv_may_log(info, "write")) {
-         cm_msg(MERROR, "caen_hv_fe", "write to %s failed: errno=%d",
-                info->settings.port, errno);
+         CAEN_HV_MSG(MERROR, "HV %.40s write: errno %d", info->settings.port, errno);
       }
       return false;
    }
@@ -766,7 +790,7 @@ static std::optional<std::string> caen_hv_query(CAEN_HV_FE_INFO *info,
    auto reply = caen_hv_transact(info, req);
    if (!reply) {
       if (info->connected && caen_hv_may_log(info, "timeout")) {
-         cm_msg(MERROR, "caen_hv_fe", "no reply within %d ms to '%s,PAR:%s'",
+         CAEN_HV_MSG(MERROR, "no reply in %d ms to %.4s PAR:%.8s",
                 caen_hv_timeout_ms(info), cmd, par);
       }
       return std::nullopt;
@@ -778,13 +802,12 @@ static std::optional<std::string> caen_hv_query(CAEN_HV_FE_INFO *info,
    if (line.find(":ERR") != std::string::npos) {
       if (line.find("LOC:ERR") != std::string::npos) {
          if (caen_hv_may_log(info, "local")) {
-            cm_msg(MERROR, "caen_hv_fe",
-                   "board in LOCAL mode, sets are ignored "
-                   "(put it in REMOTE on the touchscreen)");
+            CAEN_HV_MSG(MERROR,
+                   "board in LOCAL mode, sets ignored (set REMOTE)");
          }
       } else if (caen_hv_may_log(info, "err")) {
-         cm_msg(MERROR, "caen_hv_fe", "board rejected CMD:%s,PAR:%s%s%s: %s",
-                cmd, par, val ? ",VAL:" : "", val ? val : "", line.c_str());
+         CAEN_HV_MSG(MERROR, "board rejected %.4s PAR:%.8s VAL:%.12s: %.40s",
+                cmd, par, val ? val : "-", line.c_str());
       }
       return std::nullopt;
    }
@@ -794,22 +817,20 @@ static std::optional<std::string> caen_hv_query(CAEN_HV_FE_INFO *info,
    if (line.size() < 4 || line[0] != '#' ||
        sscanf(line.c_str(), "#BD:%d", &rbd) != 1) {
       if (caen_hv_may_log(info, "parse")) {
-         cm_msg(MERROR, "caen_hv_fe", "unparsable reply to CMD:%s,PAR:%s: '%s'",
-                cmd, par, line.c_str());
+         CAEN_HV_MSG(MERROR, "bad reply to %.4s PAR:%.8s: '%.40s'", cmd, par, line.c_str());
       }
       return std::nullopt;
    }
    if (rbd != info->settings.board) {
       if (caen_hv_may_log(info, "board")) {
-         cm_msg(MERROR, "caen_hv_fe", "reply from board %d, expected %d: '%s'",
+         CAEN_HV_MSG(MERROR, "reply from board %d, expected %d: '%.40s'",
                 rbd, info->settings.board, line.c_str());
       }
       return std::nullopt;
    }
    if (line.find("CMD:OK") == std::string::npos) {
       if (caen_hv_may_log(info, "parse")) {
-         cm_msg(MERROR, "caen_hv_fe", "reply without CMD:OK to CMD:%s,PAR:%s: '%s'",
-                cmd, par, line.c_str());
+         CAEN_HV_MSG(MERROR, "no CMD:OK for %.4s PAR:%.8s: '%.40s'", cmd, par, line.c_str());
       }
       return std::nullopt;
    }
@@ -818,7 +839,7 @@ static std::optional<std::string> caen_hv_query(CAEN_HV_FE_INFO *info,
    if (info->announce_recovery) {
       info->announce_recovery = false;
       if (caen_hv_may_log(info, "recovered")) {
-         cm_msg(MINFO, "caen_hv_fe", "%s is answering again", info->settings.port);
+         CAEN_HV_MSG(MINFO, "HV %.40s answering again", info->settings.port);
       }
    }
 
@@ -843,8 +864,7 @@ static bool caen_hv_mon_float(CAEN_HV_FE_INFO *info, int ch, const char *par,
    double d = strtod(val->c_str(), &end);
    if (end == val->c_str()) {
       if (caen_hv_may_log(info, "parse")) {
-         cm_msg(MERROR, "caen_hv_fe", "PAR:%s CH:%d returned non-numeric '%s'",
-                par, ch, val->c_str());
+         CAEN_HV_MSG(MERROR, "PAR:%.8s CH:%d non-numeric '%.20s'", par, ch, val->c_str());
       }
       return false;
    }
@@ -865,11 +885,11 @@ static bool caen_hv_mon_dword(CAEN_HV_FE_INFO *info, int ch, const char *par,
       return false;
    }
    char *end = NULL;
-   unsigned long ul = strtoul(val->c_str(), &end, 0);
+   // base 10, never 0: the board zero-pads ("VAL:02048") and auto-detection would read that as octal
+   unsigned long ul = strtoul(val->c_str(), &end, 10);
    if (end == val->c_str()) {
       if (caen_hv_may_log(info, "parse")) {
-         cm_msg(MERROR, "caen_hv_fe", "PAR:%s CH:%d returned non-numeric '%s'",
-                par, ch, val->c_str());
+         CAEN_HV_MSG(MERROR, "PAR:%.8s CH:%d non-numeric '%.20s'", par, ch, val->c_str());
       }
       return false;
    }
@@ -891,8 +911,7 @@ static int caen_hv_read_polarity(CAEN_HV_FE_INFO *info, int ch)
    } else if (val->find('-') != std::string::npos) {
       pol = -1;
    } else if (caen_hv_may_log(info, "pol")) {
-      cm_msg(MERROR, "caen_hv_fe", "PAR:POL CH:%d returned '%s', expected + or -",
-             ch, val->c_str());
+      CAEN_HV_MSG(MERROR, "PAR:POL CH:%d: '%.20s' is not + or -", ch, val->c_str());
    }
    if (pol != 0) {
       info->channel[ch].pol.store(pol);
@@ -941,10 +960,9 @@ static INT caen_hv_set_ramp(CAEN_HV_FE_INFO *info, int ch, const char *par,
 {
    if (std::isfinite(value) && value < caen_hv::kMinRampSpeed) {
       if (caen_hv_may_log(info, "ramp_zero")) {
-         cm_msg(MERROR, "caen_hv_fe",
-                "ramp speed below %g V/s not sent (PAR:%s CH:%d = %g); set "
-                "Settings/Ramp Up|Down Speed to the value the board should use",
-                (double) caen_hv::kMinRampSpeed, par, ch, (double) value);
+         CAEN_HV_MSG(MERROR,
+                "PAR:%.4s CH:%d: ramp %.3g V/s below %.3g, not sent",
+                par, ch, (double) value, (double) caen_hv::kMinRampSpeed);
       }
       return FE_ERR_HW;
    }
@@ -998,7 +1016,7 @@ INT caen_hv_fe_init(HNDLE hKey, void **pinfo, INT channels, INT(*bd)(INT cmd, ..
    // The "$BD:%02d" framing breaks above 99 and the bus only goes to 31.
    if (info->settings.board < 0 || info->settings.board > caen_hv::kMaxBoardAddress) {
       int clamped = info->settings.board < 0 ? 0 : caen_hv::kMaxBoardAddress;
-      cm_msg(MERROR, "caen_hv_fe", "Board Address %d out of range 0..%d, using %d",
+      CAEN_HV_MSG(MERROR, "Board Address %d out of 0..%d, using %d",
              info->settings.board, caen_hv::kMaxBoardAddress, clamped);
       info->settings.board = clamped;
    }
@@ -1013,11 +1031,9 @@ INT caen_hv_fe_init(HNDLE hKey, void **pinfo, INT channels, INT(*bd)(INT cmd, ..
    // The helper is asked to stay quiet so this is the *only* message about a
    // missing port at startup.
    if (!caen_hv_port_open(info.get(), true)) {
-      cm_msg(MERROR, "caen_hv_fe",
-             "cannot open HV port %s (errno=%d, %s); equipment starts without "
-             "the device and retries every %d s",
-             info->settings.port, info->last_open_errno,
-             strerror(info->last_open_errno),
+      CAEN_HV_MSG(MERROR,
+             "HV %.40s: %.30s - no device, retry %ds",
+             info->settings.port, strerror(info->last_open_errno),
              (int) caen_hv::kReopenInterval.count());
       // Arm the recovery notice: without this only a *loss* would announce a
       // later reconnect, and a device attached after the frontend started
@@ -1034,12 +1050,9 @@ INT caen_hv_fe_init(HNDLE hKey, void **pinfo, INT channels, INT(*bd)(INT cmd, ..
    auto bdsnum = caen_hv_query(info.get(), caen_hv::kCmdMon, -1, caen_hv::kParBdSNum, NULL);
    auto bdctr  = caen_hv_query(info.get(), caen_hv::kCmdMon, -1, caen_hv::kParBdCtr, NULL);
 
-   cm_msg(MINFO, "caen_hv_fe",
-          "CAEN HV on %s (BD %d): model '%s', %s channels, firmware '%s', "
-          "serial '%s', control '%s'",
-          info->settings.port, info->settings.board,
+   CAEN_HV_MSG(MINFO,
+          "CAEN HV %.12s fw %.10s sn %.12s ctrl %.8s",
           bdname ? bdname->c_str() : "?",
-          bdnch  ? bdnch->c_str()  : "?",
           bdfrel ? bdfrel->c_str() : "?",
           bdsnum ? bdsnum->c_str() : "?",
           bdctr  ? bdctr->c_str()  : "?");
@@ -1049,21 +1062,19 @@ INT caen_hv_fe_init(HNDLE hKey, void **pinfo, INT channels, INT(*bd)(INT cmd, ..
    if (bdnch) {
       int nch = atoi(bdnch->c_str());
       if (nch != channels) {
-         cm_msg(MERROR, "caen_hv_fe",
-                "board reports %d channels, frontend is configured for %d "
-                "(fix the DEVICE_DRIVER table in scfe.cxx)", nch, (int) channels);
+         CAEN_HV_MSG(MERROR,
+                "board has %d channels, scfe.cxx configures %d", nch, (int) channels);
       }
       if (info->settings.expected_channels > 0 &&
           nch != info->settings.expected_channels) {
-         cm_msg(MERROR, "caen_hv_fe",
-                "board reports %d channels, ODB 'Expected Channels' says %d",
+         CAEN_HV_MSG(MERROR,
+                "board has %d channels, ODB Expected Channels %d",
                 nch, info->settings.expected_channels);
       }
    }
    if (bdctr && bdctr->find("LOCAL") != std::string::npos) {
-      cm_msg(MERROR, "caen_hv_fe",
-             "board is in LOCAL mode: monitoring works, all sets will be "
-             "refused with LOC:ERR until it is switched to REMOTE");
+      CAEN_HV_MSG(MERROR,
+             "board in LOCAL mode: sets refused until set to REMOTE");
    }
 
    // --- per channel initial state ----------------------------------
@@ -1298,8 +1309,8 @@ static INT caen_hv_set_chstate(CAEN_HV_FE_INFO *info, INT channel, float value)
 
    if (value != 0.0f && value != 1.0f) {
       if (caen_hv_may_log(info, "chstate_value")) {
-         cm_msg(MERROR, "caen_hv_fe",
-                "ignoring ChState[%d] = %g, expected exactly 0 or 1",
+         CAEN_HV_MSG(MERROR,
+                "ChState[%d] = %.3g ignored, expect exactly 0 or 1",
                 (int) channel, (double) value);
       }
       return FE_SUCCESS;
@@ -1311,9 +1322,8 @@ static INT caen_hv_set_chstate(CAEN_HV_FE_INFO *info, INT channel, float value)
    if (want_on) {
       if (!ch.stat_valid) {
          if (caen_hv_may_log(info, "chstate_unknown")) {
-            cm_msg(MERROR, "caen_hv_fe",
-                   "refusing to switch channel %d on: its state was never read "
-                   "back from the board", (int) channel);
+            CAEN_HV_MSG(MERROR,
+                   "ch %d: ON refused, state never read from board", (int) channel);
          }
          return FE_ERR_HW;
       }
@@ -1333,18 +1343,57 @@ static INT caen_hv_set_chstate(CAEN_HV_FE_INFO *info, INT channel, float value)
       return FE_ERR_HW;
    }
 
-   // Reflect the new state right away so a repeated hotlink call is a no-op
-   // even before the next STAT read.
-   if (want_on) {
-      ch.stat |= (1u << caen_hv::kStatOn);
-   } else {
-      ch.stat &= ~(DWORD) (1u << caen_hv::kStatOn);
+   // CMD:OK does *not* mean the channel switched. Measured on a DT1470ET with
+   // firmware 1.08: with the channel's front switch in OFF or KILL the board
+   // acknowledges PAR:ON and does nothing (STAT keeps caen_hv::kStatSwitchMask
+   // set, VMON stays 0). An optimistic cache update would then report a
+   // channel as on that is not, and keep ODB's ChState out of step with the
+   // hardware. So always re-read STAT and believe only the board.
+   ss_sleep(caen_hv::kChStateSettleMs);
+
+   DWORD word = 0;
+   if (!caen_hv_mon_dword(info, channel, caen_hv::kParStat, &word)) {
+      // The switch may or may not have happened; saying nothing is better
+      // than guessing. Dropping stat_valid also re-arms the "ON needs a
+      // confirmed state" guard until the next good CMD_GET_STATUS.
+      ch.stat_valid = false;
+      if (caen_hv_may_log(info, "chstate_unconfirmed")) {
+         CAEN_HV_MSG(MERROR,
+                "ch %d: %.3s accepted, state not readable back",
+                (int) channel, want_on ? "ON" : "OFF");
+      }
+      return FE_ERR_HW;
    }
-   if (ch.stat_valid && caen_hv_may_log(info, "chstate_done")) {
-      cm_msg(MINFO, "caen_hv_fe", "channel %d switched %s (STAT: %s)",
-             (int) channel, want_on ? "on" : "off",
-             caen_hv::stat_text(ch.stat).c_str());
+   ch.stat = word;
+   ch.stat_valid = true;
+
+   bool now_on = (word & (1u << caen_hv::kStatOn)) != 0;
+
+   if (want_on && !now_on) {
+      CAEN_HV_MSG(MERROR,
+             "ch %d: ON accepted, not executed (STAT %.32s)"
+             " - check front switch KILL/OFF/ON",
+             (int) channel, caen_hv::stat_text(word).c_str());
+      return FE_ERR_HW;
    }
+
+   if (!want_on && now_on) {
+      // A channel that is ramping down is executing the OFF, that is not a
+      // failure. @todo confirm on hardware whether STAT clears bit 0 at once
+      // or only at the end of the ramp.
+      if (!(word & (1u << caen_hv::kStatRDwn))) {
+         if (caen_hv_may_log(info, "chstate_off_pending")) {
+            CAEN_HV_MSG(MERROR,
+                   "ch %d: OFF accepted but still reports ON (STAT %.32s)",
+                   (int) channel, caen_hv::stat_text(word).c_str());
+         }
+      }
+      return FE_SUCCESS;
+   }
+
+   CAEN_HV_MSG(MINFO, "ch %d switched %.3s (STAT %.32s)",
+          (int) channel, want_on ? "on" : "off",
+          caen_hv::stat_text(word).c_str());
    return FE_SUCCESS;
 }
 

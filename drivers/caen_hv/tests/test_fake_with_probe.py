@@ -127,6 +127,87 @@ class FakeWithProbeTest(unittest.TestCase):
             self.assertAlmostEqual(dev.mon_float("VSET", 0), 100.0, places=3)
             self.assertIn("MAXV", proto.decode_stat(dev.mon_int("STAT", 0)))
 
+    def test_numeric_replies_are_zero_padded(self) -> None:
+        """The board zero-pads every numeric reply (fw 1.08)."""
+        with Fake() as fake, fake.client() as dev:
+            dev.set("VSET", 0, "1100")
+            dev.set("ISET", 0, "400")
+            dev.set("MAXV", 0, "8100")
+            dev.set("RUP", 0, "50")
+            dev.set("TRIP", 0, "10")
+            self.assertEqual(dev.mon("VSET", 0), "1100.0")
+            self.assertEqual(dev.mon("VMON", 0), "0000.0")
+            self.assertEqual(dev.mon("ISET", 0), "0400.00")
+            self.assertEqual(dev.mon("IMON", 0), "0000.00")
+            self.assertEqual(dev.mon("MAXV", 0), "8100")
+            self.assertEqual(dev.mon("RUP", 0), "050")
+            self.assertEqual(dev.mon("RDW", 0), "050")
+            self.assertEqual(dev.mon("TRIP", 0), "0010.0")
+            self.assertEqual(dev.mon("STAT", 0), "00000")
+            self.assertEqual(dev.mon("BDNCH"), "4")
+            self.assertEqual(dev.mon("BDALARM"), "0")
+            self.assertEqual(dev.mon("PDWN", 0), "KILL")
+            # padding must not survive into the typed accessors
+            self.assertEqual(dev.mon_float("VSET", 0), 1100.0)
+            self.assertEqual(dev.mon_int("MAXV", 0), 8100)
+
+    def test_raw_stat_reply_is_five_digits(self) -> None:
+        """A raw MON STAT reply below 10000 is 'VAL:0' + a 5-digit field."""
+        with Fake("--stat-bits", "2048") as fake, fake.client() as dev:
+            reply = dev.exchange(
+                proto.build_request(0, "MON", "STAT", ch=0))
+            self.assertIn("VAL:0", reply.raw)
+            value = reply.value or ""
+            self.assertEqual(len(value), 5)
+            self.assertTrue(value.isdigit())
+            self.assertLess(int(value, 10), 10000)
+            self.assertEqual(value, "02048")
+            # decimal, not octal: octal 02048 would not even parse
+            self.assertEqual(reply.as_int(), 2048)
+            self.assertEqual(proto.parse_int(value), 2048)
+            self.assertIn("KILL", proto.decode_stat(reply.as_int()))
+
+    def test_parse_reply_zero_padded_is_decimal(self) -> None:
+        reply = proto.parse_reply("#BD:00,CMD:OK,VAL:02048\r\n")
+        self.assertTrue(reply.ok)
+        self.assertEqual(reply.value, "02048")
+        self.assertEqual(reply.as_int(), 2048)
+        self.assertEqual(proto.parse_int("02048"), 2048)
+        self.assertEqual(proto.parse_float("0000.00"), 0.0)
+        self.assertEqual(proto.parse_int("00000"), 0)
+        # what the C++ driver did wrong
+        with self.assertRaises(ValueError):
+            int("02048", 0)
+
+    def test_format_value_matches_hardware(self) -> None:
+        cases = [
+            ("VSET", 1100.0, "1100.0"), ("VSET", 0.0, "0000.0"),
+            ("VMON", 0.0, "0000.0"), ("ISET", 400.0, "0400.00"),
+            ("IMON", 0.0, "0000.00"), ("MAXV", 8100.0, "8100"),
+            ("RUP", 50.0, "050"), ("RDW", 50.0, "050"),
+            ("TRIP", 10.0, "0010.0"), ("STAT", 2048, "02048"),
+            ("BDNCH", 4, "4"), ("BDALARM", 0, "0"),
+            ("POL", "-", "-"), ("PDWN", "RAMP", "RAMP"),
+            ("BDFREL", "1.08", "1.08"), ("BDSNUM", "33997", "33997"),
+        ]
+        for par, value, expected in cases:
+            with self.subTest(par=par, value=value):
+                self.assertEqual(proto.format_value(value, par), expected)
+
+    def test_observed_board_identity(self) -> None:
+        with Fake() as fake, fake.client() as dev:
+            info = probe.info_dict(dev)
+            self.assertEqual(info["BDFREL"], "1.08")
+            self.assertEqual(info["BDSNUM"], "33997")
+            self.assertEqual(info["BDILK"], "NO")
+            self.assertEqual(info["BDILKM"], "CLOSED")
+
+    def test_wrong_board_address_is_silence(self) -> None:
+        with Fake() as fake:
+            dev = probe.CaenHV(fake.path, bd=1, timeout=0.5)
+            with dev, self.assertRaises(probe.CaenHVTimeout):
+                dev.mon("BDNAME")
+
     def test_stat_bits_flag_shows_ovc(self) -> None:
         with Fake("--stat-bits", "8") as fake, fake.client() as dev:
             self.assertIn("OVC", proto.decode_stat(dev.mon_int("STAT", 0)))

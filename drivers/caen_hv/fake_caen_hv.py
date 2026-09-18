@@ -76,10 +76,11 @@ class Board:
     bdname: str = "DT1470ET"
     nch: int = 4
     bd: int = 0
-    bdfrel: str = "00.07"
-    bdsnum: str = "00042"
+    bdfrel: str = "1.08"
+    bdsnum: str = "33997"
     local: bool = False
     bdilkm: str = "CLOSED"
+    bdilk: bool = False
     bdterm: str = "ON"
     bdalarm: int = 0
     load_ohm: float = 1e6
@@ -170,33 +171,36 @@ class Board:
     def _do_mon(self, par: str, spec: proto.Param, ch_index: int | None) -> str:
         with self.lock:
             if spec.scope == "bd":
-                board_values = {
+                board_values: dict[str, object] = {
                     "BDNAME": self.bdname,
-                    "BDNCH": str(self.nch),
+                    "BDNCH": self.nch,
                     "BDFREL": self.bdfrel,
                     "BDSNUM": self.bdsnum,
                     "BDCTR": "LOCAL" if self.local else "REMOTE",
                     "BDTERM": self.bdterm,
-                    "BDILK": "NO",
+                    "BDILK": "YES" if self.bdilk else "NO",
                     "BDILKM": self.bdilkm,
-                    "BDALARM": str(self.bdalarm),
+                    "BDALARM": self.bdalarm,
                 }
-                return proto.ok_reply(self.bd, board_values[par])
+                return proto.ok_reply(self.bd,
+                                      proto.format_value(board_values[par], par))
             ch = self.channels[ch_index or 0]
-            channel_values = {
-                "VSET": proto.format_value(ch.vset, "float"),
-                "ISET": proto.format_value(ch.iset, "float"),
-                "VMON": proto.format_value(ch.vmon, "float"),
-                "IMON": proto.format_value(ch.imon, "float"),
-                "MAXV": proto.format_value(ch.maxv, "float"),
-                "RUP": proto.format_value(ch.rup, "float"),
-                "RDW": proto.format_value(ch.rdw, "float"),
-                "TRIP": proto.format_value(ch.trip, "float"),
+            channel_values: dict[str, object] = {
+                "VSET": ch.vset,
+                "ISET": ch.iset,
+                "VMON": ch.vmon,
+                "IMON": ch.imon,
+                "MAXV": ch.maxv,
+                "RUP": ch.rup,
+                "RDW": ch.rdw,
+                "TRIP": ch.trip,
                 "PDWN": ch.pdwn,
                 "POL": ch.pol,
-                "STAT": str(ch.stat()),
+                "STAT": ch.stat(),
             }
-            return proto.ok_reply(self.bd, channel_values[par])
+            # the board zero-pads every numeric reply -- see Param.fmt
+            return proto.ok_reply(self.bd,
+                                  proto.format_value(channel_values[par], par))
 
     # -- SET ---------------------------------------------------------------
     def _do_set(self, fields: dict[str, str], par: str, spec: proto.Param,
