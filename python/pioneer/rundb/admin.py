@@ -61,7 +61,7 @@ class db_admin_tool:
                             SELECT rolname
                             FROM pg_roles
                             WHERE rolname NOT LIKE 'pg_%'
-                            AND rolname <> '{self.admin_user}'
+                            AND rolname <> '{self.admin_user}' AND rolname <> 'postgres'
                         LOOP
                             EXECUTE format('DROP OWNED BY %I', r.rolname);
                             EXECUTE format('DROP ROLE IF EXISTS %I', r.rolname);

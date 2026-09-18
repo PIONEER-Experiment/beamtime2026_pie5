@@ -307,11 +307,11 @@ WITH positions(rn, seq_id, xpos, comment) AS (
     SELECT *
     FROM (
         VALUES
-            (1, 1,  34, "XXX mm"),
-            (2, 1,  89, "XXX mm"),
-            (3, 1, 143, "XXX mm"),
-            (4, 1, 198, "XXX mm"),
-            (5, 1, 253, "XXX mm")
+            (1, 1,  34, 'XXX mm'),
+            (2, 1,  89, 'XXX mm'),
+            (3, 1, 143, 'XXX mm'),
+            (4, 1, 198, 'XXX mm'),
+            (5, 1, 253, 'XXX mm')
     ) v(rn, seq_id, xpos, comment)
 ),
 configs AS (
