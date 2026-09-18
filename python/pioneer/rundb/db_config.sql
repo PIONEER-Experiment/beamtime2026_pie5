@@ -303,6 +303,33 @@ CREATE TABLE IF NOT EXISTS config.degrader_position(
     comment TEXT                                             -- comment people may want to add. not used by the state machine.
 );
 
+WITH positions(rn, seq_id, xpos, comment) AS (
+    SELECT *
+    FROM (
+        VALUES
+            (1, 1,  34, "XXX mm"),
+            (2, 1,  89, "XXX mm"),
+            (3, 1, 143, "XXX mm"),
+            (4, 1, 198, "XXX mm"),
+            (5, 1, 253, "XXX mm")
+    ) v(rn, seq_id, xpos, comment)
+),
+configs AS (
+    INSERT INTO config.configuration (config_type)
+    SELECT 'degrader_position'
+    FROM positions
+    ORDER BY rn
+    RETURNING id
+),
+config_ids AS (
+    SELECT id, row_number() OVER (ORDER BY id) AS rn
+    FROM configs
+)
+INSERT INTO config.degrader_position (id, seq_id, xpos, comment)
+SELECT c.id, p.seq_id, p.xpos, p.comment
+FROM config_ids c
+JOIN positions p USING (rn);
+
 CREATE TABLE IF NOT EXISTS config.pim1_epics (
     id INT PRIMARY KEY REFERENCES config.configuration(id),
     seq_id INT DEFAULT 0,
