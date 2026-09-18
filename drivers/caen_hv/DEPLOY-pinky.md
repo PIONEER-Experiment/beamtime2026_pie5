@@ -16,9 +16,15 @@ module, a custom page, and the probe/fake tools. Nothing in the existing equipme
 | Event ID 8 free on pinky | IDs in use: 0,1,6,7,21,103,107,111,112,113,120,121,140,301,401,410 | `odbedit -e bt2026 -c 'ls -lr /Equipment' \| grep "Event ID"` — no `0x0008` |
 | Equipment name free | `Quad HV` exists (musip), `CaenHV` does not | `odbedit -e bt2026 -c 'ls /Equipment'` |
 | CMake version | `scfe/CMakeLists.txt` requires **3.37** | pinky has CMake **4.3.0** (checked 2026-09-18) — fine |
-| MIDAS tree | `hv.cxx` includes `mstrlcpy.h`, found under `$MIDASSYS/include/mscb` on the pioneer-midas image | `ls $MIDASSYS/include/mscb/mstrlcpy.h $MIDASSYS/include/mstrlcpy.h` — **check** which exists; `CMakeLists.txt` already adds both `include` and `include/mscb` |
-| `pi_scfe` | the ODB starts `SlowControl` with the command `pi_scfe`, but the CMake target installs `scfe` | `which pi_scfe; file $(which pi_scfe)` — **check** whether it is a symlink/wrapper to the built `scfe`, and where the build directory is |
+| MIDAS tree | `hv.cxx` includes `mstrlcpy.h` | on pinky it is at `$MIDASSYS/include/mscb/mstrlcpy.h` only (checked 2026-09-18); `CMakeLists.txt` adds that directory — fine |
+| `pi_scfe` | the ODB starts `SlowControl` with the command `pi_scfe` | `~/bin/pi_scfe` is a symlink to `/home/pinky/bt2026/beamtime2026_pie5/scfe/build/scfe` (checked 2026-09-18), so building into `scfe/build` replaces the binary in place; the running process keeps the old one until `SlowControl` is restarted |
 | USB | the DT1470ET must be on USB (ID `21e1:0003`), the board in **REMOTE** | `lsusb \| grep 21e1`, `ls -l /dev/ttyACM*` |
+
+**MIDAS version on pinky:** commit `c9dda005` (2026-03-18). The files this frontend depends on —
+`drivers/class/hv.cxx`, `src/device_driver.cxx`, `src/mfe.cxx`, `include/midas.h` — are byte-identical
+to the revision the frontend was developed and tested against (`ee45b114`, 2026-08-04); `eqtable.js`
+and `alarm.cxx` differ only in message wording. The three MIDAS quirks listed at the end therefore
+apply on pinky exactly as observed here.
 
 ## 1. Hardware and OS (pinky, root once)
 
@@ -49,15 +55,13 @@ cd /home/pinky/bt2026/beamtime2026_pie5
 git fetch origin
 git checkout feature/caen-hv-frontend      # or develop once the PR is merged
 ```
-Build exactly as `SlowControl` is built today (**check** the existing build dir; the ODB says the
-binary was built from `/home/pinky/bt2026/beamtime2026_pie5/scfe/scfe.cxx`):
+Build into the existing build directory (`~/bin/pi_scfe` points at `scfe/build/scfe`):
 ```bash
 export MIDASSYS=/home/pinky/packages/midas      # confirmed 2026-09-18 (already set in pinky's login environment)
 cmake -S scfe -B scfe/build && cmake --build scfe/build -j4
 ```
-Zero errors expected; `hv.cxx` (MIDAS's own class driver) compiles from `$MIDASSYS`. If cmake
-complains about the 3.37 requirement, see §0. Make sure whatever `pi_scfe` resolves to points at
-the new binary (re-run `cmake --install` if that is how it was installed, or update the symlink).
+Zero errors expected; `hv.cxx` (MIDAS's own class driver) compiles from `$MIDASSYS`. Nothing else
+to install: `pi_scfe` already resolves to `scfe/build/scfe`.
 
 Do **not** restart the frontend yet.
 
