@@ -38,6 +38,19 @@ namespace caen_hv {
    ///        must not include it.
    constexpr DWORD kStatStale = 1u << 31;
 
+   /// @brief STAT bits that reflect the channel's 3-position front switch
+   ///
+   /// Measured on a DT1470ET with firmware 1.08: the switch is reported in
+   /// STAT, not in a parameter of its own -
+   ///   KILL -> bit 11 (kStatKill, 2048)
+   ///   OFF  -> bit 10 (kStatDis,  1024)
+   ///   ON   -> neither bit set
+   /// While either bit is set the board still answers CMD:OK to PAR:ON but
+   /// does not switch the channel on, so a set is acknowledged and silently
+   /// not executed. Use this mask to tell an operator-disabled channel from a
+   /// fault before raising an alarm about it.
+   constexpr DWORD kStatSwitchMask = (1u << kStatDis) | (1u << kStatKill);
+
    /// @brief Variables/Current value meaning "IMON was never read"
    ///
    /// CMD_GET_CURRENT must never report NaN, because cd_hv's Current block has

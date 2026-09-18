@@ -12,6 +12,12 @@ Wire format (terminator: ``\\r\\n``, but accept ``\\r``, ``\\n`` or ``\\r\\n``):
     $BD:00,CMD:SET,CH:0,PAR:VSET,VAL:1000   -> #BD:00,CMD:OK
     $BD:00,CMD:MON,PAR:BDNAME               -> #BD:00,CMD:OK,VAL:DT1470ET
 
+The unit at hand zero-pads every numeric reply (confirmed on hardware
+2026-09-17, DT1470ET fw 1.08): ``VAL:1100.0`` comes back as ``VAL:1100.0``
+but ``VAL:0`` as ``VAL:0000.0`` and STAT as ``VAL:02048``.  The width is
+per-parameter (``Param.fmt``), and every integer must be parsed base 10 --
+``VAL:02048`` read as octal is 1064.
+
 Error replies carry ``ERR`` as the value of the offending field::
 
     #BD:00,CMD:ERR   unknown/malformed command
@@ -46,6 +52,7 @@ class Param:
     choices: tuple[str, ...] = ()
     unit: str = ""
     desc: str = ""
+    fmt: str = "%s"  # how the board renders a MON reply (zero-padded!)
 
 
 def _p(*args, **kwargs) -> tuple[str, Param]:
@@ -58,25 +65,27 @@ def _p(*args, **kwargs) -> tuple[str, Param]:
 # --------------------------------------------------------------------------
 CH_PARAMS: dict[str, Param] = dict(
     [
-        _p("VSET", "ch", "float", settable=True, lo=0.0, hi=8000.0, unit="V",
-           desc="voltage set point (magnitude)"),
+        _p("VSET", "ch", "float", settable=True, lo=0.0, hi=8100.0, unit="V",
+           fmt="%06.1f", desc="voltage set point (magnitude)"),
         _p("ISET", "ch", "float", settable=True, lo=0.0, hi=3000.0, unit="uA",
-           desc="current limit"),
-        _p("VMON", "ch", "float", unit="V", desc="measured voltage"),
-        _p("IMON", "ch", "float", unit="uA", desc="measured current"),
-        _p("MAXV", "ch", "float", settable=True, lo=0.0, hi=8000.0, unit="V",
-           desc="hardware voltage limit"),
+           fmt="%07.2f", desc="current limit"),
+        _p("VMON", "ch", "float", unit="V", fmt="%06.1f",
+           desc="measured voltage"),
+        _p("IMON", "ch", "float", unit="uA", fmt="%07.2f",
+           desc="measured current"),
+        _p("MAXV", "ch", "float", settable=True, lo=0.0, hi=8100.0, unit="V",
+           fmt="%04d", desc="hardware voltage limit"),
         _p("RUP", "ch", "float", settable=True, lo=1.0, hi=500.0, unit="V/s",
-           desc="ramp-up speed"),
+           fmt="%03d", desc="ramp-up speed"),
         _p("RDW", "ch", "float", settable=True, lo=1.0, hi=500.0, unit="V/s",
-           desc="ramp-down speed"),
+           fmt="%03d", desc="ramp-down speed"),
         _p("TRIP", "ch", "float", settable=True, lo=0.0, hi=1000.0, unit="s",
-           desc="over-current trip time"),
+           fmt="%06.1f", desc="over-current trip time"),
         _p("PDWN", "ch", "enum", settable=True, choices=("KILL", "RAMP"),
            desc="power-down mode"),
         _p("POL", "ch", "enum", choices=("+", "-"),
            desc="polarity (read-only, physical switch)"),
-        _p("STAT", "ch", "int", desc="channel status bitmask"),
+        _p("STAT", "ch", "int", fmt="%05d", desc="channel status bitmask"),
         _p("ON", "ch", "none", mon=False, settable=True, desc="switch channel on"),
         _p("OFF", "ch", "none", mon=False, settable=True, desc="switch channel off"),
     ]
@@ -88,7 +97,7 @@ CH_PARAMS: dict[str, Param] = dict(
 BD_PARAMS: dict[str, Param] = dict(
     [
         _p("BDNAME", "bd", "str", desc="board model name"),
-        _p("BDNCH", "bd", "int", desc="number of channels"),
+        _p("BDNCH", "bd", "int", fmt="%d", desc="number of channels"),
         _p("BDFREL", "bd", "str", desc="firmware release"),
         _p("BDSNUM", "bd", "str", desc="serial number"),
         _p("BDCTR", "bd", "enum", choices=("LOCAL", "REMOTE"), desc="control mode"),
@@ -96,7 +105,7 @@ BD_PARAMS: dict[str, Param] = dict(
         _p("BDILK", "bd", "enum", choices=("YES", "NO"), desc="interlock status"),
         _p("BDILKM", "bd", "enum", settable=True, choices=("OPEN", "CLOSED"),
            desc="interlock mode"),
-        _p("BDALARM", "bd", "int", desc="board alarm bitmask"),
+        _p("BDALARM", "bd", "int", fmt="%d", desc="board alarm bitmask"),
         _p("BDCLR", "bd", "none", mon=False, settable=True, desc="clear board alarm"),
     ]
 )
@@ -195,6 +204,14 @@ class Reply:
     def ok(self) -> bool:
         return self.error is None
 
+    def as_int(self) -> int:
+        """VAL as a decimal integer, tolerating the board's zero padding."""
+        return parse_int(self.value or "")
+
+    def as_float(self) -> float:
+        """VAL as a float, tolerating the board's zero padding."""
+        return parse_float(self.value or "")
+
 
 def parse_reply(raw: str) -> Reply:
     """Parse a reply line.  A reply that is not ``CMD:OK`` is an error."""
@@ -221,11 +238,35 @@ def ok_reply(bd: int, val: str | None = None) -> str:
     return f"#BD:{bd:02d},CMD:OK,VAL:{val}"
 
 
-def format_value(value: float, kind: str) -> str:
-    """Render a numeric parameter the way the board does."""
-    if kind == "int":
-        return str(int(value))
-    return f"{value:.1f}"
+def format_value(value: object, par: str) -> str:
+    """Render a parameter exactly the way the board does.
+
+    The DT1470ET zero-pads every numeric reply (``VAL:02048``,
+    ``VAL:0000.00``), so the width lives with the parameter, not with its
+    kind.  Confirmed on hardware 2026-09-17 (fw 1.08).
+    """
+    spec = PARAMS.get(par.upper())
+    fmt = spec.fmt if spec is not None else "%s"
+    if fmt == "%s":
+        return str(value)
+    if fmt.endswith("d"):
+        return fmt % int(float(value))  # type: ignore[arg-type]
+    return fmt % float(value)  # type: ignore[arg-type]
+
+
+def parse_int(text: str) -> int:
+    """Parse a possibly zero-padded integer reply.
+
+    Always base 10: ``int("02048", 0)`` would raise and ``strtol(.., 0)``
+    in C would read it as octal 1064 -- the bug this padding caused in the
+    C++ driver.
+    """
+    return int(text.strip(), 10)
+
+
+def parse_float(text: str) -> float:
+    """Parse a possibly zero-padded float reply (``0000.00``)."""
+    return float(text.strip())
 
 
 def check_value(par: str, text: str) -> float | str | None:
