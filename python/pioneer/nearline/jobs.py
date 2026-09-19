@@ -3,9 +3,10 @@ import sys
 import json
 
 from pathlib import Path
-from string import Template
 
 from pioneer.rundb.interface import interface as db_interface
+
+from pioneer.nearline.render import render_job
 
 # This flag is set if the list of input files shall be determined
 # by using glob. Otherwise, an explicit list is used.
@@ -111,26 +112,22 @@ class GaudiJob(BaseJob):
         self.out_file_id = None
 
     def format_config_file(self) -> Path:
-        template_path = Path(__file__).resolve().parent / "template_config.py"
+        # `nearline_job.py` is itself the template: rendering it writes the
+        # complete job next to the outputs as <filebase>.py. That file names
+        # its own input, output and event limit, so it ignores every NL_*
+        # variable and re-running it reproduces this run exactly. The daemon's
+        # NL_CONDITIONS_DIR and NL_PG are baked in at this moment, which is
+        # what makes the artefact valid on a host with no /simulation.
         if self.infile is None:
             raise RuntimeError("input file not found in database")
 
         input_file_path  = Path(self.config['input'])  / f"{self.infile['filebase']}.{self.infile['fileext']}"
-        out_file_name = f"{self.infile['filebase']}.{self.infile['fileext']}"
+        out_file_name = f"{self.infile['filebase']}.root"
         output_file_path = Path(self.config['output']) / out_file_name
-        cfg_file_name = f"{self.infile['filebase']}.py"
 
-        cfg_template = Template(template_path.read_text())
-        cfg_str = cfg_template.substitute(
-            author   = "Me",
-            in_file  = input_file_path,
-            out_file = output_file_path
-        )
-
-        opt_file = Path(self.config['output']) / cfg_file_name
-        opt_file.write_text(cfg_str)
-
-        return opt_file
+        return render_job(input_file_path, output_file_path,
+                          job_id = self.config['job_id'],
+                          run_id = self.config['run_id'])
 
     def build_command(self):
         opt_file = self.format_config_file()
