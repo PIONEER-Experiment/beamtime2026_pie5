@@ -30,3 +30,15 @@ For the CAEN HV equipment specifically — shifter instructions (setting voltage
 [`drivers/caen_hv/README.md`](drivers/caen_hv/README.md).
 
 Deployment of the CaenHV equipment on pinky: `drivers/caen_hv/DEPLOY-pinky.md`.
+
+## Nearline
+
+`python/pioneer/nearline/` holds the nearline job — one MIDAS file in, one
+RNTuple and one `_hists.root` out, with the WaveDREAM and PSM/MuSiP systems
+decoded and reconstructed in the same pass — and the daemon that runs it over
+every file the DAQ produces. The histogram file is what the nearline website
+reads during a shift.
+
+Every setting, what it does and what goes wrong if it is wrong, plus how to run
+the job by hand: see
+[`python/pioneer/nearline/README.md`](python/pioneer/nearline/README.md).
