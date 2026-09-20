@@ -17,6 +17,11 @@ agreement, registered in midas_files/wavedream-scalar-readout/docs/REGISTRY.md.
     |     PIWDWaveformAnalysis -> /Event/wd_features   (consumes wd_rf_phase)
     |     PIWDCalibrator       -> /Event/wd_hits
     |
+    +-- PSMMuPixSeq ----------- gated on /Event/muquad
+    |     PIPSMMuPixMonitor    -> histograms only: a hit map per MuPix chip and
+    |                             per plane, and x/x', y/y' from an L1/L2 time
+    |                             coincidence with no scintillator involved
+    |
     +-- PSMRecoSeq ------------ gated on /Event/mutrig
     |     PIPSMSimpleTrackReco   -> /Event/exp_all_tracks   (+ histograms)
     |     PIPSMPatternReco       -> /Event/exp_pattern
@@ -56,7 +61,8 @@ from pi_midas.PIONEER_MIDAS_READERConf import (PIMidasSelector, PIMidasConversio
 from reco_testbeam.pi_wdalgConf import (PIWDCalibrator, PIWDRFPhase,
                                         PIWDSettingsSummary, PIWDWaveformAnalysis)
 from reco_testbeam.pi_psmalg_expConf import (PIPSMComputeWeight, PIPSMDelayedCoincidence,
-                                             PIPSMPatternReco, PIPSMSimpleTrackReco)
+                                             PIPSMMuPixMonitor, PIPSMPatternReco,
+                                             PIPSMSimpleTrackReco)
 
 # ===== RENDERED BY THE DAEMON (do not edit; the checked-in file carries placeholders) =====
 # pioneer.nearline.render fills these with string.Template and writes the result next to
@@ -236,6 +242,40 @@ PSM_GEOMETRY_MAPS = ["MUPIX:mupix_chip_map", "MUTRIG:mutrig_channel_map"]
 PSM_GEOMETRY_TRANS = []
 # Containers supplying the base table and the two map tables above.
 PSM_GEOMETRY_FILES = ["bt2026_psm_geometry.json", "bt2026_psm_readout_map.json"]
+# --- MuPix monitor ---------------------------------------------------------
+# The low-level MuPix check: a hit map per chip and per plane, and tracks made
+# from an L1/L2 time coincidence alone. It reads /Event/muquad and nothing
+# else -- no scintillators, no channel map, no tracklets -- so it still says
+# what the pixel planes are doing when the parts it is checking are broken.
+# Requires PSM_DECODE, whose PIGeometrySvc supplies every chip footprint,
+# the plane membership and the L1 -> L2 lever arm.
+PSM_MUPIX_MONITOR = True
+# Symmetric L1/L2 half-window in ns. Loose on purpose: the MuPix stamp is an
+# 8 ns count and the two planes are different chips, so a window at the
+# resolution of the clock throws real pairs away. Set it from the run's own
+# histograms/PIPSMMuPixMonitor/dt, which is filled over the wider range below.
+PSM_MUPIX_WINDOW_NS = 40.0
+# Pixels per bin of every hit map. 1 is one bin per pixel: 256 x 250 per chip
+# and 512 x 500 per plane on bt2026, about 4 MB of histogram in total, and the
+# granularity a dead column or a hot pixel is visible at. Setting it to n
+# divides the bin count of every map by n squared.
+PSM_MUPIX_PIXELS_PER_BIN = 1
+# Half-width in ns and bins of the dt histogram, scanned independently of the
+# coincidence window. 204 over 51 bins puts each 8 ns MuPix tick at a bin
+# CENTRE; a round 200 puts it on a bin edge, where ROOT's edge convention
+# splits the coincidence peak between two bins.
+PSM_MUPIX_DT_RANGE_NS = 204.0
+PSM_MUPIX_DT_BINS = 51
+# Half-width in mrad of this module's own x'/y' axes. 0 derives the full
+# geometric acceptance of the two planes at the measured lever arm, so nothing
+# a pair can produce lands in an overflow bin. Set it to
+# PSM_PHASE_SPACE_SLOPE_RANGE_MRAD to read these next to PIPSMAllTrackReco's
+# phase space instead, and expect the tails outside that window to pile up.
+PSM_MUPIX_SLOPE_RANGE_MRAD = 0.0
+# Pair every L2 hit inside the window instead of only the one nearest in time.
+# Each extra pair is a combinatorial ghost carrying a slope no particle had,
+# so this is a diagnostic for a busy run, not a production setting.
+PSM_MUPIX_ALL_PAIRS = 0
 # --- PSM reco --------------------------------------------------------------
 # Container holding the data-side channel map the tracklet reco reads.
 PSM_CHANNEL_MAP_FILE = "bt2026_psm_channel_map.json"
@@ -433,6 +473,20 @@ def check():
     if PSM_GEOMETRY_BASE and not str(PSM_GEOMETRY_BASE).startswith("GEOCOND:"):
         problems.append(f"PSM_GEOMETRY_BASE '{PSM_GEOMETRY_BASE}' is not a "
                         "'GEOCOND:<table>' layer, which is the only form this job takes.")
+    if PSM_MUPIX_MONITOR and not PSM_DECODE:
+        problems.append("PSM_MUPIX_MONITOR is on but PSM_DECODE is off: only the musip "
+                        f"decoding tool produces {_TES_MUQUAD}, and the monitor takes the "
+                        "chip footprints from the PIGeometrySvc that PSM_DECODE creates.")
+    if PSM_MUPIX_MONITOR and int(PSM_MUPIX_PIXELS_PER_BIN) < 1:
+        problems.append(f"PSM_MUPIX_PIXELS_PER_BIN is {PSM_MUPIX_PIXELS_PER_BIN}: it is how "
+                        "many pixels share one bin of a hit map, so it must be at least 1.")
+    if PSM_MUPIX_MONITOR and (float(PSM_MUPIX_DT_RANGE_NS) <= 0 or int(PSM_MUPIX_DT_BINS) < 1):
+        problems.append(f"PSM_MUPIX_DT_RANGE_NS ({PSM_MUPIX_DT_RANGE_NS}) is the half-width "
+                        f"of a symmetric axis and PSM_MUPIX_DT_BINS ({PSM_MUPIX_DT_BINS}) its "
+                        "bin count; both must be positive.")
+    if PSM_MUPIX_MONITOR and float(PSM_MUPIX_WINDOW_NS) <= 0:
+        problems.append(f"PSM_MUPIX_WINDOW_NS is {PSM_MUPIX_WINDOW_NS}: it is a half-window, "
+                        "so a non-positive value pairs nothing at all.")
     if PSM_DECODE and PSM_GEOMETRY_BASE and not PSM_GEOMETRY_FILES:
         problems.append("PSM_GEOMETRY_BASE is a GEOCOND layer but PSM_GEOMETRY_FILES is "
                         "empty: nothing would supply the table it names.")
@@ -576,6 +630,26 @@ if WD_ENABLED:
     algorithms.append(Gaudi__Sequencer("WDAnalysisSeq", Members=wd_members,
                                        RequireObjects=[_TES_WAVEFORM]))
 
+if PSM_MUPIX_MONITOR:
+    # Its own sequencer, gated on the MuPix hits and not on the scintillators:
+    # this is the check that has to keep running when the scintillator half of
+    # the telescope, or the tracklet reco that needs it, is what is broken.
+    # DistanceL12 is deliberately not set -- the algorithm measures the lever
+    # arm from the same geometry it takes the chip footprints from, so the two
+    # cannot drift apart. PixelPitch is PSM_QUAD_PIXEL_PITCH because a hit map
+    # binned at a different pitch than the decoder placed the hits at stops
+    # being one bin per pixel.
+    mupix_monitor = PIPSMMuPixMonitor(
+        input=_TES_MUQUAD, GeometrySvc="PIGeometrySvc",
+        PixelPitch=float(PSM_QUAD_PIXEL_PITCH),
+        PixelsPerBin=int(PSM_MUPIX_PIXELS_PER_BIN),
+        CoincidenceWindow=float(PSM_MUPIX_WINDOW_NS),
+        DtRange=float(PSM_MUPIX_DT_RANGE_NS), DtBins=int(PSM_MUPIX_DT_BINS),
+        SlopeRange=float(PSM_MUPIX_SLOPE_RANGE_MRAD),
+        AllPairs=int(PSM_MUPIX_ALL_PAIRS))
+    algorithms.append(Gaudi__Sequencer("PSMMuPixSeq", RequireObjects=[_TES_MUQUAD],
+                                       Members=[mupix_monitor]))
+
 if PSM_RECO:
     all_reco = PIPSMSimpleTrackReco(
         "PIPSMAllTrackReco", L_hits=_TES_MUQUAD, S_hits=_TES_MUTRIG,
@@ -643,5 +717,6 @@ for conninfo in PG_CONNECTIONS:
         t for t in str(conninfo).split() if t.startswith(("host=", "dbname="))))
 if NL_OVERRIDES:
     print(f"[nearline] overrides  {NL_OVERRIDES}")
-print(f"[nearline] halves     WD={WD_ENABLED} PSM_DECODE={PSM_DECODE} PSM_RECO={PSM_RECO}")
+print(f"[nearline] halves     WD={WD_ENABLED} PSM_DECODE={PSM_DECODE} PSM_RECO={PSM_RECO}"
+      f" PSM_MUPIX_MONITOR={PSM_MUPIX_MONITOR}")
 print(f"[nearline] EvtMax     {EVT_MAX}")
