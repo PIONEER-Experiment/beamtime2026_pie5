@@ -44,7 +44,7 @@ class BaseJob:
 
     def start(self):
         cmd = self.build_command()
-        log_path = Path(self.config['output']) / f"{self.config['job_type']}_{self.config['run_id']}.log"
+        log_path = Path(self.config['output']) / f"run{self.config['midas_run_number']:05d}_{self.config['job_type']}.log"
         self.logfile = log_path.open("w")
         if (dry_run_all_jobs):
             print(" ".join([str(c) for c in cmd]))
