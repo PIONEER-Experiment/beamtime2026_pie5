@@ -44,6 +44,7 @@ class BaseJob:
 
     def start(self):
         cmd = self.build_command()
+        Path(self.config['output']).mkdir(parents = True, exist_ok = True)
         log_path = Path(self.config['output']) / f"run{self.config['midas_run_number']:05d}_{self.config['job_type']}.log"
         self.logfile = log_path.open("w")
         if (dry_run_all_jobs):
@@ -170,7 +171,7 @@ class MergeJob(BaseJob):
         config = {
             "output" : str(self.config["output"]),
             "runs"   : {
-                f"{run_id}" : [str(input_path / f"{f['filebase']}.root") for f in self.db.find_files([run_id], "root")]
+                f"{run_id}" : [str(input_path / f"run{self.db.get_midas_run_number(run_id)}/{f['filebase']}.root") for f in self.db.find_files([run_id], "root")]
                 for run_id in self.config['midas_run_ids']
             }
         }

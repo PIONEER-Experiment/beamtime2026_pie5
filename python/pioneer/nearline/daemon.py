@@ -149,7 +149,7 @@ class NearlineDaemon:
         job_cfg['input']    = self.midas_logger_path
         job_cfg['backup']   = self.backup_path
         job_cfg['remote']   = self.remote_path
-        job_cfg['output']   = self.nearline_output_path
+        job_cfg['output']   = self.nearline_output_path / f"run{job_cfg['midas_run_number']:05d}"
 
         theJob = nl_jobs.create_job(job_cfg, self.db_interface)
         try:

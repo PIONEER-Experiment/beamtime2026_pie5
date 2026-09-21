@@ -167,6 +167,16 @@ class interface:
         conn.commit()
         conn.close()
 
+    def get_midas_run_number(self, run_id : int) -> int | None:
+        conn = connect(self.user, self.password)
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT midas_run_number FROM state.midas_run WHERE id = %s", (run_id, )
+            )
+            result = cursor.fetchone()
+        conn.close()
+        return result[0] if result is not None else None
+
     def schedule_postproc_job(self, run_id : int, task : str):
         conn = connect(self.user, self.password)
         with conn.cursor() as cursor:
