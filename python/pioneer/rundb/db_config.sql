@@ -864,7 +864,9 @@ CREATE TABLE IF NOT EXISTS logs.slow_control (
 );
 
 CREATE TABLE IF NOT EXISTS logs.last_sc_update(
-    channel TEXT PRIMARY KEY,            -- channel
+    equipment TEXT NOT NULL,             -- equipment
+    channel TEXT NOT NULL,               -- channel
+    PRIMARY KEY (equipment, channel),
     upd_time TIMESTAMPTZ NOT NULL,       -- last recorded update time
     log_time TIMESTAMPTZ DEFAULT now()   -- time at which this record was added
 );
@@ -880,16 +882,18 @@ BEGIN
         SELECT upd_time
           INTO last_upd
           FROM logs.last_sc_update
-         WHERE channel = NEW.channel FOR UPDATE;
+                 WHERE equipment = NEW.equipment
+                     AND channel = NEW.channel
+                 FOR UPDATE;
 
         IF FOUND AND last_upd = NEW.upd_time THEN
             RETURN NULL;
         END IF;
     END IF;
 
-    INSERT INTO logs.last_sc_update(channel, upd_time)
-    VALUES (NEW.channel, NEW.upd_time)
-    ON CONFLICT (channel)
+    INSERT INTO logs.last_sc_update(equipment, channel, upd_time)
+    VALUES (NEW.equipment, NEW.channel, NEW.upd_time)
+    ON CONFLICT (equipment, channel)
     DO UPDATE SET
         upd_time = EXCLUDED.upd_time,
         log_time = now()
