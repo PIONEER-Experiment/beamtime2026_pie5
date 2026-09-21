@@ -15,7 +15,7 @@ glob_input_files = False
 # Set this flag to True for debugging purpose only. It will
 # print the shell command instead of executing it and execute
 # a sleep command instead.
-dry_run_all_jobs = True
+dry_run_all_jobs = False
 
 class BaseJob:
     """
@@ -44,11 +44,13 @@ class BaseJob:
 
     def start(self):
         cmd = self.build_command()
+        log_path = Path(self.config['output']) / f"{self.config['job_type']}_{self.config['run_id']}.log"
+        self.logfile = log_path.open("w")
         if (dry_run_all_jobs):
             print(" ".join([str(c) for c in cmd]))
             self.proc = subprocess.Popen(['sleep', '2'])
         else:
-            self.proc = subprocess.Popen(cmd, start_new_session = True)
+            self.proc = subprocess.Popen(cmd, start_new_session = True, stdout = self.logfile, stderr = subprocess.STDOUT)
         self.db.update_status(self.table, self.config['job_id'], self.processing_status)
         return self.proc
 
@@ -63,6 +65,7 @@ class BaseJob:
             raise RuntimeError("Finalise called before job was finished")
         status = 'DONE' if self.rc == 0 else 'FAILED'
         self.db.update_status(self.table, self.config['job_id'], status)
+        self.logfile.close()
         return status
 
     def raw_midas_files(self, include_sidecars = False):
