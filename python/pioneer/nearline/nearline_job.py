@@ -93,7 +93,7 @@ RENDERED = not _RENDERED["rendered_at"].startswith(chr(36))
 # Where conditions containers live when nobody says otherwise. This is the bind mount
 # inside the testbeam-midas container; on a host without /simulation (pinky) the daemon's
 # NL_CONDITIONS_DIR is mandatory and is what a rendered file carries.
-_DEFAULT_CONDITIONS_DIR = "/simulation/reco_testbeam/conditions"
+_DEFAULT_CONDITIONS_DIR = os.path.join(os.environ.get("PIONEERSYS"), "reco_testbeam/conditions")
 
 # ===== SETTINGS =====
 # --- Job -------------------------------------------------------------------
