@@ -3,6 +3,8 @@
 import argparse
 import datetime
 import math
+import os
+import pathlib
 
 from dataclasses import dataclass
 
@@ -11,8 +13,19 @@ from pioneer.rundb.interface import interface as db_iface
 
 kMidasClientName = "pioneer_logger"
 kMidasHostName = "localhost"
-kMidasExptName = "test"
-
+kMidasExptName   = os.environ.get('MIDAS_EXPT_NAME'  , None)
+if kMidasExptName is None:
+    # Try the expttab file
+    exptab = os.environ.get('MIDAS_EXPTAB', None)
+    if exptab is not None:
+        exptab_path = pathlib.Path(exptab)
+        if exptab_path.exists():
+            with exptab_path.open("r") as f:
+                lines = f.readlines()
+            n_lines = len(lines)
+            if n_lines == 1:
+                # there is exactly one unique line, which now shall provide a default value.
+                kMidasExptName = lines[0].split()[0]
 @dataclass(frozen=True)
 class Channel:
     # SC equipment it belongs to
