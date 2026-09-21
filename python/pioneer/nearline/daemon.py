@@ -121,6 +121,12 @@ class NearlineDaemon:
             callback = self.end_of_run_callback
         )
 
+        for log_channel in self.client.odb_get("/Logger/Channels", just_key_list = True):
+            self.client.odb_watch(
+                path = f"/Logger/Channels/{log_channel}/Settings/Current filename",
+                callback = self.filename_change_callback
+            )
+
         self.sleep_time = 1000
         self.db_interface = pioneer.rundb.interface.interface(user = kDbUser, password = kDbPwd)
 
