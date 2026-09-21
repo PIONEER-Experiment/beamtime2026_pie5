@@ -270,12 +270,21 @@ WITH positions(rn, seq_id, xpos, ypos) AS (
     SELECT *
     FROM (
         VALUES
-            (1, 1,  0.0,   0.0),    -- single point measurement, centre only
-            (2, 2,  0.0,   0.0),    -- 5 point measurement, centre
-            (3, 2, 17.0,  17.0),    -- 5 point measurement, top right
-            (4, 2,-17.0,  17.0),    -- 5 point measurement, top left
-            (5, 2, 17.0, -17.0),    -- 5 point measurement, bottom right
-            (6, 2,-17.0, -17.0)     -- 5 point measurement, bottom left
+            ( 1, 1,  0.0,   0.0),    -- single point measurement, centre only
+            ( 2, 2,  0.0,   0.0),    -- 5 point measurement, centre
+            ( 3, 2, 17.0,  17.0),    -- 5 point measurement, top right
+            ( 4, 2,-17.0,  17.0),    -- 5 point measurement, top left
+            ( 5, 2, 17.0, -17.0),    -- 5 point measurement, bottom right
+            ( 6, 2,-17.0, -17.0),    -- 5 point measurement, bottom left
+            ( 7, 3,-20.0,  20.0),    -- 3x3 measurement, top left
+            ( 8, 3,  0.0,  20.0),    -- 3x3 measurement, top centre
+            ( 9, 3, 20.0,  20.0),    -- 3x3 measurement, top right
+            (10, 3,-20.0,   0.0),    -- 3x3 measurement, centre left
+            (11, 3,  0.0,   0.0),    -- 3x3 measurement, centre
+            (12, 3, 20.0,   0.0),    -- 3x3 measurement, centre right
+            (13, 3,-20.0, -20.0),    -- 3x3 measurement, bottom left
+            (14, 3,  0.0, -20.0),    -- 3x3 measurement, bottom centre
+            (15, 3, 20.0, -20.0)     -- 3x3 measurement, bottom right
     ) v(rn, seq_id, xpos, ypos)
 ),
 configs AS (
@@ -307,11 +316,16 @@ WITH positions(rn, seq_id, xpos, comment) AS (
     SELECT *
     FROM (
         VALUES
-            (1, 1,  34, 'XXX mm'),
-            (2, 1,  89, 'XXX mm'),
-            (3, 1, 143, 'XXX mm'),
-            (4, 1, 198, 'XXX mm'),
-            (5, 1, 253, 'XXX mm')
+            ( 1, 1,  34.0, '4 mm'),
+            ( 2, 1,  89.0, '5 mm'),
+            ( 3, 1, 143.0, '6 mm'),
+            ( 4, 1, 198.0, '7 mm'),
+            ( 5, 1, 253.0, '8 mm'),
+            ( 6, 2,  44.5, '4.5 mm IFP'),
+            ( 7, 2,  81.5, '6.5 mm IFP'),
+            ( 8, 2, 118.5, '14.0 mm IFP'),
+            ( 9, 2, 155.5, '25.8 mm IFP'),
+            (10, 2, 192.5, '31.2 mm IFP')
     ) v(rn, seq_id, xpos, comment)
 ),
 configs AS (
@@ -343,7 +357,6 @@ CREATE TABLE IF NOT EXISTS config.pim1_epics (
     "ASM11:SOL:2"    FLOAT NOT NULL,
     "TS11:SOL:2"     FLOAT NOT NULL,
     "TS12:SOL:2"     FLOAT NOT NULL,
-    "KSD11:COM:2"    INT NOT NULL,
     "QSL11:SOL:2"    FLOAT NOT NULL,
     "QSL12:SOL:2"    FLOAT NOT NULL,
     "FS13RL-L:SOL:2" FLOAT NOT NULL,
@@ -362,6 +375,90 @@ CREATE TABLE IF NOT EXISTS config.pim1_epics (
     "QSL17:SOL:2"    FLOAT NOT NULL,
     "QSL18:SOL:2"    FLOAT NOT NULL
 );
+
+WITH pim1_settings (
+    rn, seq_id, QTA11, QTB11, QTB12,
+    FS11L, FS11R, FS11O, FS11U,
+    ASM11, TS11, TS12, QSL11, QSL12,
+    FS13RLL, FS13RLR, QSL13, QSL14,
+    FS12L, FS12R, FS12O, FS12U,
+    ASM12, TS21, TS22, QSL15, QSL16, QSL17, QSL18
+) AS (
+    SELECT *
+    FROM (
+        VALUES
+        (
+            1, -- rn
+            1, -- sq_id
+            -21.23, -- QTA11
+            -30.66, -- QTB11
+             35.72, -- QTB12
+             15.00, -- FS11-L
+             15.00, -- FS11-R
+             15.00, -- FS11-O
+             15.00, -- FS11-U
+             60.91, -- ASM11
+             43.09, -- TS11
+            -51.48, -- TS12
+            -18.10, -- QSL11
+             25.50, -- QSL12
+              2.00, -- FS13RL-L
+              2.00, -- FS13RL-R
+             23.50, -- QSL13
+            -39.01, -- QSL14
+             15.00, -- FS12-L
+             15.00, -- FS12-R
+             15.00, -- FS12-O
+             15.00, -- FS12-U
+             60.60, -- ASM12
+            -73.30, -- TS21
+             58.35, -- TS22
+            - 3.30, -- QSL15
+             14.60, -- QSL16
+            -36.05, -- QSL17
+             40.64  -- QSL18
+        )
+    ) v(
+        rn, seq_id, QTA11, QTB11, QTB12,
+        FS11L, FS11R, FS11O, FS11U,
+        ASM11, TS11, TS12, QSL11, QSL12,
+        FS13RLL, FS13RLR, QSL13, QSL14,
+        FS12L, FS12R, FS12O, FS12U,
+        ASM12, TS21, TS22, QSL15, QSL16, QSL17, QSL18
+    )
+),
+configs AS (
+    INSERT INTO config.configuration (config_type)
+    SELECT 'pim1_epics'
+    FROM pim1_settings
+    ORDER BY rn
+    RETURNING id
+),
+config_ids AS (
+    SELECT id, row_number() OVER (ORDER BY id) AS rn
+    FROM configs
+)
+INSERT INTO config.pim1_epics (
+    id, seq_id,
+    "QTA11:SOL:2", "QTB11:SOL:2", "QTB12:SOL:2",
+    "FS11-L:SOL", "FS11-R:SOL", "FS11-O:SOL", "FS11-U:SOL",
+    "ASM11:SOL:2", "TS11:SOL:2", "TS12:SOL:2",
+    "QSL11:SOL:2", "QSL12:SOL:2",
+    "FS13RL-L:SOL:2", "FS13RL-R:SOL:2",
+    "QSL13:SOL:2", "QSL14:SOL:2",
+    "FS12-R:SOL", "FS12-L:SOL", "FS12-O:SOL", "FS12-U:SOL",
+    "ASM12:SOL:2", "TS21:SOL:2", "TS22:SOL:2",
+    "QSL15:SOL:2", "QSL16:SOL:2", "QSL17:SOL:2", "QSL18:SOL:2"
+)
+SELECT c.id, p.seq_id,
+    p.QTA11, p.QTB11, p.QTB12,
+    p.FS11L, p.FS11R, p.FS11O, p.FS11U,
+    p.ASM11, p.TS11, p.TS12, p.QSL11, p.QSL12,
+    p.FS13RLL, p.FS13RLR, p.QSL13, p.QSL14,
+    p.FS12R, p.FS12L, p.FS12O, p.FS12U,
+    p.ASM12, p.TS21, p.TS22, p.QSL15, p.QSL16, p.QSL17, p.QSL18
+FROM config_ids c
+JOIN pim1_settings p USING (rn);
 
 CREATE TABLE IF NOT EXISTS config.pie5_epics (
     id INT PRIMARY KEY REFERENCES config.configuration(id),
@@ -398,7 +495,6 @@ CREATE TABLE IF NOT EXISTS config.pie5_epics (
     "FS42-V:SOL"       INT NOT NULL,
     "FSH43-L:SOL"      INT NOT NULL,
     "FSH43-R:SOL"      INT NOT NULL,
-    "KSF41:COM:2"      INT NOT NULL,
     "SEP41VHVN:SOLV:2" INT NOT NULL,
     "SEP41VHVP:SOLV:2" INT NOT NULL
 );
