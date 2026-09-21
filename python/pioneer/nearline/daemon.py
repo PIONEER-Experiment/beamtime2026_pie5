@@ -117,7 +117,7 @@ class NearlineDaemon:
 
         self.client.register_transition_callback(
             transition = midas.TR_STOP,
-            sequence = 2,
+            sequence = 900,
             callback = self.end_of_run_callback
         )
 
