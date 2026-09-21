@@ -918,6 +918,7 @@ GRANT INSERT ON config.configuration   TO bot;
 GRANT INSERT ON state.midas_run        TO bot;
 GRANT INSERT ON state.postproc_job     TO bot;
 GRANT INSERT ON state.postproc_depends TO bot;
+GRANT INSERT ON state.file_list        TO bot;
 GRANT INSERT ON state.run_sequence     TO bot;
 GRANT INSERT ON state.runs_in_sequence TO bot;
 
@@ -925,11 +926,13 @@ GRANT USAGE, SELECT ON SEQUENCE config.configuration_id_seq    TO bot;
 GRANT USAGE, SELECT ON SEQUENCE state.midas_run_id_seq         TO bot;
 GRANT USAGE, SELECT ON SEQUENCE state.midas_run_config_id_seq  TO bot;
 GRANT USAGE, SELECT ON SEQUENCE state.postproc_job_id_seq      TO bot;
+GRANT USAGE, SELECT ON SEQUENCE state.file_list_id_seq         TO bot;
 GRANT USAGE, SELECT ON SEQUENCE state.run_sequence_id_seq      TO bot;
 GRANT USAGE, SELECT ON SEQUENCE state.runs_in_sequence_id_seq  TO bot;
 
 GRANT UPDATE (status, midas_run_number) ON state.midas_run     TO bot;
 GRANT UPDATE (status)                   ON state.postproc_job  TO bot;
+GRANT UPDATE (status)                   ON state.file_list     TO bot;
 GRANT UPDATE (status)                   ON state.run_sequence  TO bot;
 
 GRANT UPDATE (upd_time, log_time) ON logs.last_sc_update TO bot;
