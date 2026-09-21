@@ -96,7 +96,7 @@ class midas_run:
         # an ID assigned and exists in the config tables.
         self.write_config()
         print(self.this_configuration)
-        return self.iface.schedule_new_run([c['id'] for c in self.this_configuration.values()])
+        return self.iface.schedule_new_run(num_ev = self.num_ev, configs = [c['id'] for c in self.this_configuration.values()])
 
 
 def five_point_sequence(iface : db_interface):
