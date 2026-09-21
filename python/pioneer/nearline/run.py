@@ -117,7 +117,7 @@ if __name__ == "__main__":
     dscan.set_subsequence(five_point_sequence(iface))
 
     mrs2 = midas_run_sequence(iface)
-    mrs2.set_config_list("dummy", [{"p1" : "test1", "p2" : "test2"}, {"p1" : "test3", "p2" : "test4"}])
+    mrs2.set_config_seq("pim1_epics", 0)
     mrs2.set_subsequence(dscan)
 
     mrs2.schedule()
