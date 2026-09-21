@@ -293,6 +293,7 @@ class Logger:
         self.known_equipment.pop(eq_name)
 
     def enable_equipment(self, equip : Equipment):
+        self.reset_equipment(equip)
         equip.enabled = True
         this_run = self.client.odb_get("/Runinfo/Run number")
         enable_time = self.client.odb_last_update_time(f"/Equipment/{equip.name}/Common/Enabled")
@@ -323,18 +324,11 @@ class Logger:
             values       = equip.channel_cache
         )
 
-    def disable_equipment(self, equip : Equipment):
+    def reset_equipment(self, equip : Equipment):
         equip.enabled = False
-        this_run = self.client.odb_get("/Runinfo/Run number")
-        disable_time = self.client.odb_last_update_time(f"/Equipment/{equip.name}/Common/Enabled")
         for odb_path, channels in equip.channels.items():
             self.client.odb_stop_watching(odb_path)
-            self.log_channel_state_change(
-                channel_list = channels,
-                this_run = this_run,
-                change_time = disable_time,
-                state = "DISABLE"
-            )
+
         for odb_path in equip.odb_paths_watched:
             self.client.odb_stop_watching(odb_path)
 
@@ -348,6 +342,28 @@ class Logger:
         # we'll have much larger problems to deal with.
         equip.channels.clear()
         equip.channel_cache.clear()
+        equip.odb_paths_watched.clear()
+
+    def disable_equipment(self, equip : Equipment):
+        this_run = self.client.odb_get("/Runinfo/Run number")
+        disable_time = self.client.odb_last_update_time(f"/Equipment/{equip.name}/Common/Enabled")
+        for odb_path, channels in equip.channels.items():
+            self.log_channel_state_change(
+                channel_list = channels,
+                this_run = this_run,
+                change_time = disable_time,
+                state = "DISABLE"
+            )
+
+        # we'll rebuild the channel list upon enabling.
+        # not the most efficient thing to do, but one
+        # that guarantees a clean state and as enabling
+        # disabling should remain a rare occurence, it
+        # will not significantly contribute to the overall
+        # load.
+        # PS: If it becomes a regular occurence of concern,
+        # we'll have much larger problems to deal with.
+        self.reset_equipment(equip)
 
 
     # iterate all channels associated with a given equipment or a
