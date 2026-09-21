@@ -67,7 +67,7 @@ class BaseJob:
 
     def raw_midas_files(self, include_sidecars = False):
         parent_path = Path(self.config['input'])
-        run_id = self.config['job_id']
+        run_id = self.config['run_id']
         file_list = self.db.find_files(run_id, "mid.lz4")
         files = list()
         for aFile in file_list:
