@@ -95,7 +95,7 @@ class interface:
                     configuration[table] = row
         with conn.cursor() as cur:
             cur.execute("SELECT requested_events FROM state.midas_run WHERE id = %s", (job_id, ))
-            num_ev = cur.fetch_one()[0]
+            num_ev = cur.fetchone()[0]
 
         # done reading DB, close connection
         conn.close()
