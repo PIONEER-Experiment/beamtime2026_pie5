@@ -17,6 +17,10 @@ agreement, registered in midas_files/wavedream-scalar-readout/docs/REGISTRY.md.
     |     PIWDWaveformAnalysis -> /Event/wd_features   (consumes wd_rf_phase)
     |     PIWDCalibrator       -> /Event/wd_hits
     |
+    +-- WDScalerSeq ----------- gated on /Event/wd_scalers
+    |     PIWDScalerMonitor    -> histograms only: rate, threshold and FPGA
+    |                             temperature per board from the scaler events
+    |
     +-- PSMMuPixSeq ----------- gated on /Event/muquad
     |     PIPSMMuPixMonitor    -> histograms only: a hit map per MuPix chip and
     |                             per plane, and x/x', y/y' from an L1/L2 time
@@ -58,7 +62,7 @@ from reco_testbeam.pi_testbeam_servicesConf import PIGeometrySvc
 from pi_midas.PIONEER_MIDAS_READERConf import (PIMidasSelector, PIMidasConversionSvc,
                                                PIMidasDecoder, PITMidasMusip,
                                                PITMidasWaveDream)
-from reco_testbeam.pi_wdalgConf import (PIWDCalibrator, PIWDRFPhase,
+from reco_testbeam.pi_wdalgConf import (PIWDCalibrator, PIWDRFPhase, PIWDScalerMonitor,
                                         PIWDSettingsSummary, PIWDWaveformAnalysis)
 from reco_testbeam.pi_psmalg_expConf import (PIPSMComputeWeight, PIPSMDelayedCoincidence,
                                              PIPSMMuPixMonitor, PIPSMPatternReco,
@@ -219,6 +223,23 @@ WD_RF_REFINE = False
 WD_RF_REFINE_POINTS = 41
 # Half-width of the coarse refinement scan, as a fraction of the nominal.
 WD_RF_REFINE_SPAN = 0.01
+# --- WaveDREAM scalers -----------------------------------------------------
+# Histogram the scaler readout: per board, rate vs board time and run-average
+# rate per scaler index, the discriminator thresholds and the FPGA temperature.
+# The scaler frontend writes its readings in events of their own that carry no
+# waveforms, so this runs in its own sequencer gated on /Event/wd_scalers.
+# Requires WD_ENABLED, whose PITMidasWaveDream decodes the scaler banks.
+WD_SCALER_MONITOR = True
+# Board serials to book histograms for. A serial read out but not listed is
+# counted in histograms/PIWDScalerMonitor/readings only, and reported at the end.
+WD_SCALER_BOARDS = [36]
+# Time-axis bin width and upper edge in s of board time (seconds since the board
+# was configured). The bin matches the frontend's 5 s readout period, one reading
+# per bin; a reading past the upper edge lands in the overflow and is reported.
+WD_SCALER_TIME_BIN_S = 5.0
+WD_SCALER_TIME_MAX_S = 7200.0
+# Also fill readings the frontend flagged stale; off, they are counted and skipped.
+WD_SCALER_FILL_STALE = False
 # --- PSM decode ------------------------------------------------------------
 # MuTrig RAW readout channels (chipid*32+channel, read before the map lookup)
 # carrying the RF and the beam current; fake-MIDAS SMA cabling, hardware cabling
@@ -410,6 +431,7 @@ _NTUPLE_REUSE_ENTRY = True
 # /Event/exp_simple_tracks, which are the simulation's names, so the assignment is
 # what puts the testbeam chain on one set of paths.
 _TES_WAVEFORM = "/Event/wd_waveform"
+_TES_SCALERS = "/Event/wd_scalers"
 _TES_MUQUAD = "/Event/muquad"
 _TES_MUTRIG = "/Event/mutrig"
 _TES_PSM_TRACKS = "/Event/exp_all_tracks"
@@ -515,6 +537,14 @@ def check():
     if WD_ENABLED and not set(WD_CAL_CHANNELS) <= set(WD_CHANNELS):
         problems.append(f"WD_CAL_CHANNELS {sorted(set(WD_CAL_CHANNELS) - set(WD_CHANNELS))} are "
                         "not in WD_CHANNELS: they would have no features to calibrate.")
+    if WD_SCALER_MONITOR and not WD_ENABLED:
+        problems.append("WD_SCALER_MONITOR is on but WD_ENABLED is off: only the WaveDREAM "
+                        f"decoding tool produces {_TES_SCALERS}.")
+    if WD_SCALER_MONITOR and not (0 < float(WD_SCALER_TIME_BIN_S) < float(WD_SCALER_TIME_MAX_S)):
+        problems.append(f"WD_SCALER_TIME_BIN_S ({WD_SCALER_TIME_BIN_S}) must be positive and "
+                        f"below WD_SCALER_TIME_MAX_S ({WD_SCALER_TIME_MAX_S}).")
+    if WD_SCALER_MONITOR and len(set(WD_SCALER_BOARDS)) != len(WD_SCALER_BOARDS):
+        problems.append(f"WD_SCALER_BOARDS {list(WD_SCALER_BOARDS)} lists a serial twice.")
     if WD_RF_REFINE and int(WD_RF_REFINE_POINTS) < 2:
         problems.append(f"WD_RF_REFINE is on but WD_RF_REFINE_POINTS is "
                         f"{WD_RF_REFINE_POINTS}; a scan needs at least 2 points.")
@@ -630,6 +660,16 @@ if WD_ENABLED:
     algorithms.append(Gaudi__Sequencer("WDAnalysisSeq", Members=wd_members,
                                        RequireObjects=[_TES_WAVEFORM]))
 
+if WD_ENABLED and WD_SCALER_MONITOR:
+    # Its own sequencer: scaler events carry no waveforms, so WDAnalysisSeq's
+    # gate never lets them through, and a waveform event carries no scalers.
+    scaler_monitor = PIWDScalerMonitor(
+        input=_TES_SCALERS, boards=[int(b) for b in WD_SCALER_BOARDS],
+        timeBinS=float(WD_SCALER_TIME_BIN_S), timeMaxS=float(WD_SCALER_TIME_MAX_S),
+        fillStale=bool(WD_SCALER_FILL_STALE))
+    algorithms.append(Gaudi__Sequencer("WDScalerSeq", RequireObjects=[_TES_SCALERS],
+                                       Members=[scaler_monitor]))
+
 if PSM_MUPIX_MONITOR:
     # Its own sequencer, gated on the MuPix hits and not on the scintillators:
     # this is the check that has to keep running when the scintillator half of
@@ -717,6 +757,6 @@ for conninfo in PG_CONNECTIONS:
         t for t in str(conninfo).split() if t.startswith(("host=", "dbname="))))
 if NL_OVERRIDES:
     print(f"[nearline] overrides  {NL_OVERRIDES}")
-print(f"[nearline] halves     WD={WD_ENABLED} PSM_DECODE={PSM_DECODE} PSM_RECO={PSM_RECO}"
-      f" PSM_MUPIX_MONITOR={PSM_MUPIX_MONITOR}")
+print(f"[nearline] halves     WD={WD_ENABLED} WD_SCALER_MONITOR={WD_SCALER_MONITOR}"
+      f" PSM_DECODE={PSM_DECODE} PSM_RECO={PSM_RECO} PSM_MUPIX_MONITOR={PSM_MUPIX_MONITOR}")
 print(f"[nearline] EvtMax     {EVT_MAX}")
