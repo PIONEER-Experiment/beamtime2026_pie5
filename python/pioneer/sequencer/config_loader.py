@@ -31,7 +31,25 @@ def load_arcus_config(seq : SequenceClient, cfg_key : str, aConfig : dict):
             )
 
 def load_isel_config(seq : SequenceClient, cfg_key : str,   aConfig : dict):
-    return None
+    odb_path    = config_odb_paths[cfg_key]
+    xpos        = aConfig['xpos']
+    ypos        = aConfig['ypos']
+    pos = (xpos, ypos)
+    seq.odb_set(config_odb_paths[cfg_key] + "/Variables/Demand", pos)
+    return cfg_val.ODBRequirementCollection(
+        seq = seq,
+        name = f"ISEL ({cfg_key})",
+        requirements= [
+            cfg_val.ODBRequirement(
+                seq = seq,
+                path = odb_path + f"/Variables/Measured[{i}]",
+                op = "==",
+                target = pos[i],
+            )
+            for i in range(2)
+        ],
+        timeout = 60
+    )
 
 def load_beam_config(seq : SequenceClient, cfg_key : str,  aConfig : dict):
     writeable_device_types = [
@@ -108,7 +126,7 @@ config_odb_paths = {
     "job_id"            : "/Runinfo/Run DB PK",
     "num_ev"            : "/Runinfo/Req number events",
     "degrader_position" : "/Equipment/Degrader",
-    "target_position"   : "",
+    "target_position"   : "/Equipment/XYTable",
     "pie5_epics"        : "/Equipment/EPICS",
     "pim1_epics"        : "/Equipment/EPICS"
 }
