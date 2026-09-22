@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html class="mcss" lang="en">
+<head>
+   <meta charset="UTF-8">
+   <link rel="stylesheet" href="midas.css">
+   <script src="controls.js"></script>
+   <script src="midas.js"></script>
+   <script src="mhttpd.js"></script>
+   <title>RunDB</title>
+
+   <!-- Ours. The ?v= is not decoration: mhttpd stamps Expires:+24h on anything
+        served through send_fp(), with no ETag and no Last-Modified, so without a
+        version token an edit to these files is invisible for a day. Bump it when
+        you change them. (The page itself is exempt: its /Custom key has no dot,
+        so it routes through show_custom_page(), which sets no cache headers.)
+
+        The names are flat -- rundb.css, not css/rundb.css -- because mhttpd
+        serves a /Custom asset under its *key name*: the ODB keys are
+        /Custom/rundb.css!, /Custom/rundb-rpc.js! and /Custom/rundb.js!, each
+        pointing at the file wherever it actually lives. See custom/README.md. -->
+   <link rel="stylesheet" href="rundb.css?v=2">
+   <script src="rundb-rpc.js?v=2"></script>
+   <script src="rundb.js?v=2"></script>
+</head>
+
+<body class="mcss" onload="mhttpd_init('RunDB'); RUNDB.init();">
+
+<!-- mhttpd_init() fills these two. -->
+<div id="mheader"></div>
+<div id="msidenav"></div>
+
+<div id="mmain">
+
+   <!-- The live strip: ODB only, once a second. It is answered by mhttpd
+        itself, so it keeps working when the RunDBView client is stopped. -->
+   <div id="rundb-strip" class="rundb-strip"></div>
+   <div id="rundb-seqnote"></div>
+   <div id="rundb-alerts"></div>
+
+   <div class="rundb-panel">
+      <h2 class="rundb-h">Queue <span class="rundb-sub">runs waiting to be taken, lowest priority first</span></h2>
+      <div id="rundb-queue" class="rundb-body"></div>
+   </div>
+
+   <div class="rundb-panel">
+      <h2 class="rundb-h">Runlog <span class="rundb-sub">newest first &mdash; click a row for the full configuration, files and jobs</span></h2>
+      <div id="rundb-runlog" class="rundb-body"></div>
+      <div id="rundb-more" class="rundb-more"></div>
+   </div>
+
+   <div class="rundb-panel">
+      <h2 class="rundb-h">Sequences <span class="rundb-sub">scans and what they have got through</span></h2>
+      <div id="rundb-sequences" class="rundb-body"></div>
+   </div>
+
+   <div class="rundb-panel">
+      <h2 class="rundb-h">Actions</h2>
+      <div id="rundb-actions"></div>
+   </div>
+
+   <div class="rundb-footnote"><span id="rundb-lastread"></span></div>
+   <div class="rundb-footnote" id="rundb-footer"></div>
+
+</div>
+</body>
+</html>
