@@ -35,6 +35,9 @@ PIWDSettingsSummary   top level, no waveform needed -> WDSettingsHeader
 WDAnalysisSeq         gated on /Event/wd_waveform, in THIS order
   |    PIWDRFPhase -> PIWDWaveformAnalysis -> PIWDCalibrator
   |
+WDScalerSeq           gated on /Event/wd_scalers
+  |    PIWDScalerMonitor                         histograms only
+  |
 PSMMuPixSeq           gated on /Event/muquad
   |    PIPSMMuPixMonitor                         histograms only
   |
@@ -57,6 +60,7 @@ PIHistogramSvc        histograms/<instance>/<name> -> <out>_hists.root
 | `PIWDRFPhase` | `/Event/wd_waveform`, `wd_channel_time` | `/Event/wd_rf_phase` | `rf_phase`, `rf_amplitude`, `rf_residual` |
 | `PIWDWaveformAnalysis` | `/Event/wd_waveform`, `wd_channel_time`, `wd_rf_phase` | `/Event/wd_features` | `ppamp`, `le_time`, `ppamp_vs_channel`; with a role table also `baseline_vs_channel`, `baseline_rms_vs_channel`, `fired_vs_channel`, `coincidence` and, per scintillator channel, `charge_vs_amp_chNN`, `letime_vs_amp_chNN`, `charge_vs_rfphase_chNN` |
 | `PIWDCalibrator` | `/Event/wd_features`, `wd_rf_phase` | `/Event/wd_hits` | — |
+| `PIWDScalerMonitor` | `/Event/wd_scalers` | — | `readings` and, per board `NNN` in `WD_SCALER_BOARDS`, `rate_vs_time_bNNN`, `mean_rate_bNNN`, `threshold_bNNN`, `fpga_temp_vs_time_bNNN` |
 | `PIPSMMuPixMonitor` | `/Event/muquad` | — | `L<n>_chip<vid>_xy` and `L<n>_xy` per MuPix chip and plane, `hits_per_chip`, `tot_vs_chip`, `L<n>_mult`, and from the L1/L2 coincidence `dt`, `npairs`, `npartners`, `dx`, `dy`, `track_xy`, `xxp`, `yyp` |
 | `PIPSMSMAMonitor` | `/Event/mutrig` | — | `hits_per_counter`, `tot_vs_counter`, `hits_per_event_vs_counter`, `tot`, `fine_time_vs_counter`, `counters` |
 | `PIPSMAllTrackReco` (a `PIPSMSimpleTrackReco`) | `/Event/muquad`, `/Event/mutrig` | `/Event/exp_all_tracks` | `xy`, `xxp`, `yyp`, `nhits`, `nseed` |
@@ -191,6 +195,23 @@ resolved against `CONDITIONS_DIR`; an absolute path is honoured unchanged.
 | `WD_TAG` | `""` | Pins one conditions tag for all three tables. A tag is a **version** of a table, not a time period. Leave `""` during a beam period unless you are deliberately reprocessing with old constants |
 | `WD_RF_REFINE` | `False` | Re-scans the RF frequency per event instead of trusting the `wd_rf` constant. **Off in production**: the point of the table is that the frequency is a known, provenanced per-run number. Turn it on to *derive* that number for a new run — the fitted value lands in `_Event_wd_rf_phase.frequency_hz` — or to diagnose drift. It costs `2 × WD_RF_REFINE_POINTS` extra fits per event |
 | `WD_RF_REFINE_POINTS` / `WD_RF_REFINE_SPAN` | `41` / `0.01` | Grid points per scan stage, and the half-width of the coarse scan as a fraction of the nominal frequency. Both are inert with `WD_RF_REFINE = False`. Fewer than 2 points is rejected by `check()` (the grid step would be 0/0); a span far wider than the real drift just wastes the coarse grid, a span narrower than it pins the scan to the edge |
+
+### WaveDREAM scalers
+
+`PIWDScalerMonitor` histograms the scaler readout. The scaler frontend writes
+one reading per board every 5 s in events of their own that carry no
+waveforms, so `WDAnalysisSeq` never sees them; the monitor runs in its own
+`WDScalerSeq`, gated on `/Event/wd_scalers`. Scaler indices 0–15 are the
+analogue inputs, 16 the pattern trigger, 17 the external trigger, 18 the
+external clock; their names are in `wd_scaler_names`, recorded in the
+`WDSettingsHeader`.
+
+| setting | default | what goes wrong if it is wrong |
+|---|---|---|
+| `WD_SCALER_MONITOR` | `True` | Off drops the module. Requires `WD_ENABLED`: only `PITMidasWaveDream` decodes the scaler banks into `/Event/wd_scalers` |
+| `WD_SCALER_BOARDS` | `[36]` | Board serials that get the per-board histograms. A serial read out but not listed lands only in `readings` and is named in the end-of-job warning; a listed serial with no readings leaves its histograms empty and is warned about too |
+| `WD_SCALER_TIME_BIN_S` / `WD_SCALER_TIME_MAX_S` | `5.0` / `7200.0` | Bin width and upper edge in s of the board-time axis (seconds since the board was configured). The bin equals the readout period, one reading per bin. A run past the upper edge piles into the overflow bin; `finalize()` counts those readings and says to raise the edge |
+| `WD_SCALER_FILL_STALE` | `False` | Readings the frontend flagged stale are counted and skipped; `True` fills them as well |
 
 ### PSM decode
 
@@ -520,10 +541,12 @@ problem it finds in one message, rather than the first:
 20. `WD_ROLE_TABLE` set with an empty `WD_CONDITIONS_FILES`: nothing would supply the `wd_channel_map` table.
 21. `WD_CHANNEL_SETTINGS_TABLE` set with an empty `ODB_SPECS`: only the begin-of-run ODB dump serves `wd_channel_settings`.
 22. `WD_CAL_CHANNELS` not a subset of `WD_CHANNELS`: they would have no features to calibrate.
-23. `WD_RF_REFINE` on with `WD_RF_REFINE_POINTS` below 2: a scan needs at least 2 points.
-24. `PSM_PHASE_SPACE_BINS` not a positive multiple of 64: the phase-space histograms would not rebin onto the 64-bin minitwin export exactly.
-25. `PSM_PHASE_SPACE_POS_RANGE_MM` or `PSM_PHASE_SPACE_SLOPE_RANGE_MRAD` not positive: both are half-widths of a symmetric axis.
-26. `OUTPUT_LEVEL` not one of `DEBUG`, `ERROR`, `INFO`, `WARNING`.
+23. `WD_SCALER_MONITOR` without `WD_ENABLED`: nothing would produce `/Event/wd_scalers`.
+24. `WD_SCALER_TIME_BIN_S` not positive or not below `WD_SCALER_TIME_MAX_S`, or a serial listed twice in `WD_SCALER_BOARDS`.
+25. `WD_RF_REFINE` on with `WD_RF_REFINE_POINTS` below 2: a scan needs at least 2 points.
+26. `PSM_PHASE_SPACE_BINS` not a positive multiple of 64: the phase-space histograms would not rebin onto the 64-bin minitwin export exactly.
+27. `PSM_PHASE_SPACE_POS_RANGE_MM` or `PSM_PHASE_SPACE_SLOPE_RANGE_MRAD` not positive: both are half-widths of a symmetric axis.
+28. `OUTPUT_LEVEL` not one of `DEBUG`, `ERROR`, `INFO`, `WARNING`.
 
 ## The phase-space histograms are minitwin input
 
