@@ -3,7 +3,14 @@ from pioneer.rundb.interface import interface
 
 
 def write_epics(seq : SequenceClient):
-    writeable_device_types = [1, 2, 4, 5]
+    writeable_device_types = [
+        1, # Magnets
+        4, # Separator
+        5, # Slits
+    ]
+    # While 2 (Beam blocker) is a writeable device type, we don't configure it automatically.
+    # It has to be a user decision to block the beam or not.
+    # Therefore, we don't write it to the run db.
     # 3 (PSA) and 6 (Value) are not considerd writable
 
     odb_path    = "/Equipment/EPICS"
