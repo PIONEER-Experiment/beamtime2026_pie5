@@ -30,4 +30,4 @@ def write_epics(seq : SequenceClient):
         aConfig[this_name] = demand_vals[ch_index]
 
     iface = interface(user = "bot", password = "bot")
-    iface.add_new_configuration(table = seq.get_param("table"), values = aConfig)
+    return iface.add_new_configuration(table = seq.get_param("table"), values = aConfig)

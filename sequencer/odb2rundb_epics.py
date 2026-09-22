@@ -9,7 +9,9 @@ def define_params(seq : SequenceClient):
 def sequence(seq: SequenceClient):
     source = seq.get_param("src")
     if source == "epics":
-        write_epics(seq)
+        id = write_epics(seq)
+        seq.msg(f"New beamline configuration written with id {id}")
+        seq.sequencer_msg(f"New beamline configuration written with id {id}")
     # more configs can be added here
 
 def at_exit(seq: SequenceClient):
