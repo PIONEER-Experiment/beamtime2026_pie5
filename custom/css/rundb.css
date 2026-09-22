@@ -1,0 +1,111 @@
+/* rundb.css -- the little that midas.css does not already cover.
+
+   Colours come from midas.css custom properties (--mred, --myellow, --mgreen,
+   --mgray, --mblue) so the page follows the MIDAS theme instead of inventing
+   one, with a literal fallback for a theme that does not define them.
+
+   Those five are *background* pastels -- #ff9ca6, #fff58b, #a0ffb8, #B0B0B0,
+   #91d6ff (midas.css:24-28). They are used here for fills, borders and
+   outlines only. Text colours are literal (#666 for secondary prose, #c00 for a
+   warning): --mgray as a text colour is a pale grey on white and a status word
+   nobody can read at 3 a.m. is worse than no colour at all.
+
+   No web fonts, no CDN: the DAQ console is not always on a network that
+   reaches the outside. Everything here has to be readable at 1280 px wide. */
+
+.rundb-h          { font-size: 1.05em; margin: 14px 0 4px 0; }
+.rundb-sub        { font-weight: normal; font-size: 0.85em; color: #666; }
+/* The runlog is eleven columns and does not fit a 1280 px console, so the
+   table scrolls inside its panel rather than pushing the page sideways. */
+.rundb-panel      { margin-bottom: 14px; }
+.rundb-body       { overflow-x: auto; }
+.rundb-note       { padding: 5px 10px; color: #666; font-style: italic; }
+.rundb-note.yellow{ border-left: 4px solid #cc0; color: inherit; font-style: normal; }
+.rundb-footnote   { margin-top: 6px; color: #666; font-size: 90%; }
+.rundb-none       { color: #666; font-style: italic; }
+.rundb-more       { margin: 4px 0 0 2px; }
+
+/* --- the live strip ---------------------------------------------------- */
+
+.rundb-strip      { display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+                    margin: 6px 0 8px 0; }
+.rundb-chip       { display: inline-flex; align-items: baseline; gap: 6px;
+                    padding: 3px 9px; border-radius: 10px; white-space: nowrap;
+                    background: var(--mgray, #ddd); }
+.rundb-chip b     { font-weight: 600; }
+.rundb-chip.green { background: var(--mgreen,  #8f8); }
+.rundb-chip.yellow{ background: var(--myellow, #ff8); }
+.rundb-chip.red   { background: var(--mred,    #f88); }
+.rundb-chip.blue  { background: var(--mblue, #91d6ff); }
+.rundb-chip.gray  { background: var(--mgray, #ddd); }
+
+/* --- prose ------------------------------------------------------------- */
+
+/* Deliberately full-width prose rather than a tooltip or a red dot: the whole
+   point is that a shifter should not have to know what a grey chip means at
+   3 a.m., and both of these states leave stale numbers on screen. */
+.rundb-alert         { margin: 4px 0 8px 0; padding: 6px 10px;
+                       border-left: 4px solid var(--mgray, #ccc); }
+.rundb-alert.red     { border-left-color: #c00; background: #fff0f1; }
+.rundb-alert.yellow  { border-left-color: #cc0; background: #fffdf0; }
+.rundb-detailtext    { margin-top: 3px; color: #666; font-size: 90%; }
+.rundb-detailtext code,
+.rundb-footnote code { font-size: 95%; }
+
+/* --- tables ------------------------------------------------------------ */
+
+table.rundb-table             { border-collapse: collapse; margin-top: 2px; margin-left: 0; }
+table.rundb-table td,
+table.rundb-table th          { padding: 2px 8px; text-align: left; vertical-align: top; }
+table.rundb-table th          { font-weight: 600; white-space: nowrap; }
+table.rundb-table td.rundb-num{ text-align: right; }
+table.rundb-table td.rundb-config { font-size: 92%; max-width: 22em; }
+
+/* A status is printed under the name the run database stores, so the page and
+   psql say the same thing; only the colour comes from the utils.status flags. */
+.rundb-word       { font-weight: 600; }
+/* statusInline() puts the same colour class on an inline word, where a pastel
+   fill would be noise. Tint the text instead, in colours that survive a
+   projector and a tired reader. */
+.rundb-word.green { color: #1a7f37; }
+.rundb-word.red   { color: #c00; }
+.rundb-word.yellow{ color: #8a6d00; }
+.rundb-word.gray  { color: #555; }
+.rundb-warnword   { color: #c00; font-weight: 600; }
+td.rundb-st       { white-space: nowrap; }
+td.rundb-st.green { background: var(--mgreen,  #dfd); }
+td.rundb-st.yellow{ background: var(--myellow, #ffd); }
+td.rundb-st.red   { background: var(--mred,    #fdd); }
+td.rundb-st.gray  { background: transparent; }
+
+tr.rundb-runrow   { cursor: pointer; }
+tr.rundb-runrow:hover td { background: var(--myellow, #ffd); }
+tr.rundb-open td  { font-weight: 600; }
+/* Literal, not --mgreen: the pastel is invisible as a 2 px line, and this is
+   the mark that says which run goes next. */
+tr.rundb-next td  { outline: 2px solid #1a7f37; outline-offset: -2px; }
+.rundb-tag        { font-size: 85%; padding: 0 5px; border-radius: 8px;
+                    background: var(--mgreen, #8f8); }
+.rundb-cfg        { display: inline-block; }
+
+/* Data we can no longer vouch for. Not an error -- the numbers may well still
+   be right -- but they must not read as live. The prose above says which of the
+   two things went wrong and when the data on screen was read. */
+.rundb-stale table.rundb-table tr td { opacity: 0.55; }
+.rundb-stale .rundb-note             { opacity: 0.55; }
+
+/* --- the expanded run -------------------------------------------------- */
+
+tr.rundb-detailrow > td { background: rgba(128, 128, 128, 0.10); padding: 6px 10px; }
+.rundb-detailhead { font-weight: 600; margin-bottom: 4px; }
+.rundb-subhead    { font-weight: 600; margin: 8px 0 2px 0; font-size: 95%; }
+.rundb-kvgrid     { display: flex; flex-wrap: wrap; gap: 2px 14px; }
+.rundb-kv         { display: flex; gap: 6px; min-width: 15em; font-size: 92%; }
+.rundb-k          { color: #666; }
+.rundb-v          { font-weight: 600; }
+
+/* --- the action panel -------------------------------------------------- */
+
+.rundb-actionform        { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+                           margin: 6px 0; }
+.rundb-actionform label  { display: inline-flex; gap: 5px; align-items: center; }
