@@ -26,6 +26,10 @@ agreement, registered in midas_files/wavedream-scalar-readout/docs/REGISTRY.md.
     |                             per plane, and x/x', y/y' from an L1/L2 time
     |                             coincidence with no scintillator involved
     |
+    +-- PSMSMASeq ------------- gated on /Event/mutrig
+    |     PIPSMSMAMonitor      -> histograms only: rate, ToT and fine time per
+    |                             counter, with no pixel hits or tracklets
+    |
     +-- PSMRecoSeq ------------ gated on /Event/mutrig
     |     PIPSMSimpleTrackReco   -> /Event/exp_all_tracks   (+ histograms)
     |     PIPSMPatternReco       -> /Event/exp_pattern
