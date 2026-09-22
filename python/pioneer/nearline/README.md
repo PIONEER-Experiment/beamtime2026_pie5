@@ -41,6 +41,9 @@ WDScalerSeq           gated on /Event/wd_scalers
 PSMMuPixSeq           gated on /Event/muquad
   |    PIPSMMuPixMonitor                         histograms only
   |
+PSMSMASeq             gated on /Event/mutrig
+  |    PIPSMSMAMonitor                           histograms only
+  |
 PSMRecoSeq            gated on /Event/mutrig
   |    PIPSMAllTrackReco, PIPSMPatternReco,
   |    PIPSMComputeWeight, PIPSMDelayedCoincidence
@@ -59,10 +62,34 @@ PIHistogramSvc        histograms/<instance>/<name> -> <out>_hists.root
 | `PIWDCalibrator` | `/Event/wd_features`, `wd_rf_phase` | `/Event/wd_hits` | — |
 | `PIWDScalerMonitor` | `/Event/wd_scalers` | — | `readings` and, per board `NNN` in `WD_SCALER_BOARDS`, `rate_vs_time_bNNN`, `mean_rate_bNNN`, `threshold_bNNN`, `fpga_temp_vs_time_bNNN` |
 | `PIPSMMuPixMonitor` | `/Event/muquad` | — | `L<n>_chip<vid>_xy` and `L<n>_xy` per MuPix chip and plane, `hits_per_chip`, `tot_vs_chip`, `L<n>_mult`, and from the L1/L2 coincidence `dt`, `npairs`, `npartners`, `dx`, `dy`, `track_xy`, `xxp`, `yyp` |
+| `PIPSMSMAMonitor` | `/Event/mutrig` | — | `hits_per_counter`, `tot_vs_counter`, `hits_per_event_vs_counter`, `tot`, `fine_time_vs_counter`, `counters` |
 | `PIPSMAllTrackReco` (a `PIPSMSimpleTrackReco`) | `/Event/muquad`, `/Event/mutrig` | `/Event/exp_all_tracks` | `xy`, `xxp`, `yyp`, `nhits`, `nseed` |
 | `PIPSMPatternReco` | `/Event/exp_all_tracks` | `/Event/exp_pattern` | — |
 | `PIPSMComputeWeight` | `/Event/exp_all_tracks` | `/Event/exp_track_weights` | — |
 | `PIPSMDelayedCoincidence` | `/Event/exp_all_tracks`, `exp_track_weights` | `/Event/exp_tagged` | `counters`, `class`, `dt`, `sb`, `stop`, `xp`, `xp_w`, `yp`, `yp_w`, `xy`, `xy_w`, `xxp`, `xxp_w`, `yyp`, `yyp_w` |
+
+**The SMA monitor reads `/Event/mutrig` alone.** `PIPSMSMAMonitor` is the
+counter-side companion of the MuPix monitor: no pixel hits, no data-side channel
+map, no tracklets, so it still says what the scintillator counters are doing
+when those are what is broken. Six histograms: `hits_per_counter`, whose
+relative heights are the relative rates; `tot_vs_counter`, the ToT spectrum of
+each counter; `hits_per_event_vs_counter`; `tot`, every cabled counter together;
+`fine_time_vs_counter`, the low 20 bits of the SMA time stamp, which are the
+word's fine field unchanged, where a stuck or ramping field shows as
+structure; and `counters`, the exposure — frames, hits, parked hits, hits with
+an unknown vid. The counter axis is the raw `MUTRIG` map `PIGeometrySvc` serves,
+so it follows the cabling of the run being processed, and the parked index is
+the Degrader id every uncabled channel sits on — which is where the idle FEB's
+ToT 0 and ToT 255 words land, and why that index is left out of the ToT
+judgements.
+
+**Its `finalize()` WARNINGs are data diagnostics.** It reports no SMA hits at
+all; every cabled counter empty, which can also mean the map's interval parks
+everything; per counter, one that took no hits, one
+whose commonest ToT value takes nearly all of them (a pulser or a stuck field
+rather than a spectrum), and one made mostly of ToT 0 and 255 (the idle words,
+so that counter is not seeing its TOT box); and any hit carrying a vid the raw
+map does not know.
 
 **Two of those TES paths are this job's choice, not a default.**
 `/Event/exp_all_tracks` and `/Event/exp_track_weights` are names the script
@@ -101,7 +128,7 @@ or a swapped cable, which otherwise reads as a dead channel. A handful of them
 next to a healthy firing count is just pile-up and noise, and nothing needs
 changing. Run 193 emits exactly this warning.
 
-The two sequencers gate per event on what actually decoded (`RequireObjects`),
+Each sequencer gates per event on what actually decoded (`RequireObjects`),
 which is why **no bank filter is set on the selector**: the filter is any-of over
 a fixed bank list, so any list would drop one system the first time a board
 serial or an event id changed, and unclaimed banks go to the `PITMidasNull`
@@ -190,8 +217,8 @@ external clock; their names are in `wd_scaler_names`, recorded in the
 
 | setting | default | what goes wrong if it is wrong |
 |---|---|---|
-| `PSM_RF_CHANNEL` | `5` | MuTrig **raw** readout channel (`chipid*32 + channel`, consumed before the map lookup) carrying the accelerator RF. `None` means no `/Event/rf` at all. This is the fake-MIDAS SMA cabling; hardware cabling replaces it |
-| `PSM_CURRENT_CHANNEL` | `6` | Same raw-id convention, the beam-current pulse. It is what books `histograms/musip/current`, and **without it `combine_files.py` cannot merge sub-runs**. Fake-MIDAS SMA cabling |
+| `PSM_RF_CHANNEL` | `6` | MuTrig **raw** readout channel (`chipid*32 + channel`, consumed before the map lookup) carrying the accelerator RF gated by S1. `None` means no `/Event/rf` at all. Follows the SMA board cabling documented in the open interval of `mutrig_channel_map`; it is a job flag, not a conditions interval, so a file from an earlier cabling reprocessed with this job needs an override |
+| `PSM_CURRENT_CHANNEL` | `7` | Same raw-id convention, the proton-current pulse. It is what books `histograms/musip/current`, and **without it `combine_files.py` cannot merge sub-runs**. Same cabling caveat as `PSM_RF_CHANNEL` |
 | `PSM_QUAD_PIXEL_PITCH` | `0.08` | MuPix pitch in mm; the local hit position is `(col + 0.5) * pitch`, so a wrong pitch scales every position and every slope |
 | `PSM_QUAD_TIME_BIN_NS` | `8.0` | Hardware fact — MuPix counts in 8 ns. Change it only if the DAQ clock changes. There is no MuTrig counterpart: since the trigger encoding, `PITMidasMusip` reports that time in ns directly and `trigTimeBinWidth` is gone |
 
@@ -246,6 +273,30 @@ overflow bin of that chip's map, but on the **plane** map it is drawn at a
 position belonging to a neighbouring chip, so the plane map has to be read
 against that number. Run 166 emits it for `L1 10012` on a few percent of its
 hits.
+
+### SMA monitor
+
+The counter-side twin of the MuPix monitor, and the only other part of the job
+that reads one decoded collection **alone** — `/Event/mutrig`, no pixel hits, no
+data-side channel map, no tracklets. A run whose tracklet reco reconstructs
+nothing still tells you which counters took hits and what their ToT looked like.
+
+The counter axis is not configured here: `initialize()` asks `PIGeometrySvc` for
+the raw `MUTRIG` map, takes the distinct detector ids out of it and logs the
+index it built, raw channels and all. `ParkedVid` is set to `2002`, the Degrader
+id the map parks every uncabled channel on; that index carries the idle FEB's
+own words and is therefore excluded from the ToT judgements below. Change the
+parked id in the map and this number has to follow it.
+
+| setting | default | what goes wrong if it is wrong |
+|---|---|---|
+| `PSM_SMA_MONITOR` | `True` | Off drops the whole module. Requires `PSM_DECODE`: only the musip decoding tool produces `/Event/mutrig`, and the monitor takes the raw `MUTRIG` map from the `PIGeometrySvc` that `PSM_DECODE` creates |
+| `PSM_SMA_HITS_PER_EVENT_MAX` | `20000` | Top of the per-counter hits-per-event axis; everything above it lands in the last bin. 20,000 is the H000 bank cap, so nothing a frame can hold is clipped; a busy counter exceeds a few hundred hits per frame |
+| `PSM_SMA_DEGENERATE_TOT_SHARE` | `0.95` | Share of a cabled counter's hits at its commonest ToT value above which `finalize()` calls it degenerate. One value repeated is a pulser or a stuck field, not a spectrum. Lower it and a genuinely narrow spectrum starts warning |
+| `PSM_SMA_MARKER_TOT_SHARE` | `0.5` | Share at ToT 0 or 255 above which a cabled counter is called marker-dominated. Those two values are the idle FEB's own words, so a counter made mostly of them is not seeing its TOT box |
+
+Both shares are judgements about **cabled** counters only. The parked index is
+expected to be all 0 and 255 and is never reported for it.
 
 ### PSM reco
 
@@ -480,19 +531,22 @@ problem it finds in one message, rather than the first:
 10. `PSM_MUPIX_PIXELS_PER_BIN` below 1: it is how many pixels share one bin of a hit map.
 11. `PSM_MUPIX_DT_RANGE_NS` or `PSM_MUPIX_DT_BINS` not positive: a half-width and a bin count.
 12. `PSM_MUPIX_WINDOW_NS` not positive: a non-positive half-window pairs nothing at all.
-13. A `GEOCOND` base with an empty `PSM_GEOMETRY_FILES`: nothing supplies the table it names.
-14. `COND:isel` in `PSM_GEOMETRY_TRANS` without `bt2026_isel.json` in `ODB_SPECS`.
-15. Exactly one of `WD_ALIGN_TABLE` / `WD_ECAL_TABLE` set: `PIWDCalibrator` needs both.
-16. `WD_ENABLED` with an empty `WD_RF_TABLE`: `PIWDRFPhase` runs first in `WDAnalysisSeq` and `PIWDWaveformAnalysis` reads `/Event/wd_rf_phase`, so the RF table cannot be empty.
-17. `WD_ROLE_TABLE` set with an empty `WD_CONDITIONS_FILES`: nothing would supply the `wd_channel_map` table.
-18. `WD_CHANNEL_SETTINGS_TABLE` set with an empty `ODB_SPECS`: only the begin-of-run ODB dump serves `wd_channel_settings`.
-19. `WD_CAL_CHANNELS` not a subset of `WD_CHANNELS`: they would have no features to calibrate.
-20. `WD_SCALER_MONITOR` without `WD_ENABLED`: nothing would produce `/Event/wd_scalers`.
-21. `WD_SCALER_TIME_BIN_S` not positive or not below `WD_SCALER_TIME_MAX_S`, or a serial listed twice in `WD_SCALER_BOARDS`.
-22. `WD_RF_REFINE` on with `WD_RF_REFINE_POINTS` below 2: a scan needs at least 2 points.
-23. `PSM_PHASE_SPACE_BINS` not a positive multiple of 64: the phase-space histograms would not rebin onto the 64-bin minitwin export exactly.
-24. `PSM_PHASE_SPACE_POS_RANGE_MM` or `PSM_PHASE_SPACE_SLOPE_RANGE_MRAD` not positive: both are half-widths of a symmetric axis.
-25. `OUTPUT_LEVEL` not one of `DEBUG`, `ERROR`, `INFO`, `WARNING`.
+13. `PSM_SMA_MONITOR` without `PSM_DECODE`: nothing would produce `/Event/mutrig`, and the monitor takes the raw `MUTRIG` channel map from the `PIGeometrySvc` that `PSM_DECODE` creates.
+14. `PSM_SMA_HITS_PER_EVENT_MAX` below 1: it is the top of an axis counting hits per event.
+15. `PSM_SMA_DEGENERATE_TOT_SHARE` or `PSM_SMA_MARKER_TOT_SHARE` outside `(0, 1]`: both are shares of one counter's hits.
+16. A `GEOCOND` base with an empty `PSM_GEOMETRY_FILES`: nothing supplies the table it names.
+17. `COND:isel` in `PSM_GEOMETRY_TRANS` without `bt2026_isel.json` in `ODB_SPECS`.
+18. Exactly one of `WD_ALIGN_TABLE` / `WD_ECAL_TABLE` set: `PIWDCalibrator` needs both.
+19. `WD_ENABLED` with an empty `WD_RF_TABLE`: `PIWDRFPhase` runs first in `WDAnalysisSeq` and `PIWDWaveformAnalysis` reads `/Event/wd_rf_phase`, so the RF table cannot be empty.
+20. `WD_ROLE_TABLE` set with an empty `WD_CONDITIONS_FILES`: nothing would supply the `wd_channel_map` table.
+21. `WD_CHANNEL_SETTINGS_TABLE` set with an empty `ODB_SPECS`: only the begin-of-run ODB dump serves `wd_channel_settings`.
+22. `WD_CAL_CHANNELS` not a subset of `WD_CHANNELS`: they would have no features to calibrate.
+23. `WD_SCALER_MONITOR` without `WD_ENABLED`: nothing would produce `/Event/wd_scalers`.
+24. `WD_SCALER_TIME_BIN_S` not positive or not below `WD_SCALER_TIME_MAX_S`, or a serial listed twice in `WD_SCALER_BOARDS`.
+25. `WD_RF_REFINE` on with `WD_RF_REFINE_POINTS` below 2: a scan needs at least 2 points.
+26. `PSM_PHASE_SPACE_BINS` not a positive multiple of 64: the phase-space histograms would not rebin onto the 64-bin minitwin export exactly.
+27. `PSM_PHASE_SPACE_POS_RANGE_MM` or `PSM_PHASE_SPACE_SLOPE_RANGE_MRAD` not positive: both are half-widths of a symmetric axis.
+28. `OUTPUT_LEVEL` not one of `DEBUG`, `ERROR`, `INFO`, `WARNING`.
 
 ## The phase-space histograms are minitwin input
 

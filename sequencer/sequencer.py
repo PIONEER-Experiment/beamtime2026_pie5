@@ -26,9 +26,9 @@ def execute_run(seq : SequenceClient):
     # The wait_seconds needs to be replaced by a more reasonable
     # wait until completion logic, e.g. total number of events
     # sent by a specific frontend or some integrated beam quantity.
-    seq.wait_seconds(numOfEvents)
+    seq.wait_odb("/Equipment/WDWaveforms/Statistics/Events sent", "==", num_ev)
     seq.stop_run()
-    # Again, fail save as the nearline daemon should have scheduled
+    # Again, fail save as the nearline daemon should have
     # picked up everything during transition.
     db_interface.end_of_midas_run(run_id)
     return True

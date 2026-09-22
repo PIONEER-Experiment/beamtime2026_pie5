@@ -350,6 +350,7 @@ CREATE TABLE IF NOT EXISTS config.pim1_epics (
     "QTA11:SOL:2"    FLOAT NOT NULL,
     "QTB11:SOL:2"    FLOAT NOT NULL,
     "QTB12:SOL:2"    FLOAT NOT NULL,
+    "SSB11Y:SOL:2"   FLOAT NOT NULL,
     "FS11-L:SOL"     INT NOT NULL,
     "FS11-R:SOL"     INT NOT NULL,
     "FS11-O:SOL"     INT NOT NULL,
@@ -375,90 +376,6 @@ CREATE TABLE IF NOT EXISTS config.pim1_epics (
     "QSL17:SOL:2"    FLOAT NOT NULL,
     "QSL18:SOL:2"    FLOAT NOT NULL
 );
-
-WITH pim1_settings (
-    rn, seq_id, QTA11, QTB11, QTB12,
-    FS11L, FS11R, FS11O, FS11U,
-    ASM11, TS11, TS12, QSL11, QSL12,
-    FS13RLL, FS13RLR, QSL13, QSL14,
-    FS12L, FS12R, FS12O, FS12U,
-    ASM12, TS21, TS22, QSL15, QSL16, QSL17, QSL18
-) AS (
-    SELECT *
-    FROM (
-        VALUES
-        (
-            1, -- rn
-            1, -- sq_id
-            -21.23, -- QTA11
-            -30.66, -- QTB11
-             35.72, -- QTB12
-             15.00, -- FS11-L
-             15.00, -- FS11-R
-             15.00, -- FS11-O
-             15.00, -- FS11-U
-             60.91, -- ASM11
-             43.09, -- TS11
-            -51.48, -- TS12
-            -18.10, -- QSL11
-             25.50, -- QSL12
-              2.00, -- FS13RL-L
-              2.00, -- FS13RL-R
-             23.50, -- QSL13
-            -39.01, -- QSL14
-             15.00, -- FS12-L
-             15.00, -- FS12-R
-             15.00, -- FS12-O
-             15.00, -- FS12-U
-             60.60, -- ASM12
-            -73.30, -- TS21
-             58.35, -- TS22
-            - 3.30, -- QSL15
-             14.60, -- QSL16
-            -36.05, -- QSL17
-             40.64  -- QSL18
-        )
-    ) v(
-        rn, seq_id, QTA11, QTB11, QTB12,
-        FS11L, FS11R, FS11O, FS11U,
-        ASM11, TS11, TS12, QSL11, QSL12,
-        FS13RLL, FS13RLR, QSL13, QSL14,
-        FS12L, FS12R, FS12O, FS12U,
-        ASM12, TS21, TS22, QSL15, QSL16, QSL17, QSL18
-    )
-),
-configs AS (
-    INSERT INTO config.configuration (config_type)
-    SELECT 'pim1_epics'
-    FROM pim1_settings
-    ORDER BY rn
-    RETURNING id
-),
-config_ids AS (
-    SELECT id, row_number() OVER (ORDER BY id) AS rn
-    FROM configs
-)
-INSERT INTO config.pim1_epics (
-    id, seq_id,
-    "QTA11:SOL:2", "QTB11:SOL:2", "QTB12:SOL:2",
-    "FS11-L:SOL", "FS11-R:SOL", "FS11-O:SOL", "FS11-U:SOL",
-    "ASM11:SOL:2", "TS11:SOL:2", "TS12:SOL:2",
-    "QSL11:SOL:2", "QSL12:SOL:2",
-    "FS13RL-L:SOL:2", "FS13RL-R:SOL:2",
-    "QSL13:SOL:2", "QSL14:SOL:2",
-    "FS12-R:SOL", "FS12-L:SOL", "FS12-O:SOL", "FS12-U:SOL",
-    "ASM12:SOL:2", "TS21:SOL:2", "TS22:SOL:2",
-    "QSL15:SOL:2", "QSL16:SOL:2", "QSL17:SOL:2", "QSL18:SOL:2"
-)
-SELECT c.id, p.seq_id,
-    p.QTA11, p.QTB11, p.QTB12,
-    p.FS11L, p.FS11R, p.FS11O, p.FS11U,
-    p.ASM11, p.TS11, p.TS12, p.QSL11, p.QSL12,
-    p.FS13RLL, p.FS13RLR, p.QSL13, p.QSL14,
-    p.FS12R, p.FS12L, p.FS12O, p.FS12U,
-    p.ASM12, p.TS21, p.TS22, p.QSL15, p.QSL16, p.QSL17, p.QSL18
-FROM config_ids c
-JOIN pim1_settings p USING (rn);
 
 CREATE TABLE IF NOT EXISTS config.pie5_epics (
     id INT PRIMARY KEY REFERENCES config.configuration(id),

@@ -66,7 +66,7 @@ from reco_testbeam.pi_wdalgConf import (PIWDCalibrator, PIWDRFPhase, PIWDScalerM
                                         PIWDSettingsSummary, PIWDWaveformAnalysis)
 from reco_testbeam.pi_psmalg_expConf import (PIPSMComputeWeight, PIPSMDelayedCoincidence,
                                              PIPSMMuPixMonitor, PIPSMPatternReco,
-                                             PIPSMSimpleTrackReco)
+                                             PIPSMSMAMonitor, PIPSMSimpleTrackReco)
 
 # ===== RENDERED BY THE DAEMON (do not edit; the checked-in file carries placeholders) =====
 # pioneer.nearline.render fills these with string.Template and writes the result next to
@@ -242,10 +242,12 @@ WD_SCALER_TIME_MAX_S = 7200.0
 WD_SCALER_FILL_STALE = False
 # --- PSM decode ------------------------------------------------------------
 # MuTrig RAW readout channels (chipid*32+channel, read before the map lookup)
-# carrying the RF and the beam current; fake-MIDAS SMA cabling, hardware cabling
-# replaces both. None drops /Event/rf resp. histograms/musip/current.
-PSM_RF_CHANNEL = 5
-PSM_CURRENT_CHANNEL = 6
+# carrying the RF and the beam current. These follow the SMA board's cabling,
+# which the open interval of mutrig_channel_map in bt2026_psm_readout_map.json
+# documents: RF gated by S1 on 6, proton current on 7. None drops /Event/rf
+# resp. histograms/musip/current.
+PSM_RF_CHANNEL = 6
+PSM_CURRENT_CHANNEL = 7
 # MuPix pixel pitch in mm; a wrong pitch scales every position and every slope.
 PSM_QUAD_PIXEL_PITCH = 0.08
 # MuPix timestamp bin width in ns. There is no MuTrig counterpart any more: the
@@ -297,6 +299,27 @@ PSM_MUPIX_SLOPE_RANGE_MRAD = 0.0
 # Each extra pair is a combinatorial ghost carrying a slope no particle had,
 # so this is a diagnostic for a busy run, not a production setting.
 PSM_MUPIX_ALL_PAIRS = 0
+# --- SMA monitor -----------------------------------------------------------
+# The low-level check on the SMA time-over-threshold readout: how many hits each
+# counter takes, and what their ToT looks like. It reads /Event/mutrig and
+# nothing else -- no MuPix hits, no data-side channel map, no tracklets -- so it
+# still says what the counters are doing when the parts that depend on them are
+# broken. Requires PSM_DECODE, whose PIGeometrySvc also serves the raw MUTRIG
+# map the counter axis is built from.
+PSM_SMA_MONITOR = True
+# Top of the per-counter hits-per-event axis; anything above it lands in the
+# last bin. A readout frame holds at most 20,000 words (the H000 bank cap), and
+# a busy counter routinely exceeds a few hundred hits per frame, so the axis
+# runs to the bank cap rather than clipping a counter that is merely busy.
+PSM_SMA_HITS_PER_EVENT_MAX = 20000
+# A cabled counter whose commonest ToT value takes at least this share of its
+# hits is reported as degenerate at finalize. One value repeated is a pulser or
+# a stuck field, not a spectrum.
+PSM_SMA_DEGENERATE_TOT_SHARE = 0.95
+# Share of a cabled counter's hits at ToT 0 or 255 above which it is reported as
+# marker-dominated. Those two values are the idle FEB's own words, so a counter
+# made mostly of them is not seeing its TOT box.
+PSM_SMA_MARKER_TOT_SHARE = 0.5
 # --- PSM reco --------------------------------------------------------------
 # Container holding the data-side channel map the tracklet reco reads.
 PSM_CHANNEL_MAP_FILE = "bt2026_psm_channel_map.json"
@@ -509,6 +532,20 @@ def check():
     if PSM_MUPIX_MONITOR and float(PSM_MUPIX_WINDOW_NS) <= 0:
         problems.append(f"PSM_MUPIX_WINDOW_NS is {PSM_MUPIX_WINDOW_NS}: it is a half-window, "
                         "so a non-positive value pairs nothing at all.")
+    if PSM_SMA_MONITOR and not PSM_DECODE:
+        problems.append("PSM_SMA_MONITOR is on but PSM_DECODE is off: only the musip "
+                        f"decoding tool produces {_TES_MUTRIG}, and the monitor takes the "
+                        "raw MUTRIG channel map from the PIGeometrySvc that PSM_DECODE "
+                        "creates.")
+    if PSM_SMA_MONITOR and int(PSM_SMA_HITS_PER_EVENT_MAX) < 1:
+        problems.append(f"PSM_SMA_HITS_PER_EVENT_MAX is {PSM_SMA_HITS_PER_EVENT_MAX}: it is "
+                        "the top of an axis counting hits per event, so it must be at "
+                        "least 1.")
+    if PSM_SMA_MONITOR and not (0 < float(PSM_SMA_DEGENERATE_TOT_SHARE) <= 1
+                                and 0 < float(PSM_SMA_MARKER_TOT_SHARE) <= 1):
+        problems.append(f"PSM_SMA_DEGENERATE_TOT_SHARE ({PSM_SMA_DEGENERATE_TOT_SHARE}) and "
+                        f"PSM_SMA_MARKER_TOT_SHARE ({PSM_SMA_MARKER_TOT_SHARE}) are shares of "
+                        "one counter's hits; both must be inside (0, 1].")
     if PSM_DECODE and PSM_GEOMETRY_BASE and not PSM_GEOMETRY_FILES:
         problems.append("PSM_GEOMETRY_BASE is a GEOCOND layer but PSM_GEOMETRY_FILES is "
                         "empty: nothing would supply the table it names.")
@@ -690,6 +727,24 @@ if PSM_MUPIX_MONITOR:
     algorithms.append(Gaudi__Sequencer("PSMMuPixSeq", RequireObjects=[_TES_MUQUAD],
                                        Members=[mupix_monitor]))
 
+if PSM_SMA_MONITOR:
+    # Its own sequencer, gated on the SMA hits and on nothing else: this is the
+    # check that has to keep running when the channel map, the MuPix half of the
+    # telescope, or the tracklet reco that needs both, is what is broken. The
+    # counter axis is built at initialize from the raw MUTRIG map PIGeometrySvc
+    # serves, so it follows the cabling of the run being processed and nothing
+    # about it is set here. ParkedVid is the Degrader id that map parks every
+    # uncabled channel on: the idle FEB words land there, which is why that one
+    # index is left out of the ToT judgements.
+    sma_monitor = PIPSMSMAMonitor(
+        input=_TES_MUTRIG, GeometrySvc="PIGeometrySvc", RawMap="MUTRIG",
+        ParkedVid=2002,
+        HitsPerEventMax=int(PSM_SMA_HITS_PER_EVENT_MAX),
+        DegenerateTotShare=float(PSM_SMA_DEGENERATE_TOT_SHARE),
+        MarkerTotShare=float(PSM_SMA_MARKER_TOT_SHARE))
+    algorithms.append(Gaudi__Sequencer("PSMSMASeq", RequireObjects=[_TES_MUTRIG],
+                                       Members=[sma_monitor]))
+
 if PSM_RECO:
     all_reco = PIPSMSimpleTrackReco(
         "PIPSMAllTrackReco", L_hits=_TES_MUQUAD, S_hits=_TES_MUTRIG,
@@ -758,5 +813,6 @@ for conninfo in PG_CONNECTIONS:
 if NL_OVERRIDES:
     print(f"[nearline] overrides  {NL_OVERRIDES}")
 print(f"[nearline] halves     WD={WD_ENABLED} WD_SCALER_MONITOR={WD_SCALER_MONITOR}"
-      f" PSM_DECODE={PSM_DECODE} PSM_RECO={PSM_RECO} PSM_MUPIX_MONITOR={PSM_MUPIX_MONITOR}")
+      f" PSM_DECODE={PSM_DECODE} PSM_RECO={PSM_RECO} PSM_MUPIX_MONITOR={PSM_MUPIX_MONITOR}"
+      f" PSM_SMA_MONITOR={PSM_SMA_MONITOR}")
 print(f"[nearline] EvtMax     {EVT_MAX}")
