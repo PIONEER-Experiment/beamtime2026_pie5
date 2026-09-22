@@ -136,7 +136,11 @@ class miniTwinInterface:
             " (clamped: %s)" % payload["clamped"] if payload.get("clamped") else "",
             " [step %s]" % self._last_run.get("step_id")
             if self._last_run and self._last_run.get("step_id") else ""))
-        return [self._row(currents)]
+        return [{
+            "type" : "iter",
+            "currents" : [self._row(currents)]
+            }
+            ]
 
     def NextRunPlan(self):                             # noqa: N802 -- daemon's API
         """``NextConfiguration()`` plus how to take the run.

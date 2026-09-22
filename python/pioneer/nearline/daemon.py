@@ -93,11 +93,12 @@ class NearlineDaemon:
         if not self.client.odb_exists("/Nearline"):
             self.client.odb_set("/Nearline", {
                 "config" : {
-                    "Backup path" : os.environ.get("NEARLINE_BACKUP_DIR", ""),
-                    "Remote path" : os.environ.get("NEARLINE_REMOTE", ""),
-                    "Output path" : os.environ.get("NEARLINE_DIR", ""),
+                    "Backup path" : os.environ.get("NEARLINE_BACKUP_DIR", "/home/pinky/backup"),
+                    "Remote path" : os.environ.get("NEARLINE_REMOTE", "analysis:/home/pioneer/inbox"),
+                    "Output path" : os.environ.get("NEARLINE_DIR", "/home/pinky/nearline"),
                     "Num parallel jobs" : njobs,
-                    "MiniTwin URL" : "http://127.0.0.1:8420"
+                    "MiniTwin URL" : "http://127.0.0.1:8420",
+                    "MiniTwin updates" : "pim1_epics"
                     }
             })
         elif (args.jobs):
@@ -108,6 +109,7 @@ class NearlineDaemon:
         self.backup_path          = pathlib.Path(self.client.odb_get("/Nearline/config/Backup path"))
         self.remote_path          = pathlib.Path(self.client.odb_get("/Nearline/config/Remote path"))
         self.nearline_output_path = pathlib.Path(self.client.odb_get("/Nearline/config/Output path"))
+        self.minitwin_update_table = self.client.odb_get("/Nearline/config/MiniTwin updates")
 
         self.client.register_transition_callback(
             transition = midas.TR_START,
@@ -225,10 +227,22 @@ class NearlineDaemon:
     def check_for_updates(self):
         new_configs = self.mt_interface.NextConfiguration()
         if len(new_configs) > 0:
-            mrs = nl_run.midas_run_sequence(self.db_interface)
-            mrs.set_config_list("dummy", new_configs)
-            mrs.set_subsequence(nl_run.five_point_sequence(self.db_interface))
-            mrs.schedule()
+            for aConfig in new_configs:
+                mrs = nl_run.midas_run_sequence(self.db_interface)
+                mrs.set_config_list(self.minitwin_update_table, aConfig['currents'])
+                if aConfig['type'] == 'iter':
+                    # default 5 point sequence triggers file merging.
+                    mrs.set_subsequence(nl_run.five_point_sequence(self.db_interface))
+                    mrs.num_ev = 1e6
+                elif aConfig['type'] == 'final':
+                    fiveScan = nl_run.five_point_sequence(self.db_interface)
+                    fiveScan.set_on_complete("merge") # it shall only merge and not submit to minitwin.
+                    dscan = nl_run.degrader_scan(self.db_interface)
+                    dscan.set_subsequence(fiveScan)
+                    mrs.set_subsequence(dscan)
+                    mrs.num_ev = 1e7
+
+                mrs.schedule()
 
     def filename_change_callback(self, client, path, value):
         # path should be
