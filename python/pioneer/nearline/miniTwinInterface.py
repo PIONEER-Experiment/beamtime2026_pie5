@@ -9,12 +9,16 @@ import ROOT
 
 from pioneer.nearline.beamtune_client import (
     BeamTuneClient,
-    BeamTuneError,
     DEFAULT_URL,
     CONTEXT_SCHEMA,
-    ROLE_BY_SUFFIX
 )
 
+miniTwin_histograms = [
+    "histograms/musip/current",
+    "histograms/PIPSMMuPixMonitor/xxp",
+    "histograms/PIPSMMuPixMonitor/yyp",
+    "histograms/PIPSMMuPixMonitor/track_xy"
+]
 class miniTwinInterface:
     """
     ``NextConfiguration()`` returns ``[{column: value}]`` -- one row for the
