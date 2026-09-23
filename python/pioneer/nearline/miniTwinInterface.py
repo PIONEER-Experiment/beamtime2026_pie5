@@ -57,7 +57,8 @@ class miniTwinInterface:
 
     def AddContext(self, ctxt):                        # noqa: N802 -- daemon's API
         """One completed sequence.  ``ctxt`` is a merged file path."""
-        aFile = ROOT.TFile.Open(ctxt)
+        filename = str(ctxt)
+        aFile = ROOT.TFile.Open(filename)
 
         beam_hdr = aFile.Get("beam")
 

@@ -166,8 +166,8 @@ class NearlineDaemon:
         on_complete = seq_cfg['on_complete'].split()
         if "merge" in on_complete:
             seq_cfg['input'] = self.nearline_output_path
-            seq_cfg['cfg_file'] = self.nearline_output_path / f"seq{seq_cfg['id']:05d}.json"
-            seq_cfg['output'] = self.nearline_output_path / f"seq{seq_cfg['id']:05d}.root"
+            seq_cfg['output'] = self.nearline_output_path / f"seq{seq_cfg['id']:05d}"
+            seq_cfg['cfg_file'] = seq_cfg['output'] / f"seq{seq_cfg['id']:05d}.json"
             seq_cfg['job_type'] = "merge"
             seq_cfg['job_id'] = seq_cfg['id']
             seq_cfg['table'] = 'run_sequence'
@@ -216,7 +216,7 @@ class NearlineDaemon:
             print("Finalising job")
             aJob.finalise()
             if "mt_add" in aJob.config['on_complete'].split():
-                self.mt_interface.AddContext(aJob.config['output'])
+                self.mt_interface.AddContext(aJob.config['output_file'])
 
         numOpen = self.sequence_queue.getOpenSlots()
         if numOpen > 0:
