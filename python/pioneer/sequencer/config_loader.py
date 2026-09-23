@@ -54,10 +54,11 @@ def load_isel_config(seq : SequenceClient, cfg_key : str,   aConfig : dict):
 def load_beam_config(seq : SequenceClient, cfg_key : str,  aConfig : dict):
     writeable_device_types = [
         1, # Magnets
-        2, # Beam blocker
         4, # Separator
         5, # Slits
     ]
+    # 2 (Beam Blocker) is a security feature we are not writing to. Open/Close of beam blocker
+    # is a shifter responsibility and should not be automated.
     # 3 (PSA) and 6 (Value) are not considerd writable
 
     odb_path    = config_odb_paths[cfg_key]
