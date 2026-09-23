@@ -28,7 +28,10 @@ agreement, registered in midas_files/wavedream-scalar-readout/docs/REGISTRY.md.
     |
     +-- PSMSMASeq ------------- gated on /Event/mutrig
     |     PIPSMSMAMonitor      -> histograms only: rate, ToT and fine time per
-    |                             counter, with no pixel hits or tracklets
+    |                             counter, with no pixel hits or tracklets;
+    |                             with PSM_RF_CHANNEL set also reads /Event/rf
+    |                             (optional per frame) for the S1-gated RF
+    |                             phase and RF phase vs ToT per counter
     |
     +-- PSMRecoSeq ------------ gated on /Event/mutrig
     |     PIPSMSimpleTrackReco   -> /Event/exp_all_tracks   (+ histograms)
@@ -451,9 +454,9 @@ else:
 _NTUPLE_COMPRESSION = 501
 _NTUPLE_REUSE_ENTRY = True
 
-# TES paths. The first three are the decoding tools' own defaults, and changing a
-# tool's path property without changing these breaks the sequencer gates silently.
-# The last two are names this job chooses and passes to the PSM algorithms
+# TES paths. The first five are the decoding tools' own defaults, and changing a
+# tool's path property without changing these breaks the sequencer gates (and the
+# SMA monitor's RF input) silently. The last two are names this job chooses and passes to the PSM algorithms
 # explicitly; their defaults are /Event/tracker_fr, /Event/dtar_fr and
 # /Event/exp_simple_tracks, which are the simulation's names, so the assignment is
 # what puts the testbeam chain on one set of paths.
@@ -461,6 +464,7 @@ _TES_WAVEFORM = "/Event/wd_waveform"
 _TES_SCALERS = "/Event/wd_scalers"
 _TES_MUQUAD = "/Event/muquad"
 _TES_MUTRIG = "/Event/mutrig"
+_TES_RF = "/Event/rf"
 _TES_PSM_TRACKS = "/Event/exp_all_tracks"
 _TES_PSM_WEIGHTS = "/Event/exp_track_weights"
 _TIMEBASE_TABLE = "wd_timebase"
@@ -550,6 +554,19 @@ def check():
         problems.append(f"PSM_SMA_DEGENERATE_TOT_SHARE ({PSM_SMA_DEGENERATE_TOT_SHARE}) and "
                         f"PSM_SMA_MARKER_TOT_SHARE ({PSM_SMA_MARKER_TOT_SHARE}) are shares of "
                         "one counter's hits; both must be inside (0, 1].")
+    if PSM_RF_CHANNEL is not None:
+        try:
+            rf_ok = (int(PSM_RF_CHANNEL) == PSM_RF_CHANNEL and 0 <= int(PSM_RF_CHANNEL) <= 15
+                     and (PSM_CURRENT_CHANNEL is None
+                          or int(PSM_RF_CHANNEL) != int(PSM_CURRENT_CHANNEL)))
+        except (TypeError, ValueError):
+            rf_ok = False
+        if not rf_ok:
+            problems.append(f"PSM_RF_CHANNEL is {PSM_RF_CHANNEL!r}: it must be an integer SMA "
+                            "raw channel (0-15, the word's 4-bit channel field) and not "
+                            f"PSM_CURRENT_CHANNEL ({PSM_CURRENT_CHANNEL!r}), or /Event/rf holds "
+                            "no RF or the wrong pulses and the SMA monitor's RF phase is "
+                            "meaningless.")
     if PSM_DECODE and PSM_GEOMETRY_BASE and not PSM_GEOMETRY_FILES:
         problems.append("PSM_GEOMETRY_BASE is a GEOCOND layer but PSM_GEOMETRY_FILES is "
                         "empty: nothing would supply the table it names.")
@@ -740,12 +757,21 @@ if PSM_SMA_MONITOR:
     # about it is set here. ParkedVid is the Degrader id that map parks every
     # uncabled channel on: the idle FEB words land there, which is why that one
     # index is left out of the ToT judgements.
+    #
+    # With the RF channel decoded, the monitor also pairs each S1 hit with the
+    # S1-gated RF burst after it and fills the RF phase vs ToT per counter. The
+    # RF* properties stay at their defaults: the phase comes from the last RF
+    # pulse of a gate holding 2-4 pulses (RFPhaseRule "last"; "dqm" is the musip
+    # DQM's four-pulse rule). /Event/rf is read as an optional input: a frame in
+    # which the decoder saw no RF has none.
     sma_monitor = PIPSMSMAMonitor(
         input=_TES_MUTRIG, GeometrySvc="PIGeometrySvc", RawMap="MUTRIG",
         ParkedVid=2002,
         HitsPerEventMax=int(PSM_SMA_HITS_PER_EVENT_MAX),
         DegenerateTotShare=float(PSM_SMA_DEGENERATE_TOT_SHARE),
         MarkerTotShare=float(PSM_SMA_MARKER_TOT_SHARE))
+    if PSM_RF_CHANNEL is not None:
+        sma_monitor.RFInput = _TES_RF
     algorithms.append(Gaudi__Sequencer("PSMSMASeq", RequireObjects=[_TES_MUTRIG],
                                        Members=[sma_monitor]))
 
