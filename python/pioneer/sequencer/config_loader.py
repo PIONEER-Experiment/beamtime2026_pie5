@@ -65,7 +65,7 @@ def load_beam_config(seq : SequenceClient, cfg_key : str,  aConfig : dict):
     ca_names    = seq.odb_get(odb_path + "/Settings/CA Name")
     ca_demand   = seq.odb_get(odb_path + "/Settings/CA Demand")
     dev_type    = seq.odb_get(odb_path + "/Settings/Device type")
-    thresholds  = seq.odb_get(odb_path + "/Settings/Update Threshold Measured")
+    thresholds  = seq.odb_get(odb_path + "/Settings/Warning Threshold")
     demand_vals = seq.odb_get(odb_path + "/Variables/Demand")
 
     ch_names = [f"{cn}{cd}" for cn, cd in zip(ca_names, ca_demand)]
