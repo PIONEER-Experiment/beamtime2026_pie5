@@ -73,7 +73,7 @@ class miniTwinInterface:
         theMessage = {
             "schema" : CONTEXT_SCHEMA,
             "context_id" : ctxt,
-            "settings" : {
+            "setting" : {
                 "knobs" : {str(k) : v for k,v,t in zip(beam_hdr.GetNames(), beam_hdr.GetDemand(), beam_hdr.GetTypes()) if t in configurable_devices},
                 "readback" : {str(k) : v for k,v,t in zip(beam_hdr.GetNames(), beam_hdr.GetMeasured(), beam_hdr.GetTypes()) if t in configurable_devices}
             },
