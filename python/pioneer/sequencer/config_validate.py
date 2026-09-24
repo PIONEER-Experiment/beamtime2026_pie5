@@ -72,7 +72,7 @@ class ODBRequirementCollection:
         if self.first_check is None:
             self.first_check = t_now
 
-        succeeded = [r.check()[0] for r in self.requirements]
+        succeeded = [r.check() for r in self.requirements]
         is_success = all(succeeded)
         if self.stable_for is not None:
             if is_success:

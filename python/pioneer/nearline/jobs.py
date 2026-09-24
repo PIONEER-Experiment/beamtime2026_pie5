@@ -43,9 +43,15 @@ class BaseJob:
         return "RUNNING"
 
     def start(self):
-        cmd = self.build_command()
         Path(self.config['output']).mkdir(parents = True, exist_ok = True)
-        log_path = Path(self.config['output']) / f"run{self.config['midas_run_number']:05d}_{self.config['job_type']}.log"
+        cmd = self.build_command()
+        if 'midas_run_number' in self.config.keys():
+            log_path = Path(self.config['output']) / f"run{self.config['midas_run_number']:05d}_{self.config['job_type']}.log"
+        elif self.config.get("job_type", "") == "merge":
+            log_path = Path(self.config['output']) / f"seq{self.config['id']:05d}_{self.config['job_type']}.log"
+        else:
+            log_path = Path(self.config['output']) / f"job{self.config['id']:05d}_{self.config['job_type']}.log"
+
         self.logfile = log_path.open("w")
         if (dry_run_all_jobs):
             print(" ".join([str(c) for c in cmd]))
@@ -167,11 +173,14 @@ class MergeJob(BaseJob):
     """
 
     def build_job_description_file(self):
+        print(self.config)
         input_path = Path(self.config["input"])
+        outfile = self.config["output"] /f"seq{self.config['id']:05d}.root"
+        self.config['output_file'] = outfile
         config = {
-            "output" : str(self.config["output"]),
+                "output" : str(outfile),
             "runs"   : {
-                f"{run_id}" : [str(input_path / f"run{self.db.get_midas_run_number(run_id)}/{f['filebase']}.root") for f in self.db.find_files([run_id], "root")]
+                f"{run_id}" : [str(input_path / f"run{self.db.get_midas_run_number(run_id):05d}/{f['filebase']}_hists.root") for f in self.db.find_files([run_id], "root")]
                 for run_id in self.config['midas_run_ids']
             }
         }

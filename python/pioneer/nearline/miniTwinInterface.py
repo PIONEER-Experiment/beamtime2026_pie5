@@ -9,12 +9,16 @@ import ROOT
 
 from pioneer.nearline.beamtune_client import (
     BeamTuneClient,
-    BeamTuneError,
     DEFAULT_URL,
     CONTEXT_SCHEMA,
-    ROLE_BY_SUFFIX
 )
 
+miniTwin_histograms = [
+    "histograms/musip/current",
+    "histograms/PIPSMMuPixMonitor/xxp",
+    "histograms/PIPSMMuPixMonitor/yyp",
+    "histograms/PIPSMMuPixMonitor/track_xy"
+]
 class miniTwinInterface:
     """
     ``NextConfiguration()`` returns ``[{column: value}]`` -- one row for the
@@ -53,7 +57,8 @@ class miniTwinInterface:
 
     def AddContext(self, ctxt):                        # noqa: N802 -- daemon's API
         """One completed sequence.  ``ctxt`` is a merged file path."""
-        aFile = ROOT.TFile.Open(ctxt)
+        filename = str(ctxt)
+        aFile = ROOT.TFile.Open(filename)
 
         beam_hdr = aFile.Get("beam")
 

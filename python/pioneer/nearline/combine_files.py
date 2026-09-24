@@ -3,12 +3,10 @@ import argparse
 import ROOT
 from pathlib import Path
 
+from pioneer.nearline.miniTwinInterface import miniTwin_histograms
+
 header_paths = [
 
-]
-
-histo_paths = [
-    "histograms/musip/current",
 ]
 
 def load_json_config(config_file : Path) -> dict:
@@ -35,7 +33,7 @@ def merge_sub_runs(input_files : list[str]):
 
     # Load everything of interest:
     histos = dict()
-    for path in histo_paths:
+    for path in miniTwin_histograms:
         obj = first_file.Get(path)
         if not obj:
             raise ValueError(f"File {input_files[0]} does not contain {path}")

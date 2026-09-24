@@ -302,6 +302,21 @@ PSM_MUPIX_DT_BINS = 51
 # PSM_PHASE_SPACE_SLOPE_RANGE_MRAD to read these next to PIPSMAllTrackReco's
 # phase space instead, and expect the tails outside that window to pile up.
 PSM_MUPIX_SLOPE_RANGE_MRAD = 0.0
+# Half-width in mm of the fixed x/y axes of track_xy_expanded, xxp_central and
+# yyp_central. It covers the standard five-point scan (PSM_POSITIONS_MM, +-17 mm)
+# and the +-20 mm 3x3 grid, plus the 20.48 mm half-width of a plane (40.48 mm),
+# rounded up to 41.6 = 130 x 0.32 so the monitor's 260 bins stay 0.32 mm (four
+# pixels) wide; the monitor shifts the axis by a quarter pixel so a half-pixel
+# stage offset such as 17 mm puts no pixel on a bin edge. It is a fixed number
+# rather than the plane footprint so that every run of a stage scan books the
+# same axes and the scan's runs merge bin by bin. Changing it without
+# ExpandedBins changes the bin width.
+PSM_MUPIX_EXPANDED_RANGE_MM = 41.6
+# Rough half-width in mrad of the x'/y' axes of xxp_central and yyp_central,
+# the beam core on a finer axis than the full acceptance above. The monitor
+# rounds it up to a whole number of slope steps (one pixel over the lever arm),
+# one step per bin: 100 gives 77 bins over +-102.67 mrad.
+PSM_MUPIX_CENTRAL_SLOPE_MRAD = 100.0
 # Pair every L2 hit inside the window instead of only the one nearest in time.
 # Each extra pair is a combinatorial ghost carrying a slope no particle had,
 # so this is a diagnostic for a busy run, not a production setting.
@@ -537,6 +552,11 @@ def check():
         problems.append(f"PSM_MUPIX_DT_RANGE_NS ({PSM_MUPIX_DT_RANGE_NS}) is the half-width "
                         f"of a symmetric axis and PSM_MUPIX_DT_BINS ({PSM_MUPIX_DT_BINS}) its "
                         "bin count; both must be positive.")
+    if PSM_MUPIX_MONITOR and (float(PSM_MUPIX_EXPANDED_RANGE_MM) <= 0
+                              or float(PSM_MUPIX_CENTRAL_SLOPE_MRAD) <= 0):
+        problems.append(f"PSM_MUPIX_EXPANDED_RANGE_MM ({PSM_MUPIX_EXPANDED_RANGE_MM}) and "
+                        f"PSM_MUPIX_CENTRAL_SLOPE_MRAD ({PSM_MUPIX_CENTRAL_SLOPE_MRAD}) are "
+                        "half-widths of symmetric axes; both must be positive.")
     if PSM_MUPIX_MONITOR and float(PSM_MUPIX_WINDOW_NS) <= 0:
         problems.append(f"PSM_MUPIX_WINDOW_NS is {PSM_MUPIX_WINDOW_NS}: it is a half-window, "
                         "so a non-positive value pairs nothing at all.")
@@ -744,6 +764,8 @@ if PSM_MUPIX_MONITOR:
         CoincidenceWindow=float(PSM_MUPIX_WINDOW_NS),
         DtRange=float(PSM_MUPIX_DT_RANGE_NS), DtBins=int(PSM_MUPIX_DT_BINS),
         SlopeRange=float(PSM_MUPIX_SLOPE_RANGE_MRAD),
+        ExpandedPosRange=float(PSM_MUPIX_EXPANDED_RANGE_MM),
+        CentralSlopeRange=float(PSM_MUPIX_CENTRAL_SLOPE_MRAD),
         AllPairs=int(PSM_MUPIX_ALL_PAIRS))
     algorithms.append(Gaudi__Sequencer("PSMMuPixSeq", RequireObjects=[_TES_MUQUAD],
                                        Members=[mupix_monitor]))
