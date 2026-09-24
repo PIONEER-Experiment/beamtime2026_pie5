@@ -30,6 +30,9 @@ PIMidasSelector       one .mid/.mid.lz4, every event, no bank filter
   |
 PIMidasDecoder        PITMidasWaveDream, PITMidasMusip
   |
+PSMTimewalkSeq        gated on /Event/muquad; runs whenever PSM_DECODE is on
+  |    PIPSMMuPixTimewalkCorrection              /Event/muquad -> /Event/muquad_twc
+  |
 PIWDSettingsSummary   top level, no waveform needed -> WDSettingsHeader
   |
 WDAnalysisSeq         gated on /Event/wd_waveform, in THIS order
@@ -39,13 +42,13 @@ WDScalerSeq           gated on /Event/wd_scalers
   |    PIWDScalerMonitor                         histograms only
   |
 PSMMuPixSeq           gated on /Event/muquad
-  |    PIPSMMuPixMonitor                         histograms only
+  |    PIPSMMuPixMonitor                         reads /Event/muquad_twc; histograms only
   |
 PSMSMASeq             gated on /Event/mutrig
   |    PIPSMSMAMonitor                           histograms only
   |
 PSMRecoSeq            gated on /Event/mutrig
-  |    PIPSMAllTrackReco, PIPSMPatternReco,
+  |    PIPSMAllTrackReco (L hits /Event/muquad_twc), PIPSMPatternReco,
   |    PIPSMComputeWeight, PIPSMDelayedCoincidence
   |
 PIAOutputStream       RNTuple "rec"                -> <out>.root
@@ -55,15 +58,16 @@ PIHistogramSvc        histograms/<instance>/<name> -> <out>_hists.root
 | instance | TES inputs | TES outputs | histograms |
 |---|---|---|---|
 | `PITMidasWaveDream` | WaveDREAM banks | `/Event/wd_event_header`, `wd_waveform`, `wd_channel_time`, `wd_timebase`, `wd_scalers` | — |
-| `PITMidasMusip` | `H000` | `/Event/muquad`, `/Event/mutrig`, `/Event/rf` | `musip/current` (only when `PSM_CURRENT_CHANNEL` is set); with `PSM_SMA_DIAGNOSTICS` also `musip/sma_word_types`, `sma_words_per_channel`, `sma_bank_words_per_frame`, `sma_trigger_words_per_frame`, `sma_frame_span_ms`, `sma_frame_gap_ms`, `sma_live_time`, `sma_fine_coarse_diff`, `sma_fine_vs_coarse`, `sma_fine_bit_occupancy` |
+| `PITMidasMusip` | `H000` | `/Event/muquad`, `/Event/mutrig`, `/Event/rf` | `musip/current` (only when `PSM_CURRENT_CHANNEL` is set); with `PSM_SMA_DIAGNOSTICS` also `musip/sma_word_types`, `sma_words_per_channel`, `sma_bank_words_per_frame`, `sma_trigger_words_per_frame`, `sma_frame_span_ms`, `sma_frame_gap_ms`, `sma_live_time`, `sma_fine_coarse_diff`, `sma_fine_vs_coarse`, `sma_fine_bit_occupancy`; with `PSM_PIXEL_MASK` also `musip/mupix_masked_hits` (pixel words the mask dropped, one bin per chip, labelled `<vid> (raw <id>)`) and `musip/mupix_masked_hits_per_pixel` (one bin per masked pixel, labelled `<vid> c<col> r<row>`) |
+| `PIPSMMuPixTimewalkCorrection` | `/Event/muquad`; `/Event/mutrig` (optional, only with `PSM_TIMEWALK`) | `/Event/muquad_twc` | `twc_hits` (hits corrected, hits passed through without constants, events without `/Event/mutrig`, events); with `PSM_TIMEWALK` the all-pairs dt(pixel − S1) vs pixel ToT before and after the correction, `twc_dt_vs_tot_raw_<vid>` / `twc_dt_vs_tot_cor_<vid>` per chip (detector ids 10011-10014, 10021-10024) and `twc_dt_vs_tot_raw_L<n>` / `twc_dt_vs_tot_cor_L<n>` per plane |
 | `PIWDSettingsSummary` | ODB conditions tables | `WDSettingsHeader` | — |
 | `PIWDRFPhase` | `/Event/wd_waveform`, `wd_channel_time` | `/Event/wd_rf_phase` | `rf_phase`, `rf_amplitude`, `rf_residual` |
 | `PIWDWaveformAnalysis` | `/Event/wd_waveform`, `wd_channel_time`, `wd_rf_phase` | `/Event/wd_features` | `ppamp`, `le_time`, `ppamp_vs_channel`; with a role table also `baseline_vs_channel`, `baseline_rms_vs_channel`, `fired_vs_channel`, `coincidence` and, per scintillator channel, `charge_vs_amp_chNN`, `letime_vs_amp_chNN`, `charge_vs_rfphase_chNN` |
 | `PIWDCalibrator` | `/Event/wd_features`, `wd_rf_phase` | `/Event/wd_hits` | — |
 | `PIWDScalerMonitor` | `/Event/wd_scalers` | — | `readings` and, per board `NNN` in `WD_SCALER_BOARDS`, `rate_vs_time_bNNN`, `mean_rate_bNNN`, `threshold_bNNN`, `fpga_temp_vs_time_bNNN` |
-| `PIPSMMuPixMonitor` | `/Event/muquad`; `/Event/mutrig` (optional, only with `PSM_TIMEWALK`) | — | `L<n>_chip<vid>_xy` and `L<n>_xy` per MuPix chip and plane, `hits_per_chip`, `tot_vs_chip`, `L<n>_mult`, and from the L1/L2 coincidence `dt`, `npairs`, `npartners`, `dx`, `dy`, `track_xy`, `xxp`, `yyp`, and the same tracks on fixed axes `track_xy_expanded`, `xxp_central`, `yyp_central`, plus their acceptance-weighted twins `track_xy_expanded_w`, `xxp_central_w`, `yyp_central_w`; with `PSM_TIMEWALK` the all-pairs timewalk `tw_dt_vs_tot_L<n>_<vid>`, `tw_dt_vs_stot_L<n>_<vid>`, `tw_tot_vs_stot_L<n>_<vid>` per plane and counter S1-S5 (`<vid>` 2001, 2003-2006) |
+| `PIPSMMuPixMonitor` | `/Event/muquad_twc`; `/Event/mutrig` (optional, only with `PSM_TIMEWALK`) | — | `L<n>_chip<vid>_xy` and `L<n>_xy` per MuPix chip and plane, `hits_per_chip`, `tot_vs_chip`, `L<n>_mult`, and from the L1/L2 coincidence `dt`, `npairs`, `npartners`, `dx`, `dy`, `track_xy`, `xxp`, `yyp`, and the same tracks on fixed axes `track_xy_expanded`, `xxp_central`, `yyp_central`, plus their acceptance-weighted twins `track_xy_expanded_w`, `xxp_central_w`, `yyp_central_w`; with `PSM_TIMEWALK` the all-pairs timewalk `tw_dt_vs_tot_L<n>_<vid>`, `tw_dt_vs_stot_L<n>_<vid>`, `tw_tot_vs_stot_L<n>_<vid>` per plane and counter S1-S5 (`<vid>` 2001, 2003-2006) |
 | `PIPSMSMAMonitor` | `/Event/mutrig`; `/Event/rf` (optional, only when `PSM_RF_CHANNEL` is set) | — | `hits_per_counter`, `tot_vs_counter`, `hits_per_event_vs_counter`, `tot`, `fine_time_vs_counter`, `counters`, the S1-S5 coincidence views `pattern`, `s1_partners`, `pattern_duplicates`, `dt_to_s1`, `dt_to_s1_wide`, `pattern_counters`; with the RF input also `rf_period`, `rf_pulses_per_gate`, `rf_offset_vs_pulse`, `rf_phase`, `rf_veto_gap`, `rf_counters` and one `rf_phase_vs_tot_<vid>` per cabled counter |
-| `PIPSMAllTrackReco` (a `PIPSMSimpleTrackReco`) | `/Event/muquad`, `/Event/mutrig`; `/Event/rf` (optional, only when `PSM_RF_CHANNEL` is set) | `/Event/exp_all_tracks` | `xy`, `xxp`, `yyp`, `nhits`, `nseed`, plus their acceptance-weighted twins `xy_w`, `xxp_w`, `yyp_w`; with the RF input also `xy_vs_s1phase`; with `PSM_TIMEWALK` the track-only timewalk `tw_dt_vs_tot_L<n>_<vid>`, `tw_tot_vs_stot_L<n>_<vid>`, and `tw_cluster_size_L<n>`, `tw_seeds` |
+| `PIPSMAllTrackReco` (a `PIPSMSimpleTrackReco`) | `/Event/muquad_twc`, `/Event/mutrig`; `/Event/rf` (optional, only when `PSM_RF_CHANNEL` is set) | `/Event/exp_all_tracks` | `xy`, `xxp`, `yyp`, `nhits`, `nseed`, plus their acceptance-weighted twins `xy_w`, `xxp_w`, `yyp_w`; with the RF input also `xy_vs_s1phase`; with `PSM_TIMEWALK` the track-only timewalk `tw_dt_vs_tot_L<n>_<vid>`, `tw_tot_vs_stot_L<n>_<vid>`, and `tw_cluster_size_L<n>`, `tw_seeds` |
 | `PIPSMPatternReco` | `/Event/exp_all_tracks` | `/Event/exp_pattern` | — |
 | `PIPSMComputeWeight` | `/Event/exp_all_tracks` | `/Event/exp_track_weights` | — |
 | `PIPSMDelayedCoincidence` | `/Event/exp_all_tracks`, `exp_track_weights` | `/Event/exp_tagged` | `counters`, `class`, `dt`, `sb`, `stop`, `xp`, `xp_w`, `yp`, `yp_w`, `xy`, `xy_w`, `xxp`, `xxp_w`, `yyp`, `yyp_w` |
@@ -91,11 +95,13 @@ rather than a spectrum), and one made mostly of ToT 0 and 255 (the idle words,
 so that counter is not seeing its TOT box); and any hit carrying a vid the raw
 map does not know.
 
-**Two of those TES paths are this job's choice, not a default.**
+**Three of those TES paths are this job's choice, not a default.**
 `/Event/exp_all_tracks` and `/Event/exp_track_weights` are names the script
 assigns and passes explicitly to the PSM algorithms; their own defaults are
 `/Event/tracker_fr`, `/Event/dtar_fr` and `/Event/exp_simple_tracks`, which are
-the simulation's names. The three decoder paths above them — `/Event/wd_waveform`,
+the simulation's names. `/Event/muquad_twc` (`_TES_MUQUAD_TWC`) is the timewalk
+layer's output, passed to the MuPix monitor's `input` and the track reco's
+`L_hits` in place of `/Event/muquad`. The three decoder paths above them — `/Event/wd_waveform`,
 `/Event/muquad`, `/Event/mutrig` — *are* the tools' defaults, which is why
 changing a tool's path property without changing the `_TES_*` constants breaks
 the sequencer gates silently.
@@ -222,6 +228,8 @@ external clock; their names are in `wd_scaler_names`, recorded in the
 | `PSM_QUAD_PIXEL_PITCH` | `0.08` | MuPix pitch in mm; the local hit position is `(col + 0.5) * pitch`, so a wrong pitch scales every position and every slope |
 | `PSM_SMA_COARSE_SHIFT` | `None` | The SMA word's coarse field is the time in ns shifted right by this, and it has differed between run ranges (3, i.e. 8 ns ticks, then 15, then 14). `None` takes the run's value from the `sma_coarse_shift` table in `bt2026_psm_readout_map.json`; a run no interval covers stops the job at `initialize()` rather than guessing. An integer here overrides the table, for a run whose shift has been measured (psm-analysis `sma-tot-vs-wd/mupix_phase.py RUN --time-check`) but not yet entered. Wrong, and every counter hit and RF pulse lands at a time no MuPix hit shares: the tracklets lose their L pairs while the SMA monitor's RF plots still look fine. Outside 0-18 is rejected by `check()` |
 | `PSM_SMA_DIAGNOSTICS` | `True` | Books the decoder's raw-word SMA diagnostics under `histograms/musip/sma_*` (the list is in the table above). Off, they are simply absent; the decoder's own default is off so that other jobs using it do not grow them. Read them as counts: the live fraction is `sma_live_time` bin 1 / (bin 1 + bin 2), and for a subrun run the gaps *between* subruns are in no file, so the merged value is slightly high. Below coarse shift 12 the SMA time wraps (2.1 s at shift 3), so a frame span or gap longer than about 1.07 s folds back and is not caught by the decoder's `smaDiagMaxMs` cut. `sma_fine_coarse_diff` is coarse minus fine over the shared bits in ns: the latch offset of the two fields sits near 0 (up to ~16 us at shift 3), a flipped fine bit b at ±2^b ns; `sma_fine_vs_coarse` calls a word a mismatch beyond ±20 us (`smaDiagLatchToleranceNs`) and names the fine bits that differ |
+| `PSM_PIXEL_MASK` | `True` | Drops MuPix pixel words on hot pixels: the run's interval of `mupix_pixel_mask` in `bt2026_psm_readout_map.json`, a list of (detector id, column, row). The decoder counts what it drops in `histograms/musip/mupix_masked_hits` (per chip) and `mupix_masked_hits_per_pixel` and in its finalize line `N pixel word(s) on the M masked pixel(s) dropped`. The shipped table masks **nothing** on [0, open); a noisy-pixel study adds an interval through `python -m pioneer.conddb.mupix_mask` (see *Masking hot pixels* below). A run the table does not resolve for — the container missing from the job, or an interval closed without a replacement — stops the job at `initialize()` rather than running unmasked. `False` decodes every pixel word and books neither histogram. Noise bursts are not treated by the mask |
+| `PSM_PIXEL_MASK_TAG` | `None` | Tag of `mupix_pixel_mask` to read; `None` is the table's default tag. A trial mask under its own tag is tried by naming it here; anything but `None` or a non-empty string is rejected by `check()` |
 | `PSM_QUAD_TIME_BIN_NS` | `8.0` | Hardware fact — MuPix counts in 8 ns. Change it only if the DAQ clock changes. There is no MuTrig counterpart: since the trigger encoding, `PITMidasMusip` reports that time in ns directly and `trigTimeBinWidth` is gone |
 
 ### PSM geometry
@@ -235,8 +243,11 @@ external clock; their names are in `wd_scaler_names`, recorded in the
 
 ### MuPix monitor
 
-The low-level MuPix check, and the only part of the job that reads
-`/Event/muquad` **alone**: no scintillator hits, no channel map, no tracklets.
+The low-level MuPix check, and the only part of the job that reads the MuPix
+hits **alone**: no scintillator hits, no channel map, no tracklets. It reads
+`/Event/muquad_twc`, the timewalk layer's copy of `/Event/muquad` (see *MuPix
+timewalk correction* below), which with the shipped empty constants is the
+decoder's hits unchanged.
 That is the point of it — it still says what the pixel planes are doing when
 the parts it is checking are what is broken, and a source or cosmic run that
 makes no scintillator coincidence at all still produces its plots.
@@ -259,10 +270,11 @@ the chip index that `hits_per_chip` and `tot_vs_chip` run over.
 | `PSM_MUPIX_EXPANDED_RANGE_MM` | `41.6` | Half-width in mm of the fixed x/y axes of `track_xy_expanded`, `xxp_central` and `yyp_central` (260 bins, 0.32 mm = 4 pixels). It covers the standard five-point scan at +-17 mm (`PSM_POSITIONS_MM`) and the +-20 mm 3x3 grid, plus the 20.48 mm half-width of a plane (40.48 mm), rounded up to a whole number of 0.32 mm bins. The monitor shifts the axis by a quarter pixel (0.02 mm), so a half-pixel stage offset such as 17 mm puts no pixel centre on a bin edge. It is fixed rather than taken from the plane footprint so that every run of a stage scan books the same axes and the runs merge bin by bin. Too small, and tracks go to the overflow bins; `initialize()` warns when the L1 footprint is not inside it |
 | `PSM_MUPIX_CENTRAL_SLOPE_MRAD` | `100.0` | Rough half-width in mrad of the x'/y' axes of `xxp_central` and `yyp_central`. A slope from two pixel planes only takes whole multiples of one pixel over the lever arm (2.67 mrad on bt2026), so the monitor books one bin per step, each step at a bin **centre**, and rounds this up to a whole number of steps: 100 gives 77 bins over ±102.67 mrad. A fixed bin width would show a comb of alternately full and empty bins instead |
 | `PSM_MUPIX_ALL_PAIRS` | `0` | Pairs every L2 hit inside the window instead of only the one nearest in time. Each extra pair is a combinatorial ghost carrying a slope no particle had, so this is a diagnostic for a busy run, not a production setting. `npartners` reports the ambiguity either way |
-| `PSM_TIMEWALK` | `True` | The MuPix timewalk against the scintillators, in two samples (see "MuPix timewalk" below). Here it sets the monitor's `CounterInput` to `/Event/mutrig`, which is read as an **optional** input: `PSMMuPixSeq` stays gated on `/Event/muquad` alone, and a frame without SMA hits skips only the timewalk fills (the count is logged at finalize). It also sets the monitor's `ConditionsTable` to the PSM channel map, from which it takes the counters S1-S5 (the channel-map file is then loaded even with `PSM_RECO` off), and turns on `PIPSMAllTrackReco`'s track-only histograms (`Timewalk`, off by default in the algorithm). Off, neither set is booked |
+| `PSM_TIMEWALK` | `True` | The MuPix timewalk against the scintillators, in two samples (see "MuPix timewalk" below). Here it sets the monitor's `CounterInput` to `/Event/mutrig`, which is read as an **optional** input: `PSMMuPixSeq` stays gated on `/Event/muquad` alone, and a frame without SMA hits skips only the timewalk fills (the count is logged at finalize). It also sets the monitor's `ConditionsTable` to the PSM channel map, from which it takes the counters S1-S5 (the channel-map file is then loaded even with `PSM_RECO` off), and turns on `PIPSMAllTrackReco`'s track-only histograms (`Timewalk`, off by default in the algorithm), and the correction layer's `twc_dt_vs_tot_*` (below; the layer's `CounterInput` and `ChannelMapTable` are set the same way, whether or not the MuPix monitor runs). Off, none of the three sets is booked; the layer still books `twc_hits` |
+| `PSM_TIMEWALK_DT_MIN` / `PSM_TIMEWALK_DT_MAX` / `PSM_TIMEWALK_DT_BINS` | `-150.0` / `450.0` / `300` | The dt axis [min, max) ns of every timewalk histogram, passed to all three algorithms (`TimewalkDtMin/Max/Bins` of the monitor, the track reco and the correction layer), so the layer's `twc_dt_vs_tot_raw_L<n>` stays the monitor's `tw_dt_vs_tot_L<n>_2001` bin for bin. 2 ns bins over [−150, 450) hold the prompt edge near −90 ns and the walk tail of the lowest ToTs to about +400 ns; a narrower axis cuts that tail out of the recalibration fit. Max not above min, or bins not an integer 1-8192, is rejected by `check()` |
 
 **MuPix timewalk.** Per plane `L1`/`L2` and counter S1-S5, with dt =
-t(pixel) − t(Sn) on 300 bins of 2 ns over [−150, 450) and the pixel ToT in
+t(pixel) − t(Sn) on 300 bins of 2 ns over [−150, 450) (`PSM_TIMEWALK_DT_*`) and the pixel ToT in
 units of 256 ns. The counters are the S1-S5 channels of the PSM channel map
 (`PSM_CHANNEL_MAP_TABLE`), which both algorithms read, so the detector ids are
 written down in one place (`<vid>` = 2001, 2003, 2004, 2005, 2006 in the bt2026
@@ -310,6 +322,76 @@ overflow bin of that chip's map, but on the **plane** map it is drawn at a
 position belonging to a neighbouring chip, so the plane map has to be read
 against that number. Run 166 emits it for `L1 10012` on a few percent of its
 hits.
+
+### MuPix timewalk correction
+
+`PIPSMMuPixTimewalkCorrection` copies the decoder's MuPix hits
+(`/Event/muquad`) to `/Event/muquad_twc` and moves each pixel's time by its
+chip's walk at its ToT: t → t − W_chip(ToT). W is the fitted peak of
+dt = t(pixel) − t(S1) against the pixel ToT, the chip's constant offset from S1
+included, so after the correction the pixel times line up with S1 at every ToT.
+The constants are the run's interval of `mupix_timewalk` in
+`bt2026_psm_readout_map.json`, one curve per chip (detector id) with the ToT
+held inside the chip's `[tot_min, tot_max]`. The shipped table is **empty** on
+[0, open), and an empty table makes the output an exact copy, so until someone
+writes constants (see *Recalibrating the timewalk* below) every downstream
+number is what it was before the layer existed. Scintillator hits are not
+touched; the raw `/Event/muquad` stays on the TES and in the RNTuple.
+
+**Where it runs.** In a sequencer of its own, `PSMTimewalkSeq`, straight after
+the decoder and gated on `/Event/muquad`, whenever `PSM_DECODE` is on. It is
+deliberately not a member of `PSMMuPixSeq`: the track reco in `PSMRecoSeq` reads
+its output too, and has to find it with `PSM_MUPIX_MONITOR` off. The decoder
+writes `/Event/muquad` and `/Event/mutrig` together, so every event that passes
+`PSMMuPixSeq`'s gate (`/Event/muquad`) or `PSMRecoSeq`'s (`/Event/mutrig`)
+already holds `/Event/muquad_twc`; both gates stay as they were.
+`PSM_TIMEWALK_CORRECTION = False` still schedules the layer, as a plain copy
+that does not read the table, so the consumers read one path whatever the
+setting.
+
+With constants loaded, **everything downstream of the layer sees corrected
+times**: the MuPix monitor's L1/L2 `dt` and its coincidence tracks, its
+`tw_*` (whose S1 plots then equal the layer's `twc_dt_vs_tot_cor_L<n>`), and the
+track reco's L window, clusters, tracks and `tw_*`. The layer's `_raw`
+histograms are the before picture, and they are what a recalibration fits.
+
+**Crosstalk ghosts move out of the window.** A ghost (a ToT ≤ 3 pixel copied
+from a real hit a few tens of rows away on the same chip) carries its source's
+raw time, but the correction moves it by W at its own low ToT, about 230 ns
+more than its source. Corrected, ghosts sit near −230 ns against S1, outside
+their source's L window [−100, +160), and in L1−L2 pairs involving a ToT ≤ 3
+pixel they make side peaks near ±240 ns, outside the monitor's ±40 ns window.
+On run 459 (subruns 18-35, `PSM_DROP_CROSSTALK_GHOSTS` off) the ambiguous
+seeds of `PIPSMAllTrackReco/tw_seeds` drop from 1578 to 709, the same as the
+ghost drop gives without the correction; with the correction the ghost drop
+removes only 1 + 2 clusters. The ghost rule in `PIPSMRecoCore` has no time
+condition, so this is a side effect of the correction, not of the rule. At
+these rates no-L1 and no-L2 do not rise, but at a higher rate a shifted ghost
+could land alone in an earlier seed's window: watch no-L1, no-L2 and
+ambiguous in `tw_seeds` when the rate goes up.
+
+| setting | default | what goes wrong if it is wrong |
+|---|---|---|
+| `PSM_TIMEWALK_CORRECTION` | `True` | Applies the run's `mupix_timewalk` constants. A run the table does not resolve for (the container missing from the job, an interval closed without a replacement, two active intervals overlapping it), or constants that break a rule (array lengths, an unknown form, a non-finite parameter, a bad ToT range, a detector id twice or not in `mupix_chip_map`), stops the job at `initialize()` rather than running uncorrected. A chip missing from a non-empty table is not an error: its hits pass through, counted in `twc_hits` and named in a warning. `False` copies the hits uncorrected without reading the table; the monitor and the reco then see the raw times |
+| `PSM_TIMEWALK_CORRECTION_TAG` | `None` | Tag of `mupix_timewalk` to read; `None` is the table's default tag (`bt2026-timewalk`). A trial set of constants under its own tag is tried by naming it here; anything but `None` or a non-empty string is rejected by `check()` |
+
+**Histograms**, under `PIPSMMuPixTimewalkCorrection/`:
+
+* `twc_hits`, always: hits corrected, hits passed through (on a chip without
+  constants, which is every hit with the empty table), events without
+  `/Event/mutrig`, events. The finalize line says the same.
+* with `PSM_TIMEWALK`, the all-pairs timewalk against S1 before and after the
+  correction: every pixel hit against every S1 hit of the readout frame, dt =
+  t(pixel) − t(S1) on 300 bins of 2 ns over [−150, 450), against the pixel
+  ToT (32 bins, one per 256 ns count). Per chip `twc_dt_vs_tot_raw_<vid>` and
+  `twc_dt_vs_tot_cor_<vid>`, per plane `twc_dt_vs_tot_raw_L<n>` and
+  `twc_dt_vs_tot_cor_L<n>`. S1 is the channel map's `S1Channel`, the same
+  table the monitor and the reco take it from, and the planes are numbered as
+  the monitor numbers them. `twc_dt_vs_tot_raw_L<n>` is the monitor's
+  `tw_dt_vs_tot_L<n>_2001` of an uncorrected job bin for bin; with the empty
+  table `_cor` equals `_raw`. Corrected, the `_cor` band should sit flat near
+  dt = 0 at every ToT: a residual slope or offset means the constants do not
+  fit this run. Every plot is a count, so subruns merge by summing.
 
 ### SMA monitor
 
@@ -416,6 +498,7 @@ ns. A MuPix map for any phase window is a projection of it; for [90, 105) ns,
 |---|---|---|
 | `WRITE_NTUPLE` | `True` | Off is a pure monitoring pass; the histogram file is unaffected. See "Output size" |
 | `NTUPLE_RULES` | `[]` | Ordered `keep <glob>` / `drop <glob>` rules over TES paths, later rules winning. A path no rule matches is **kept**, so empty persists everything and a newly registered collection is never lost by omission |
+| `PSM_TWC_NTUPLE` | `"both"` | Which MuPix hit collections the RNTuple keeps: `"both"` (`_Event_muquad` and `_Event_muquad_twc`), `"corrected"` (appends `drop /Event/muquad` to the rules) or `"raw"` (appends `drop /Event/muquad_twc`). The rule goes last, so it wins over `NTUPLE_RULES`, and only with `PSM_DECODE` on (a rule matching nothing is warned about). Each copy is about 0.4 % of a beam subrun file, so `"both"` costs little; with the shipped empty constants the two are equal field for field. Any other value is rejected by `check()` |
 
 ## Conditions
 
@@ -436,7 +519,7 @@ a table serves all of it.
 | `bt2026_wavedream_timebase.json` | `wd_timebase` |
 | `bt2026_wavedream_calibration.json` | `wd_rf`, `wd_time_alignment`, `wd_energy_calibration`, `wd_channel_map` |
 | `bt2026_psm_geometry.json` | `psm_geometry` |
-| `bt2026_psm_readout_map.json` | `mupix_chip_map`, `mutrig_channel_map` |
+| `bt2026_psm_readout_map.json` | `mupix_chip_map`, `mutrig_channel_map`, `sma_coarse_shift`, `mupix_pixel_mask`, `mupix_timewalk` |
 | `bt2026_psm_channel_map.json` | `psm_channel_map` |
 | `odb/bt2026_runinfo.json` | `runinfo` |
 | `odb/bt2026_wavedream_daq.json` | `wd_board_settings`, `wd_channel_settings` |
@@ -506,9 +589,10 @@ the file name before the first dot:
 ```
 
 The histogram file is the full set the daemon writes, the MuPix timewalk
-(`PIPSMMuPixMonitor/tw_*`, `PIPSMAllTrackReco/tw_*`, with `PSM_TIMEWALK` on) and
-the clustered L pairs (`PSM_L_CLUSTER_DIST_MM`) included: this is the way to
-remake them for one subrun file by hand.
+(`PIPSMMuPixMonitor/tw_*`, `PIPSMAllTrackReco/tw_*` and the correction layer's
+`PIPSMMuPixTimewalkCorrection/twc_*`, with `PSM_TIMEWALK` on) and the clustered
+L pairs (`PSM_L_CLUSTER_DIST_MM`) included: this is the way to remake them for
+one subrun file by hand.
 
 `--evt-max N` truncates, `--render-only` writes the `.py` and stops so you can
 edit it before running it, and `--job PATH` renders some other copy of the job
@@ -525,6 +609,154 @@ host-dependent variables are the exception that proves it: `NL_CONDITIONS_DIR`
 and `NL_PG` **of the shell that renders** are baked into the file at that
 moment, exactly as the daemon bakes in its own, so set them before the
 `process` command rather than before the `gaudirun.py` that re-runs it.
+
+### Masking hot pixels
+
+The hot-pixel mask is a conditions table, so masking a run is three hand-run
+steps, each of which leaves a file to look at:
+
+1. **Find the pixels.** psm-analysis `mupix-timewalk/noisy_pixels.py RUN ...`
+   (inside `testbeam-midas`) writes `noisy_pixels.json`, whose
+   `recommended.pixel_mask.pixels` is the mask it recommends, and one
+   `runNNNNN/noisy_pixels_runNNNNN.json` per run with the `hot.pixels` records.
+2. **Put them into the table** (same `PYTHONPATH` as above). Dry run first; it
+   prints what changes, the intervals after, the pixels with their detector
+   ids, and the diff of the file:
+
+   ```bash
+   python -m pioneer.conddb.mupix_mask add \
+     /workdir/scratch/mupix-timewalk/noisy-pixels/noisy_pixels.json \
+     --run-start 459 --last-run 459 --split \
+     --comment "hot pixels of run 459 (ThHigh/ThLow 0x7a/0x79)"
+   # then the same with --write
+   python -m pioneer.conddb.mupix_mask show --run 459
+   ```
+
+   The study names chips by their raw id; the tool converts them to detector
+   ids through `mupix_chip_map` at the study's run. `--split` is needed while
+   the range lies inside the shipped empty [0, open) interval: that interval is
+   kept but deactivated, and its parts outside the new range come back with
+   the empty payload. Where the range overlaps an interval that already masks
+   pixels, `--split` also needs `--union` (keep those pixels and add the new
+   ones) or `--replace-mask` (drop them there; it prints how many per
+   interval). `python -m pioneer.conddb.mupix_mask check` runs the decoder's
+   rules over every run of the container. The container written is the one
+   under `NL_CONDITIONS_DIR` (else `$PIONEERSYS/reco_testbeam/conditions`), or
+   `--conditions PATH`. To try a mask without touching the shipped file, copy
+   the conditions directory and point both the tool and the job at the copy.
+
+   **`--write` edits a git-tracked file** of the reco_testbeam repository
+   (`conditions/bt2026_psm_readout_map.json`), so the change is not done
+   until it is committed to reco_testbeam. On pinky that file is in the
+   daemon's own checkout (the one `NL_CONDITIONS_DIR` points at); commit it
+   there, because a dirty checkout makes the next `git pull` of reco_testbeam
+   refuse, and an uncommitted mask is lost to everyone else.
+3. **Reprocess one file** with the same `NL_CONDITIONS_DIR` in the shell:
+
+   ```bash
+   NL_CONDITIONS_DIR=/workdir/scratch/mask-trial/conditions \
+     python -m pioneer.nearline.process /workdir/scratch/online/run00459_00000.mid.lz4 \
+     --out-dir /workdir/scratch/mask-trial
+   ```
+
+   The log names the interval (`Resolved table=mupix_pixel_mask ... iov=[459, 460)`)
+   and ends with `N pixel word(s) on the M masked pixel(s) dropped, by chip`;
+   `histograms/musip/mupix_masked_hits` holds the same counts, and the masked
+   pixels are empty in the `PIPSMMuPixMonitor/<plane>_chip<vid>_xy` maps.
+
+The daemon needs nothing else: it loads the same container on the next file.
+For the campaign database, `--write --table-out FILE` also writes the table
+alone for `../conddb/json2pg.py` (see [`../conddb/README.md`](../conddb/README.md));
+the JSON container outranks the database either way.
+
+### Recalibrating the timewalk
+
+The timewalk constants are a conditions table too, and the job fills the
+histograms they are fitted from, so a recalibration is four hand-run steps.
+The fit reads the `_raw` histograms, which hold the uncorrected times whatever
+constants the processing applied, so any processing of the run with
+`PSM_TIMEWALK` on will do, corrected or not.
+
+1. **Process the files** the constants are to come from, as in *Processing a
+   file* above (or take the daemon's outputs). Each subrun's `_hists.root`
+   carries `PIPSMMuPixTimewalkCorrection/twc_dt_vs_tot_raw_<vid>` per chip.
+   About 18 subruns of a beam run are needed; 10 are too few for some
+   chips. Check the per-chip views in the website's browse tree first.
+2. **Fit the walk per chip** (same `PYTHONPATH` as above). The tool needs
+   numpy, scipy, iminuit and uproot (PyROOT is used if uproot is missing),
+   plus matplotlib for `--plots`. The `testbeam-midas` python has all of
+   them; on the laptop host use `~/miniconda3/envs/beamtune-psm/bin/python`.
+
+   ```bash
+   python -m pioneer.conddb.mupix_timewalk fit \
+     /workdir/scratch/nearline/run00459_000{00..17}_hists.root \
+     --out /workdir/scratch/twc-trial/fit_run00459.json \
+     --plots /workdir/scratch/twc-trial/plots
+   ```
+
+   It sums the histograms over the files, fits the dt peak in each ToT column
+   and then the walk curve to the peaks, and writes the parameters, their
+   errors, the χ² and the column peaks to the JSON. PNGs (one per chip) are
+   written only with `--plots DIR`. A chip with fewer than 5 good columns is
+   refused and named. `add` leaves it out, so its hits pass through
+   uncorrected. Look at the PNGs before going on.
+3. **Put the constants into the table.** Dry run first, then the same with
+   `--write`:
+
+   ```bash
+   python -m pioneer.conddb.mupix_timewalk add \
+     /workdir/scratch/twc-trial/fit_run00459.json \
+     --run-start 459 --last-run 459 --split \
+     --comment "timewalk of run 459, fitted from subruns 0-17"
+   # then the same with --write
+   python -m pioneer.conddb.mupix_timewalk show --run 459
+   python -m pioneer.conddb.mupix_timewalk check
+   ```
+
+   As for the mask, `--split` is needed while the range lies inside the
+   shipped empty [0, open) interval. Constants do not merge, so a range that
+   overlaps an interval already holding constants also needs `--replace`
+   (together with `--split`); an empty interval does not need it. The
+   container written is the one under `NL_CONDITIONS_DIR` (else
+   `$PIONEERSYS/reco_testbeam/conditions`), or `--conditions PATH`; to try
+   constants without touching the shipped file, copy the conditions directory
+   and point both the tool and the job at the copy. **`--write` edits
+   `conditions/bt2026_psm_readout_map.json` of reco_testbeam**, so the change
+   is not done until it is committed there, in the checkout the daemon's
+   `NL_CONDITIONS_DIR` points at (on pinky, the daemon's own).
+4. **Reprocess one file** with the same `NL_CONDITIONS_DIR` in the shell:
+
+   ```bash
+   NL_CONDITIONS_DIR=/workdir/scratch/twc-trial/conditions \
+     python -m pioneer.nearline.process /workdir/scratch/online/run00459_00020.mid.lz4 \
+     --out-dir /workdir/scratch/twc-trial
+   ```
+
+   The log names the interval (`Resolved table=mupix_timewalk ... iov=[459, 460)`),
+   prints each chip's curve with its W at ToT 0, at its `tot_max` and at 31, and
+   ends with
+   `N MuPix hit(s) timewalk-corrected, 0 passed through without constants`.
+   `PIPSMMuPixTimewalkCorrection/twc_dt_vs_tot_cor_L1`/`_L2` should show a
+   flat band near dt = 0 where `_raw_L1`/`_L2` bend, and the RNTuple's
+   `_Event_muquad_twc.fObsTime` now differs from `_Event_muquad.fObsTime`.
+   Prefer a file that did not go into the fit.
+
+The daemon needs nothing else here either. The walk depends on the pixel
+threshold, so a change of the MuPix thresholds is a reason to refit and to start
+a new interval.
+
+### Deploy order
+
+`nearline_job.py` sets the decoder's `applyPixelMask` (and
+`smaDiagnostics`) unconditionally, and a `PITMidasMusip` built before those
+properties existed rejects them, so every job fails at configuration. It also
+imports and schedules `PIPSMMuPixTimewalkCorrection`, which a reco_testbeam
+build without it does not have (the job then fails at the import of
+`pi_psmalg_expConf`), and the layer reads `mupix_timewalk`, which an older
+`conditions/` does not carry (the job then stops at `initialize()`). When
+updating a machine, pull and rebuild reco_testbeam (the library and its
+`conditions/`, which must carry `mupix_pixel_mask` and `mupix_timewalk`)
+**before** pulling beamtime2026_pie5.
 
 ### A quick look, or a variant job
 
@@ -631,25 +863,32 @@ problem it finds in one message, rather than the first:
 15. `PSM_SMA_HITS_PER_EVENT_MAX` below 1: it is the top of an axis counting hits per event.
 16. `PSM_SMA_DEGENERATE_TOT_SHARE` or `PSM_SMA_MARKER_TOT_SHARE` outside `(0, 1]`: both are shares of one counter's hits.
 17. `PSM_SMA_COARSE_SHIFT` neither `None` nor an integer 0-18: above 18 the coarse field no longer pins the fine field's wrap.
-18. `PSM_RF_CHANNEL` not an integer, outside 0-15, or equal to `PSM_CURRENT_CHANNEL`: the SMA word's channel field is 4 bits, and the decoder takes the RF channel first, so the current pulses would become RF pulses.
-19. A `GEOCOND` base with an empty `PSM_GEOMETRY_FILES`: nothing supplies the table it names.
-20. `COND:isel` in `PSM_GEOMETRY_TRANS` without `bt2026_isel.json` in `ODB_SPECS`.
-21. `PSM_WEIGHT_STRATEGY` not `0`, `1` or `2`.
-22. `PSM_WEIGHT_STRATEGY >= 1` without both `PSM_DECODE` and `PSM_GEOMETRY_BASE`: no `PIGeometrySvc` to take the L1/L2 plane footprints from.
-23. `PSM_WEIGHT_STRATEGY >= 1` without `COND:isel` in `PSM_GEOMETRY_TRANS`: every run would be treated as sitting at the design stage position.
-24. Exactly one of `WD_ALIGN_TABLE` / `WD_ECAL_TABLE` set: `PIWDCalibrator` needs both.
-25. `WD_ENABLED` with an empty `WD_RF_TABLE`: `PIWDRFPhase` runs first in `WDAnalysisSeq` and `PIWDWaveformAnalysis` reads `/Event/wd_rf_phase`, so the RF table cannot be empty.
-26. `WD_ROLE_TABLE` set with an empty `WD_CONDITIONS_FILES`: nothing would supply the `wd_channel_map` table.
-27. `WD_CHANNEL_SETTINGS_TABLE` set with an empty `ODB_SPECS`: only the begin-of-run ODB dump serves `wd_channel_settings`.
-28. `WD_CAL_CHANNELS` not a subset of `WD_CHANNELS`: they would have no features to calibrate.
-29. `WD_SCALER_MONITOR` without `WD_ENABLED`: nothing would produce `/Event/wd_scalers`.
-30. `WD_SCALER_TIME_BIN_S` not positive or not below `WD_SCALER_TIME_MAX_S`, or a serial listed twice in `WD_SCALER_BOARDS`.
-31. `WD_RF_REFINE` on with `WD_RF_REFINE_POINTS` below 2: a scan needs at least 2 points.
-32. `PSM_PHASE_SPACE_BINS` not a positive multiple of 64: the phase-space histograms would not rebin onto the 64-bin minitwin export exactly.
-33. `PSM_PHASE_SPACE_POS_RANGE_MM` or `PSM_PHASE_SPACE_SLOPE_RANGE_MRAD` not positive: both are half-widths of a symmetric axis.
-34. `PSM_L_WINDOW_BEFORE_NS` and `PSM_L_WINDOW_AFTER_NS` giving an empty L-hit window: no tracklet would get an L pair.
-35. `PSM_DROP_CROSSTALK_GHOSTS` on without `PSM_DECODE` and a `PSM_GEOMETRY_BASE`: the ghost rule recovers each hit's column and row from the chip placement the `PIGeometrySvc` serves.
-36. `OUTPUT_LEVEL` not one of `DEBUG`, `ERROR`, `INFO`, `WARNING`.
+18. `PSM_PIXEL_MASK_TAG` neither `None` nor a non-empty string: it names a tag of `mupix_pixel_mask`.
+19. `PSM_TIMEWALK_CORRECTION_TAG` neither `None` nor a non-empty string: it names a tag of `mupix_timewalk`.
+20. `PSM_TWC_NTUPLE` not one of `"both"`, `"corrected"`, `"raw"`.
+21. `PSM_PIXEL_MASK`, `PSM_TIMEWALK` or `PSM_TIMEWALK_CORRECTION` not a bool: a string such as `"False"` is true in Python and would switch the setting on.
+22. `PSM_TIMEWALK` on and `PSM_TIMEWALK_DT_MIN`/`_MAX`/`_BINS` not an axis: max not above min, or bins not an integer 1-8192.
+23. `PSM_RF_CHANNEL` not an integer, outside 0-15, or equal to `PSM_CURRENT_CHANNEL`: the SMA word's channel field is 4 bits, and the decoder takes the RF channel first, so the current pulses would become RF pulses.
+24. A `GEOCOND` base with an empty `PSM_GEOMETRY_FILES`: nothing supplies the table it names.
+25. `COND:isel` in `PSM_GEOMETRY_TRANS` without `bt2026_isel.json` in `ODB_SPECS`.
+26. `PSM_PIXEL_MASK` on (with `PSM_DECODE`) and a `PSM_GEOMETRY_FILES` without `bt2026_psm_readout_map.json`: nothing would supply the `mupix_pixel_mask` table, and the decoder stops at `initialize()`.
+27. `PSM_TIMEWALK_CORRECTION` on (with `PSM_DECODE`) and a `PSM_GEOMETRY_FILES` without `bt2026_psm_readout_map.json`: nothing would supply the `mupix_timewalk` table, and the correction layer stops at `initialize()`.
+28. `PSM_WEIGHT_STRATEGY` not `0`, `1` or `2`.
+29. `PSM_WEIGHT_STRATEGY >= 1` without both `PSM_DECODE` and `PSM_GEOMETRY_BASE`: no `PIGeometrySvc` to take the L1/L2 plane footprints from.
+30. `PSM_WEIGHT_STRATEGY >= 1` without `COND:isel` in `PSM_GEOMETRY_TRANS`: every run would be treated as sitting at the design stage position.
+31. Exactly one of `WD_ALIGN_TABLE` / `WD_ECAL_TABLE` set: `PIWDCalibrator` needs both.
+32. `WD_ENABLED` with an empty `WD_RF_TABLE`: `PIWDRFPhase` runs first in `WDAnalysisSeq` and `PIWDWaveformAnalysis` reads `/Event/wd_rf_phase`, so the RF table cannot be empty.
+33. `WD_ROLE_TABLE` set with an empty `WD_CONDITIONS_FILES`: nothing would supply the `wd_channel_map` table.
+34. `WD_CHANNEL_SETTINGS_TABLE` set with an empty `ODB_SPECS`: only the begin-of-run ODB dump serves `wd_channel_settings`.
+35. `WD_CAL_CHANNELS` not a subset of `WD_CHANNELS`: they would have no features to calibrate.
+36. `WD_SCALER_MONITOR` without `WD_ENABLED`: nothing would produce `/Event/wd_scalers`.
+37. `WD_SCALER_TIME_BIN_S` not positive or not below `WD_SCALER_TIME_MAX_S`, or a serial listed twice in `WD_SCALER_BOARDS`.
+38. `WD_RF_REFINE` on with `WD_RF_REFINE_POINTS` below 2: a scan needs at least 2 points.
+39. `PSM_PHASE_SPACE_BINS` not a positive multiple of 64: the phase-space histograms would not rebin onto the 64-bin minitwin export exactly.
+40. `PSM_PHASE_SPACE_POS_RANGE_MM` or `PSM_PHASE_SPACE_SLOPE_RANGE_MRAD` not positive: both are half-widths of a symmetric axis.
+41. `PSM_L_WINDOW_BEFORE_NS` and `PSM_L_WINDOW_AFTER_NS` giving an empty L-hit window: no tracklet would get an L pair.
+42. `PSM_DROP_CROSSTALK_GHOSTS` on without `PSM_DECODE` and a `PSM_GEOMETRY_BASE`: the ghost rule recovers each hit's column and row from the chip placement the `PIGeometrySvc` serves.
+43. `OUTPUT_LEVEL` not one of `DEBUG`, `ERROR`, `INFO`, `WARNING`.
 
 ## The phase-space histograms are minitwin input
 
@@ -722,6 +961,10 @@ slice of run 166 the whole histogram file went from 48 kB to 101 kB with the
 module on. The per-plane `L<n>_mult` axes account for most of the rest, and they
 run to 16383 hits per event on purpose — a MuPix readout frame is not one
 particle, and run 165 puts over 6000 L2 hits in a single frame.
+The MuPix hits are written twice by default, raw (`_Event_muquad`) and
+timewalk-corrected (`_Event_muquad_twc`); on a beam subrun of run 459 one copy
+is 223 kB of a 61 MB file, the waveforms 96.6 % of it, so the second copy is
+not worth dropping for size. `PSM_TWC_NTUPLE` drops either when it is.
 `NTUPLE_RULES = ["drop *", "keep /Event/wd_hits", ...]` keeps a shrunken file,
 and selection happens once at `initialize()`, so the rules cost nothing per
 event. There is nothing to tune in the writer itself: it is fixed at ZSTD-1

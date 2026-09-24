@@ -10,6 +10,12 @@ agreement, registered in midas_files/wavedream-scalar-readout/docs/REGISTRY.md.
     +-- PIMidasDecoder -------- PITMidasWaveDream  -> /Event/wd_*
     |                           PITMidasMusip      -> /Event/muquad, mutrig, rf
     |
+    +-- PSMTimewalkSeq -------- gated on /Event/muquad; runs whenever PSM_DECODE
+    |     PIPSMMuPixTimewalkCorrection -> /Event/muquad_twc, each pixel time
+    |                             minus its chip's walk at its ToT (a plain
+    |                             copy with the shipped empty table); the
+    |                             MuPix monitor and the track reco read it
+    |
     +-- PIWDSettingsSummary --- top level, no waveform needed -> WDSettingsHeader
     |
     +-- WDAnalysisSeq --------- gated on /Event/wd_waveform
@@ -21,7 +27,7 @@ agreement, registered in midas_files/wavedream-scalar-readout/docs/REGISTRY.md.
     |     PIWDScalerMonitor    -> histograms only: rate, threshold and FPGA
     |                             temperature per board from the scaler events
     |
-    +-- PSMMuPixSeq ----------- gated on /Event/muquad
+    +-- PSMMuPixSeq ----------- gated on /Event/muquad, reads /Event/muquad_twc
     |     PIPSMMuPixMonitor    -> histograms only: a hit map per MuPix chip and
     |                             per plane, and x/x', y/y' from an L1/L2 time
     |                             coincidence with no scintillator involved;
@@ -36,7 +42,7 @@ agreement, registered in midas_files/wavedream-scalar-readout/docs/REGISTRY.md.
     |                             (optional per frame) for the S1-gated RF
     |                             phase and RF phase vs ToT per counter
     |
-    +-- PSMRecoSeq ------------ gated on /Event/mutrig
+    +-- PSMRecoSeq ------------ gated on /Event/mutrig, L hits /Event/muquad_twc
     |     PIPSMSimpleTrackReco   -> /Event/exp_all_tracks   (+ histograms);
     |                             with PSM_RF_CHANNEL set also reads /Event/rf
     |                             for each tracklet's S1 RF phase
@@ -77,8 +83,9 @@ from pi_midas.PIONEER_MIDAS_READERConf import (PIMidasSelector, PIMidasConversio
 from reco_testbeam.pi_wdalgConf import (PIWDCalibrator, PIWDRFPhase, PIWDScalerMonitor,
                                         PIWDSettingsSummary, PIWDWaveformAnalysis)
 from reco_testbeam.pi_psmalg_expConf import (PIPSMComputeWeight, PIPSMDelayedCoincidence,
-                                             PIPSMMuPixMonitor, PIPSMPatternReco,
-                                             PIPSMSMAMonitor, PIPSMSimpleTrackReco)
+                                             PIPSMMuPixMonitor, PIPSMMuPixTimewalkCorrection,
+                                             PIPSMPatternReco, PIPSMSMAMonitor,
+                                             PIPSMSimpleTrackReco)
 
 # ===== RENDERED BY THE DAEMON (do not edit; the checked-in file carries placeholders) =====
 # pioneer.nearline.render fills these with string.Template and writes the result next to
@@ -282,6 +289,15 @@ PSM_SMA_COARSE_SHIFT = None
 # them unbooked; the decoder's own default is off, so any other job using it
 # (a MuPix debug job, say) does not grow them.
 PSM_SMA_DIAGNOSTICS = True
+# Drop the MuPix pixel words of hot pixels: the run's interval of the
+# mupix_pixel_mask table in bt2026_psm_readout_map.json, counted per chip in
+# histograms/musip/mupix_masked_hits and per pixel in mupix_masked_hits_per_pixel.
+# The shipped table masks nothing on [0, open); a noisy-pixel study adds intervals
+# through python -m pioneer.conddb.mupix_mask. A run the table does not resolve for
+# stops the job at initialize. False decodes every pixel word, hot or not.
+PSM_PIXEL_MASK = True
+# Tag of mupix_pixel_mask to read; None reads the table's default tag.
+PSM_PIXEL_MASK_TAG = None
 # --- PSM geometry ----------------------------------------------------------
 # Base layer PIGeometrySvc builds the GeoHeader from, as "GEOCOND:<table>".
 PSM_GEOMETRY_BASE = "GEOCOND:psm_geometry"
@@ -297,8 +313,9 @@ PSM_GEOMETRY_TRANS = ["COND:isel"]
 PSM_GEOMETRY_FILES = ["bt2026_psm_geometry.json", "bt2026_psm_readout_map.json"]
 # --- MuPix monitor ---------------------------------------------------------
 # The low-level MuPix check: a hit map per chip and per plane, and tracks made
-# from an L1/L2 time coincidence alone. It reads /Event/muquad and nothing
-# else -- no scintillators, no channel map, no tracklets -- so it still says
+# from an L1/L2 time coincidence alone. It reads the MuPix hits and nothing
+# else (/Event/muquad_twc, the timewalk layer's copy of /Event/muquad) -- no
+# scintillators, no channel map, no tracklets -- so it still says
 # what the pixel planes are doing when the parts it is checking are broken.
 # Requires PSM_DECODE, whose PIGeometrySvc supplies every chip footprint,
 # the plane membership and the L1 -> L2 lever arm.
@@ -352,7 +369,31 @@ PSM_MUPIX_ALL_PAIRS = 0
 # track holding an S1 hit against the Sn hit nearest that S1 within +-50 ns
 # (tw_* under PIPSMAllTrackReco, filled only with PSM_AGGREGATE on). The monitor
 # reads /Event/mutrig for this; a frame without it skips the timewalk only.
+# It also books the correction layer's raw-vs-corrected histograms (below).
 PSM_TIMEWALK = True
+# The dt axis [min, max) ns in bins of every timewalk histogram: the monitor's
+# and the track reco's tw_* and the correction layer's twc_*. One axis for all
+# three, so twc_dt_vs_tot_raw_L<n> stays the monitor's tw_dt_vs_tot_L<n>_<S1>
+# bin for bin and the recalibration CLI reads the layer's histograms on the
+# axis it expects. 2 ns bins over [-150, 450) hold the prompt edge near
+# -90 ns and the walk tail of the lowest ToTs to about +400 ns.
+PSM_TIMEWALK_DT_MIN = -150.0
+PSM_TIMEWALK_DT_MAX = 450.0
+PSM_TIMEWALK_DT_BINS = 300
+# --- MuPix timewalk correction ---------------------------------------------
+# PIPSMMuPixTimewalkCorrection copies /Event/muquad to /Event/muquad_twc with
+# each pixel's time moved by its chip's walk at its ToT, t - W_chip(ToT), W
+# being the fitted peak of t(pixel) - t(S1) against the pixel ToT, offset
+# included, so the corrected pixel times line up with S1. The constants are the
+# run's interval of the mupix_timewalk table in bt2026_psm_readout_map.json;
+# the shipped table is empty on [0, open), which makes the copy exact. The MuPix
+# monitor and the track reco read /Event/muquad_twc. The layer runs whenever
+# PSM_DECODE is on, whatever the consumers are set to. A run the table does not
+# resolve for stops the job at initialize. False still runs the layer, as a
+# plain copy without reading the table, so the consumers always read one path.
+PSM_TIMEWALK_CORRECTION = True
+# Tag of mupix_timewalk to read; None reads the table's default tag.
+PSM_TIMEWALK_CORRECTION_TAG = None
 # --- SMA monitor -----------------------------------------------------------
 # The low-level check on the SMA time-over-threshold readout: how many hits each
 # counter takes, and what their ToT looks like. It reads /Event/mutrig and
@@ -502,6 +543,12 @@ WRITE_NTUPLE = True
 # Ordered "keep <glob>" / "drop <glob>" rules over TES paths, later rules winning;
 # empty persists everything, so a new collection is never lost by omission.
 NTUPLE_RULES = []
+# Which MuPix hit collections the RNTuple keeps: "both" (/Event/muquad and the
+# corrected /Event/muquad_twc), "corrected" (drops /Event/muquad) or "raw"
+# (drops /Event/muquad_twc). Appended to NTUPLE_RULES as the last rule, so it
+# wins. Each copy is well under 1% of a beam subrun file, the waveforms most
+# of the rest, so "both" costs little; with no constants the two are equal.
+PSM_TWC_NTUPLE = "both"
 # ===== END OF SETTINGS =====
 
 # Where the input, the output, the event limit and the two host-dependent settings
@@ -550,8 +597,10 @@ _NTUPLE_REUSE_ENTRY = True
 
 # TES paths. The first five are the decoding tools' own defaults, and changing a
 # tool's path property without changing these breaks the sequencer gates (and the
-# SMA monitor's RF input) silently. The last two are names this job chooses and passes to the PSM algorithms
-# explicitly; their defaults are /Event/tracker_fr, /Event/dtar_fr and
+# SMA monitor's RF input) silently. The last three are names this job chooses and
+# passes to the PSM algorithms explicitly: /Event/muquad_twc is the timewalk
+# layer's output, which the MuPix monitor and the track reco read in place of
+# /Event/muquad; the track defaults are /Event/tracker_fr, /Event/dtar_fr and
 # /Event/exp_simple_tracks, which are the simulation's names, so the assignment is
 # what puts the testbeam chain on one set of paths.
 _TES_WAVEFORM = "/Event/wd_waveform"
@@ -559,6 +608,9 @@ _TES_SCALERS = "/Event/wd_scalers"
 _TES_MUQUAD = "/Event/muquad"
 _TES_MUTRIG = "/Event/mutrig"
 _TES_RF = "/Event/rf"
+_TES_MUQUAD_TWC = "/Event/muquad_twc"
+# PSM_TWC_NTUPLE -> the collection it drops from the RNTuple (None: nothing).
+_TWC_NTUPLE_DROP = {"both": None, "corrected": _TES_MUQUAD, "raw": _TES_MUQUAD_TWC}
 _TES_PSM_TRACKS = "/Event/exp_all_tracks"
 _TES_PSM_WEIGHTS = "/Event/exp_track_weights"
 _TIMEBASE_TABLE = "wd_timebase"
@@ -588,9 +640,11 @@ if WD_ENABLED:
 if PSM_DECODE:
     _JSON_FILES += [_cond(f) for f in PSM_GEOMETRY_FILES]
 # The channel map feeds the tracklet reco and, with the timewalk on, the MuPix
-# monitor's counters S1-S5.
+# monitor's counters S1-S5 and the S1 of the correction layer's histograms. The
+# layer runs whenever PSM_DECODE does, so _TWC_TIMEWALK covers _MUPIX_TIMEWALK.
 _MUPIX_TIMEWALK = bool(PSM_MUPIX_MONITOR and PSM_TIMEWALK and PSM_DECODE)
-if (PSM_RECO or _MUPIX_TIMEWALK) and PSM_CHANNEL_MAP_FILE:
+_TWC_TIMEWALK = bool(PSM_TIMEWALK and PSM_DECODE)
+if (PSM_RECO or _MUPIX_TIMEWALK or _TWC_TIMEWALK) and PSM_CHANNEL_MAP_FILE:
     _JSON_FILES.append(_cond(PSM_CHANNEL_MAP_FILE))
 _ODB_TABLES = [_cond(f) for f in ODB_SPECS]
 
@@ -666,6 +720,36 @@ def check():
             problems.append(f"PSM_SMA_COARSE_SHIFT is {PSM_SMA_COARSE_SHIFT!r}: it must be None "
                             "(from the conditions) or an integer 0-18; above 18 the coarse "
                             "field no longer pins the fine field's 2^20 ns wrap.")
+    if PSM_PIXEL_MASK_TAG is not None and not (isinstance(PSM_PIXEL_MASK_TAG, str)
+                                               and PSM_PIXEL_MASK_TAG):
+        problems.append(f"PSM_PIXEL_MASK_TAG is {PSM_PIXEL_MASK_TAG!r}: it must be None (the "
+                        "table's default tag) or the name of a tag of mupix_pixel_mask.")
+    if PSM_TIMEWALK_CORRECTION_TAG is not None and not (
+            isinstance(PSM_TIMEWALK_CORRECTION_TAG, str) and PSM_TIMEWALK_CORRECTION_TAG):
+        problems.append(f"PSM_TIMEWALK_CORRECTION_TAG is {PSM_TIMEWALK_CORRECTION_TAG!r}: it "
+                        "must be None (the table's default tag) or the name of a tag of "
+                        "mupix_timewalk.")
+    if not isinstance(PSM_TWC_NTUPLE, str) or PSM_TWC_NTUPLE not in _TWC_NTUPLE_DROP:
+        problems.append(f"PSM_TWC_NTUPLE is {PSM_TWC_NTUPLE!r}: it must be one of "
+                        f"{', '.join(repr(k) for k in _TWC_NTUPLE_DROP)} (which MuPix hit "
+                        "collections the RNTuple keeps).")
+    for name, value in (("PSM_PIXEL_MASK", PSM_PIXEL_MASK), ("PSM_TIMEWALK", PSM_TIMEWALK),
+                        ("PSM_TIMEWALK_CORRECTION", PSM_TIMEWALK_CORRECTION)):
+        if not isinstance(value, bool):
+            problems.append(f"{name} is {value!r}: it must be True or False (a string such as "
+                            "'False' is true in Python and would switch it on).")
+    try:
+        tw_axis_ok = (float(PSM_TIMEWALK_DT_MAX) > float(PSM_TIMEWALK_DT_MIN)
+                      and int(PSM_TIMEWALK_DT_BINS) == PSM_TIMEWALK_DT_BINS
+                      and 1 <= int(PSM_TIMEWALK_DT_BINS) <= 8192)
+    except (TypeError, ValueError):
+        tw_axis_ok = False
+    if PSM_TIMEWALK and not tw_axis_ok:
+        problems.append(f"PSM_TIMEWALK_DT_MIN/MAX/BINS ({PSM_TIMEWALK_DT_MIN!r}, "
+                        f"{PSM_TIMEWALK_DT_MAX!r}, {PSM_TIMEWALK_DT_BINS!r}) are the timewalk dt "
+                        "axis [min, max) in bins: max must be above min and bins an integer "
+                        "1-8192, or the correction layer stops at initialize and the monitor "
+                        "and the reco book no timewalk histograms.")
     if PSM_RF_CHANNEL is not None:
         try:
             rf_ok = (int(PSM_RF_CHANNEL) == PSM_RF_CHANNEL and 0 <= int(PSM_RF_CHANNEL) <= 15
@@ -686,6 +770,18 @@ def check():
             os.path.basename(str(p)) for p in ODB_SPECS}:
         problems.append("PSM_GEOMETRY_TRANS has 'COND:isel' but ODB_SPECS has no "
                         "bt2026_isel.json, so nothing maps the isel table.")
+    if PSM_DECODE and PSM_PIXEL_MASK and "bt2026_psm_readout_map.json" not in {
+            os.path.basename(str(p)) for p in PSM_GEOMETRY_FILES}:
+        problems.append("PSM_PIXEL_MASK is on but PSM_GEOMETRY_FILES has no "
+                        "bt2026_psm_readout_map.json, so nothing supplies the mupix_pixel_mask "
+                        "table and the decoder stops at initialize; add it, or set "
+                        "PSM_PIXEL_MASK = False to decode without a mask.")
+    if PSM_DECODE and PSM_TIMEWALK_CORRECTION and "bt2026_psm_readout_map.json" not in {
+            os.path.basename(str(p)) for p in PSM_GEOMETRY_FILES}:
+        problems.append("PSM_TIMEWALK_CORRECTION is on but PSM_GEOMETRY_FILES has no "
+                        "bt2026_psm_readout_map.json, so nothing supplies the mupix_timewalk "
+                        "table and the correction layer stops at initialize; add it, or set "
+                        "PSM_TIMEWALK_CORRECTION = False to copy the MuPix hits uncorrected.")
     if int(PSM_WEIGHT_STRATEGY) not in (0, 1, 2):
         problems.append(f"PSM_WEIGHT_STRATEGY is {PSM_WEIGHT_STRATEGY}: it must be 0 (weight "
                         "1 for every tracklet), 1 (L1/L2 window containment) or 2 (also the "
@@ -798,9 +894,44 @@ if PSM_DECODE:
     if PSM_SMA_COARSE_SHIFT is not None:
         musip.coarseShift = int(PSM_SMA_COARSE_SHIFT)
     musip.smaDiagnostics = bool(PSM_SMA_DIAGNOSTICS)
+    musip.applyPixelMask = bool(PSM_PIXEL_MASK)
+    if PSM_PIXEL_MASK_TAG:
+        musip.pixelMaskTag = str(PSM_PIXEL_MASK_TAG)
     tools.append(musip)
 
 algorithms = [PIMidasDecoder(decoders=tools)]
+
+if PSM_DECODE:
+    # The MuPix timewalk correction, /Event/muquad -> /Event/muquad_twc, in a
+    # sequencer of its own straight after the decoder and gated on the raw hits.
+    # It is not a member of PSMMuPixSeq on purpose: the track reco in PSMRecoSeq
+    # reads its output too, and must find it with the MuPix monitor switched off.
+    # Scheduled here it runs on every event with MuPix hits whatever the
+    # consumers are set to, and since the decoder writes /Event/muquad and
+    # /Event/mutrig together, every event that passes PSMMuPixSeq's gate
+    # (/Event/muquad) or PSMRecoSeq's (/Event/mutrig) already holds
+    # /Event/muquad_twc. Off, PSM_TIMEWALK_CORRECTION still schedules it, as a
+    # plain copy that does not read the table, so the consumers have one input
+    # path whatever the setting. The raw /Event/muquad stays on the TES.
+    #
+    # Its histograms, raw and corrected dt(pixel - S1) vs pixel ToT, follow
+    # PSM_TIMEWALK like the monitor's and the reco's tw_*: CounterInput is the
+    # SMA hits (optional per frame, as for the monitor) and S1 comes from the
+    # PSM channel map. Without them it books only twc_hits.
+    twc = PIPSMMuPixTimewalkCorrection(
+        "PIPSMMuPixTimewalkCorrection", input=_TES_MUQUAD, output=_TES_MUQUAD_TWC,
+        applyTimewalkCorrection=bool(PSM_TIMEWALK_CORRECTION), GeometrySvc="PIGeometrySvc",
+        TimewalkDtMin=float(PSM_TIMEWALK_DT_MIN), TimewalkDtMax=float(PSM_TIMEWALK_DT_MAX),
+        TimewalkDtBins=int(PSM_TIMEWALK_DT_BINS))
+    if PSM_TIMEWALK_CORRECTION_TAG:
+        twc.ConditionsTag = str(PSM_TIMEWALK_CORRECTION_TAG)
+    if _TWC_TIMEWALK:
+        twc.CounterInput = _TES_MUTRIG
+        twc.ChannelMapTable = PSM_CHANNEL_MAP_TABLE
+        if PSM_CHANNEL_MAP_TAG:
+            twc.ChannelMapTag = PSM_CHANNEL_MAP_TAG
+    algorithms.append(Gaudi__Sequencer("PSMTimewalkSeq", RequireObjects=[_TES_MUQUAD],
+                                       Members=[twc]))
 
 # Built once and shared by PIPSMComputeWeight, PIPSMAllTrackReco and the MuPix
 # monitor, so the three algorithms' acceptance windows agree with each other.
@@ -879,7 +1010,7 @@ if PSM_MUPIX_MONITOR:
     # binned at a different pitch than the decoder placed the hits at stops
     # being one bin per pixel.
     mupix_monitor = PIPSMMuPixMonitor(
-        input=_TES_MUQUAD, GeometrySvc="PIGeometrySvc",
+        input=_TES_MUQUAD_TWC, GeometrySvc="PIGeometrySvc",
         PixelPitch=float(PSM_QUAD_PIXEL_PITCH),
         PixelsPerBin=int(PSM_MUPIX_PIXELS_PER_BIN),
         CoincidenceWindow=float(PSM_MUPIX_WINDOW_NS),
@@ -900,8 +1031,13 @@ if PSM_MUPIX_MONITOR:
         # the channel map's, the same table the tracklet reco reads.
         mupix_monitor.CounterInput = _TES_MUTRIG
         mupix_monitor.ConditionsTable = PSM_CHANNEL_MAP_TABLE
+        mupix_monitor.TimewalkDtMin = float(PSM_TIMEWALK_DT_MIN)
+        mupix_monitor.TimewalkDtMax = float(PSM_TIMEWALK_DT_MAX)
+        mupix_monitor.TimewalkDtBins = int(PSM_TIMEWALK_DT_BINS)
         if PSM_CHANNEL_MAP_TAG:
             mupix_monitor.ConditionsTag = PSM_CHANNEL_MAP_TAG
+    # Gated on the raw hits: PSMTimewalkSeq, gated the same way, has written
+    # /Event/muquad_twc for every event this lets through.
     algorithms.append(Gaudi__Sequencer("PSMMuPixSeq", RequireObjects=[_TES_MUQUAD],
                                        Members=[mupix_monitor]))
 
@@ -936,7 +1072,7 @@ if PSM_SMA_MONITOR:
 
 if PSM_RECO:
     all_reco = PIPSMSimpleTrackReco(
-        "PIPSMAllTrackReco", L_hits=_TES_MUQUAD, S_hits=_TES_MUTRIG,
+        "PIPSMAllTrackReco", L_hits=_TES_MUQUAD_TWC, S_hits=_TES_MUTRIG,
         output=_TES_PSM_TRACKS, ConditionsTable=PSM_CHANNEL_MAP_TABLE,
         SeedOn=int(PSM_SEED_ON), requireLHits=int(PSM_REQUIRE_L_HITS),
         seedOnL=int(PSM_SEED_ON_L), thrLPair=float(PSM_LPAIR_WINDOW_NS),
@@ -951,6 +1087,8 @@ if PSM_RECO:
         dropCrosstalkGhosts=bool(PSM_DROP_CROSSTALK_GHOSTS),
         PixelPitch=float(PSM_QUAD_PIXEL_PITCH),
         Timewalk=int(bool(PSM_TIMEWALK)),
+        TimewalkDtMin=float(PSM_TIMEWALK_DT_MIN), TimewalkDtMax=float(PSM_TIMEWALK_DT_MAX),
+        TimewalkDtBins=int(PSM_TIMEWALK_DT_BINS),
         WeightStrategy=int(PSM_WEIGHT_STRATEGY),
         ConfigX=_PSM_CONFIG_X, ConfigY=_PSM_CONFIG_Y,
         Margin=float(PSM_WEIGHT_MARGIN_MM))
@@ -995,8 +1133,12 @@ out_streams = []
 if WRITE_NTUPLE:
     output = PIAOutputStream(destination=str(NL_OUT), Compression=_NTUPLE_COMPRESSION,
                              ReuseEntry=_NTUPLE_REUSE_ENTRY)
-    if NTUPLE_RULES:
-        output.SelectionRules = [str(r) for r in NTUPLE_RULES]
+    _ntuple_rules = [str(r) for r in NTUPLE_RULES]
+    # Only with PSM_DECODE: a rule matching no registered path is warned about.
+    if PSM_DECODE and _TWC_NTUPLE_DROP[PSM_TWC_NTUPLE]:
+        _ntuple_rules.append("drop " + _TWC_NTUPLE_DROP[PSM_TWC_NTUPLE])
+    if _ntuple_rules:
+        output.SelectionRules = _ntuple_rules
     output.AuditExecute = output.AuditInitialize = output.AuditFinalize = True
     out_streams.append(output)
 
@@ -1021,5 +1163,6 @@ if NL_OVERRIDES:
     print(f"[nearline] overrides  {NL_OVERRIDES}")
 print(f"[nearline] halves     WD={WD_ENABLED} WD_SCALER_MONITOR={WD_SCALER_MONITOR}"
       f" PSM_DECODE={PSM_DECODE} PSM_RECO={PSM_RECO} PSM_MUPIX_MONITOR={PSM_MUPIX_MONITOR}"
-      f" PSM_SMA_MONITOR={PSM_SMA_MONITOR} PSM_TIMEWALK={PSM_TIMEWALK}")
+      f" PSM_SMA_MONITOR={PSM_SMA_MONITOR} PSM_TIMEWALK={PSM_TIMEWALK}"
+      f" PSM_TIMEWALK_CORRECTION={PSM_TIMEWALK_CORRECTION}")
 print(f"[nearline] EvtMax     {EVT_MAX}")
