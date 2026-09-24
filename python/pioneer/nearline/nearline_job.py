@@ -24,7 +24,10 @@ agreement, registered in midas_files/wavedream-scalar-readout/docs/REGISTRY.md.
     +-- PSMMuPixSeq ----------- gated on /Event/muquad
     |     PIPSMMuPixMonitor    -> histograms only: a hit map per MuPix chip and
     |                             per plane, and x/x', y/y' from an L1/L2 time
-    |                             coincidence with no scintillator involved
+    |                             coincidence with no scintillator involved;
+    |                             with PSM_TIMEWALK also reads /Event/mutrig
+    |                             (optional per frame) for the all-pairs
+    |                             pixel-vs-S1..S5 timewalk
     |
     +-- PSMSMASeq ------------- gated on /Event/mutrig
     |     PIPSMSMAMonitor      -> histograms only: rate, ToT and fine time per
@@ -339,6 +342,15 @@ PSM_MUPIX_CENTRAL_SLOPE_MRAD = 100.0
 # Each extra pair is a combinatorial ghost carrying a slope no particle had,
 # so this is a diagnostic for a busy run, not a production setting.
 PSM_MUPIX_ALL_PAIRS = 0
+# MuPix timewalk against the counters S1-S5: t(pixel) - t(Sn) against the pixel
+# ToT, against the Sn ToT, and pixel ToT against Sn ToT, per plane L1/L2 and
+# counter. Two samples: every (pixel, Sn) pair of a readout frame in the MuPix
+# monitor (tw_* under PIPSMMuPixMonitor, dt in [-150, 450) ns, ToT vs ToT in the
+# prompt window [-100, 450) ns), and the pixels of the clustered L pair of each
+# track holding an S1 hit against the Sn hit nearest that S1 within +-50 ns
+# (tw_* under PIPSMAllTrackReco, filled only with PSM_AGGREGATE on). The monitor
+# reads /Event/mutrig for this; a frame without it skips the timewalk only.
+PSM_TIMEWALK = True
 # --- SMA monitor -----------------------------------------------------------
 # The low-level check on the SMA time-over-threshold readout: how many hits each
 # counter takes, and what their ToT looks like. It reads /Event/mutrig and
@@ -393,6 +405,20 @@ PSM_LPAIR_WINDOW_NS = 40.0
 # stays at its default.
 PSM_L_WINDOW_BEFORE_NS = 100.0
 PSM_L_WINDOW_AFTER_NS = 160.0
+# The L hits of each plane inside that window are clustered: two hits at most
+# this far apart in mm (global x/y, single linkage) are one cluster, and exactly
+# one cluster per plane makes the L pair, at the mean of the cluster's pixel
+# centres. 0.12 takes the eight touching pixels at the 0.08 mm pitch (edge 0.08,
+# corner 0.113), also across a chip boundary, and nothing further; on beam data
+# that holds ~90% of the same-particle excess of same-plane hit pairs. 0 turns
+# the clustering off: a second hit of a plane then makes the tracklet ambiguous,
+# neighbouring pixels of one particle included.
+PSM_L_CLUSTER_DIST_MM = 0.12
+# Before the one-cluster-per-plane test, drop MuPix crosstalk ghosts: a cluster
+# of ToT <= 3 on the chip of a higher-ToT pixel of the same window, at most one
+# column and 40-43, 81-85 or 122-127 rows away (found in beam data; most
+# of the remaining ambiguity). Off until decided.
+PSM_DROP_CROSSTALK_GHOSTS = False
 # Fill the phase-space histograms inside the algorithm; this is the monitoring.
 PSM_AGGREGATE = 1
 # Restrict those histograms to prompt-like tracklets: only a tracklet with an
@@ -536,7 +562,10 @@ if WD_ENABLED:
     _JSON_FILES += [_cond(f) for f in WD_CONDITIONS_FILES]
 if PSM_DECODE:
     _JSON_FILES += [_cond(f) for f in PSM_GEOMETRY_FILES]
-if PSM_RECO and PSM_CHANNEL_MAP_FILE:
+# The channel map feeds the tracklet reco and, with the timewalk on, the MuPix
+# monitor's counters S1-S5.
+_MUPIX_TIMEWALK = bool(PSM_MUPIX_MONITOR and PSM_TIMEWALK and PSM_DECODE)
+if (PSM_RECO or _MUPIX_TIMEWALK) and PSM_CHANNEL_MAP_FILE:
     _JSON_FILES.append(_cond(PSM_CHANNEL_MAP_FILE))
 _ODB_TABLES = [_cond(f) for f in ODB_SPECS]
 
@@ -678,6 +707,10 @@ def check():
         problems.append(f"PSM_L_WINDOW_BEFORE_NS ({PSM_L_WINDOW_BEFORE_NS}) and "
                         f"PSM_L_WINDOW_AFTER_NS ({PSM_L_WINDOW_AFTER_NS}) make the L-hit window "
                         "[t - before, t + after) empty, so no tracklet would get an L pair.")
+    if PSM_RECO and PSM_DROP_CROSSTALK_GHOSTS and not (PSM_DECODE and PSM_GEOMETRY_BASE):
+        problems.append("PSM_DROP_CROSSTALK_GHOSTS is on but there is no PIGeometrySvc "
+                        "(PSM_DECODE, PSM_GEOMETRY_BASE): the ghost rule recovers each hit's "
+                        "column and row from the chip placement it serves.")
     if OUTPUT_LEVEL not in _LEVELS:
         problems.append(f"OUTPUT_LEVEL '{OUTPUT_LEVEL}' is not one of {sorted(_LEVELS)}.")
     if problems:
@@ -812,6 +845,15 @@ if PSM_MUPIX_MONITOR:
         ExpandedPosRange=float(PSM_MUPIX_EXPANDED_RANGE_MM),
         CentralSlopeRange=float(PSM_MUPIX_CENTRAL_SLOPE_MRAD),
         AllPairs=int(PSM_MUPIX_ALL_PAIRS))
+    if _MUPIX_TIMEWALK:
+        # The all-pairs timewalk reads the SMA hits as an optional input: the
+        # sequencer stays gated on the MuPix hits alone, and a frame with no
+        # SMA collection only skips the timewalk fills. The counters S1-S5 are
+        # the channel map's, the same table the tracklet reco reads.
+        mupix_monitor.CounterInput = _TES_MUTRIG
+        mupix_monitor.ConditionsTable = PSM_CHANNEL_MAP_TABLE
+        if PSM_CHANNEL_MAP_TAG:
+            mupix_monitor.ConditionsTag = PSM_CHANNEL_MAP_TAG
     algorithms.append(Gaudi__Sequencer("PSMMuPixSeq", RequireObjects=[_TES_MUQUAD],
                                        Members=[mupix_monitor]))
 
@@ -856,7 +898,11 @@ if PSM_RECO:
         distanceL12=float(PSM_DISTANCE_L12),
         thr=float(PSM_LAYER_THR),
         xrange=float(PSM_PHASE_SPACE_POS_RANGE_MM),
-        prange=float(PSM_PHASE_SPACE_SLOPE_RANGE_MRAD))
+        prange=float(PSM_PHASE_SPACE_SLOPE_RANGE_MRAD),
+        lClusterDistMm=float(PSM_L_CLUSTER_DIST_MM),
+        dropCrosstalkGhosts=bool(PSM_DROP_CROSSTALK_GHOSTS),
+        PixelPitch=float(PSM_QUAD_PIXEL_PITCH),
+        Timewalk=int(bool(PSM_TIMEWALK)))
     if PSM_CHANNEL_MAP_TAG:
         all_reco.ConditionsTag = PSM_CHANNEL_MAP_TAG
     if PSM_DECODE and PSM_GEOMETRY_BASE:
@@ -920,5 +966,5 @@ if NL_OVERRIDES:
     print(f"[nearline] overrides  {NL_OVERRIDES}")
 print(f"[nearline] halves     WD={WD_ENABLED} WD_SCALER_MONITOR={WD_SCALER_MONITOR}"
       f" PSM_DECODE={PSM_DECODE} PSM_RECO={PSM_RECO} PSM_MUPIX_MONITOR={PSM_MUPIX_MONITOR}"
-      f" PSM_SMA_MONITOR={PSM_SMA_MONITOR}")
+      f" PSM_SMA_MONITOR={PSM_SMA_MONITOR} PSM_TIMEWALK={PSM_TIMEWALK}")
 print(f"[nearline] EvtMax     {EVT_MAX}")

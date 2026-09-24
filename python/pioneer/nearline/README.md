@@ -61,9 +61,9 @@ PIHistogramSvc        histograms/<instance>/<name> -> <out>_hists.root
 | `PIWDWaveformAnalysis` | `/Event/wd_waveform`, `wd_channel_time`, `wd_rf_phase` | `/Event/wd_features` | `ppamp`, `le_time`, `ppamp_vs_channel`; with a role table also `baseline_vs_channel`, `baseline_rms_vs_channel`, `fired_vs_channel`, `coincidence` and, per scintillator channel, `charge_vs_amp_chNN`, `letime_vs_amp_chNN`, `charge_vs_rfphase_chNN` |
 | `PIWDCalibrator` | `/Event/wd_features`, `wd_rf_phase` | `/Event/wd_hits` | — |
 | `PIWDScalerMonitor` | `/Event/wd_scalers` | — | `readings` and, per board `NNN` in `WD_SCALER_BOARDS`, `rate_vs_time_bNNN`, `mean_rate_bNNN`, `threshold_bNNN`, `fpga_temp_vs_time_bNNN` |
-| `PIPSMMuPixMonitor` | `/Event/muquad` | — | `L<n>_chip<vid>_xy` and `L<n>_xy` per MuPix chip and plane, `hits_per_chip`, `tot_vs_chip`, `L<n>_mult`, and from the L1/L2 coincidence `dt`, `npairs`, `npartners`, `dx`, `dy`, `track_xy`, `xxp`, `yyp`, and the same tracks on fixed axes `track_xy_expanded`, `xxp_central`, `yyp_central` |
+| `PIPSMMuPixMonitor` | `/Event/muquad`; `/Event/mutrig` (optional, only with `PSM_TIMEWALK`) | — | `L<n>_chip<vid>_xy` and `L<n>_xy` per MuPix chip and plane, `hits_per_chip`, `tot_vs_chip`, `L<n>_mult`, and from the L1/L2 coincidence `dt`, `npairs`, `npartners`, `dx`, `dy`, `track_xy`, `xxp`, `yyp`, and the same tracks on fixed axes `track_xy_expanded`, `xxp_central`, `yyp_central`; with `PSM_TIMEWALK` the all-pairs timewalk `tw_dt_vs_tot_L<n>_<vid>`, `tw_dt_vs_stot_L<n>_<vid>`, `tw_tot_vs_stot_L<n>_<vid>` per plane and counter S1-S5 (`<vid>` 2001, 2003-2006) |
 | `PIPSMSMAMonitor` | `/Event/mutrig`; `/Event/rf` (optional, only when `PSM_RF_CHANNEL` is set) | — | `hits_per_counter`, `tot_vs_counter`, `hits_per_event_vs_counter`, `tot`, `fine_time_vs_counter`, `counters`, the S1-S5 coincidence views `pattern`, `s1_partners`, `pattern_duplicates`, `dt_to_s1`, `dt_to_s1_wide`, `pattern_counters`; with the RF input also `rf_period`, `rf_pulses_per_gate`, `rf_offset_vs_pulse`, `rf_phase`, `rf_veto_gap`, `rf_counters` and one `rf_phase_vs_tot_<vid>` per cabled counter |
-| `PIPSMAllTrackReco` (a `PIPSMSimpleTrackReco`) | `/Event/muquad`, `/Event/mutrig`; `/Event/rf` (optional, only when `PSM_RF_CHANNEL` is set) | `/Event/exp_all_tracks` | `xy`, `xxp`, `yyp`, `nhits`, `nseed`; with the RF input also `xy_vs_s1phase` |
+| `PIPSMAllTrackReco` (a `PIPSMSimpleTrackReco`) | `/Event/muquad`, `/Event/mutrig`; `/Event/rf` (optional, only when `PSM_RF_CHANNEL` is set) | `/Event/exp_all_tracks` | `xy`, `xxp`, `yyp`, `nhits`, `nseed`; with the RF input also `xy_vs_s1phase`; with `PSM_TIMEWALK` the track-only timewalk `tw_dt_vs_tot_L<n>_<vid>`, `tw_tot_vs_stot_L<n>_<vid>`, and `tw_cluster_size_L<n>`, `tw_seeds` |
 | `PIPSMPatternReco` | `/Event/exp_all_tracks` | `/Event/exp_pattern` | — |
 | `PIPSMComputeWeight` | `/Event/exp_all_tracks` | `/Event/exp_track_weights` | — |
 | `PIPSMDelayedCoincidence` | `/Event/exp_all_tracks`, `exp_track_weights` | `/Event/exp_tagged` | `counters`, `class`, `dt`, `sb`, `stop`, `xp`, `xp_w`, `yp`, `yp_w`, `xy`, `xy_w`, `xxp`, `xxp_w`, `yyp`, `yyp_w` |
@@ -259,6 +259,39 @@ the chip index that `hits_per_chip` and `tot_vs_chip` run over.
 | `PSM_MUPIX_EXPANDED_RANGE_MM` | `41.6` | Half-width in mm of the fixed x/y axes of `track_xy_expanded`, `xxp_central` and `yyp_central` (260 bins, 0.32 mm = 4 pixels). It covers the standard five-point scan at +-17 mm (`PSM_POSITIONS_MM`) and the +-20 mm 3x3 grid, plus the 20.48 mm half-width of a plane (40.48 mm), rounded up to a whole number of 0.32 mm bins. The monitor shifts the axis by a quarter pixel (0.02 mm), so a half-pixel stage offset such as 17 mm puts no pixel centre on a bin edge. It is fixed rather than taken from the plane footprint so that every run of a stage scan books the same axes and the runs merge bin by bin. Too small, and tracks go to the overflow bins; `initialize()` warns when the L1 footprint is not inside it |
 | `PSM_MUPIX_CENTRAL_SLOPE_MRAD` | `100.0` | Rough half-width in mrad of the x'/y' axes of `xxp_central` and `yyp_central`. A slope from two pixel planes only takes whole multiples of one pixel over the lever arm (2.67 mrad on bt2026), so the monitor books one bin per step, each step at a bin **centre**, and rounds this up to a whole number of steps: 100 gives 77 bins over ±102.67 mrad. A fixed bin width would show a comb of alternately full and empty bins instead |
 | `PSM_MUPIX_ALL_PAIRS` | `0` | Pairs every L2 hit inside the window instead of only the one nearest in time. Each extra pair is a combinatorial ghost carrying a slope no particle had, so this is a diagnostic for a busy run, not a production setting. `npartners` reports the ambiguity either way |
+| `PSM_TIMEWALK` | `True` | The MuPix timewalk against the scintillators, in two samples (see "MuPix timewalk" below). Here it sets the monitor's `CounterInput` to `/Event/mutrig`, which is read as an **optional** input: `PSMMuPixSeq` stays gated on `/Event/muquad` alone, and a frame without SMA hits skips only the timewalk fills (the count is logged at finalize). It also sets the monitor's `ConditionsTable` to the PSM channel map, from which it takes the counters S1-S5 (the channel-map file is then loaded even with `PSM_RECO` off), and turns on `PIPSMAllTrackReco`'s track-only histograms (`Timewalk`, off by default in the algorithm). Off, neither set is booked |
+
+**MuPix timewalk.** Per plane `L1`/`L2` and counter S1-S5, with dt =
+t(pixel) − t(Sn) on 300 bins of 2 ns over [−150, 450) and the pixel ToT in
+units of 256 ns. The counters are the S1-S5 channels of the PSM channel map
+(`PSM_CHANNEL_MAP_TABLE`), which both algorithms read, so the detector ids are
+written down in one place (`<vid>` = 2001, 2003, 2004, 2005, 2006 in the bt2026
+map; 2002 is the Degrader id):
+
+* **all pairs**, `PIPSMMuPixMonitor/tw_*`: every pixel hit against every Sn hit
+  of the same readout frame with dt in [−150, 450) fills `tw_dt_vs_tot_L<n>_<vid>`
+  (dt vs pixel ToT) and `tw_dt_vs_stot_L<n>_<vid>` (dt vs Sn ToT, 0-63; higher
+  SMA codes go to the overflow); the pairs with dt in the prompt window
+  [−100, 450) (`PromptWindow`) fill `tw_tot_vs_stot_L<n>_<vid>` (pixel ToT vs Sn
+  ToT). The window holds the walk tail of the lowest ToTs, to about +400 ns.
+* **track only**, `PIPSMAllTrackReco/tw_*`: for every scintillator cluster
+  holding an S1 hit whose L window has exactly one pixel cluster per plane,
+  every pixel of the two clusters against the Sn hit nearest the cluster's
+  S1 time within ±50 ns (`TimewalkPartnerNs`), searched in all SMA hits of the
+  frame (not only the 2 ns S-S cluster): `tw_dt_vs_tot_L<n>_<vid>` (dt inside
+  [−150, 450)) and `tw_tot_vs_stot_L<n>_<vid>` (every such pixel).
+  `tw_cluster_size_L<n>` is the size of those clusters; `tw_seeds` counts the
+  S1-holding seeds by outcome (track, ambiguous, no L1, no L2), then the
+  clusters dropped as crosstalk ghosts per plane, then the seeds whose L1 or
+  L2 window held more than `lClusterMaxHits` (64) hits and was called
+  ambiguous without being clustered. An Sn ToT beyond 63 fills the overflow of
+  `tw_tot_vs_stot` too.
+
+The reference for both definitions is the Python prototype in
+`psm-analysis-josh-2026/mupix-timewalk/` (`timewalk_lib.py`), whose all-pairs
+arrays these histograms reproduce bin for bin inside the axes. The prototype
+drops the Sn ToTs above 63 where these fill the overflow, so the entry counts
+differ by the overflow; see the prototype's README for the comparison.
 
 `PixelPitch` is passed `PSM_QUAD_PIXEL_PITCH`, the same number the decoder
 placed the hits with: binned at any other pitch the maps stop being one bin per
@@ -342,10 +375,12 @@ unchanged.
 | `PSM_CHANNEL_MAP_FILE` | `"bt2026_psm_channel_map.json"` | Container holding the data-side channel map the tracklet reco reads |
 | `PSM_CHANNEL_MAP_TABLE` / `PSM_CHANNEL_MAP_TAG` | `"psm_channel_map"` / `""` | The table supplies the **whole** map, which is why no per-channel job option is set here; one that were set would override the table |
 | `PSM_SEED_ON` | `-1` | Negative is unseeded: the earliest scintillator hit not already absorbed starts a new tracklet, so an isolated delayed pulse (the muon from a stopped pion) forms its own tracklet instead of being lost |
-| `PSM_REQUIRE_L_HITS` | `0` | Requiring exactly one L1 and one L2 hit discards every delayed tracklet, because delayed pulses have no tracker hits |
+| `PSM_REQUIRE_L_HITS` | `0` | Requiring exactly one L1 and one L2 pixel cluster discards every delayed tracklet, because delayed pulses have no tracker hits |
 | `PSM_SEED_ON_L` | `0` | Source runs only: seed tracklets on L1 tracker hits and pair each with the nearest L2 hit inside `PSM_LPAIR_WINDOW_NS`. A source on the tracker makes L1/L2 coincidences with no scintillator involved, and both scintillator-seeded modes attach L hits only to a scintillator cluster, so they reconstruct nothing from such a run. On in beam running it throws away the scintillator seed that defines a particle |
 | `PSM_LPAIR_WINDOW_NS` | `40.0` | L1 to L2 half-window in ns for that mode. The two-plane correlation from a source is much broader than the tracker time resolution, so this is generous on purpose; inert while `PSM_SEED_ON_L` is `0` |
 | `PSM_L_WINDOW_BEFORE_NS` / `PSM_L_WINDOW_AFTER_NS` | `100.0` / `160.0` | A scintillator cluster at `t` takes its L1/L2 hits from `[t - before, t + after)` (`thrMupix` / `thrMupixUpper`). Measured with the SMA and MuPix times on one base, t(MuPix) − t(S1) has a sharp edge at −90 ns, peaks at −52 ns and has a timewalk tail to about +150 ns, so the window opens just before the edge and closes past the tail. Too narrow and prompt tracklets lose their L pair; too wide and more of them see a second hit on one plane and are flagged ambiguous. The S-S clustering window (`thrScint`, 2 ns) is separate and untouched. An empty window is rejected by `check()` |
+| `PSM_L_CLUSTER_DIST_MM` | `0.12` | The L hits of each plane inside the L window are clustered by distance (`lClusterDistMm`): two hits at most this far apart in mm, global x/y, are linked (single linkage, 1e-6 mm slack, no time condition beyond the window), and exactly one cluster per plane makes the L pair, placed at the mean of the cluster's pixel centres; more than one cluster on a plane flags the tracklet `lAmbiguous`. 0.12 takes the eight touching pixels at the 0.08 mm pitch (edge 0.08, corner 0.113 mm), also across a chip boundary, and nothing further. `0` switches the clustering off: then a second hit of a plane, even the neighbouring pixel of the same particle, makes the tracklet ambiguous, which is how the reco worked before. A plane with more than 64 hits in the window (the algorithm's `lClusterMaxHits`) is ambiguous without being clustered, which bounds the pairwise work |
+| `PSM_DROP_CROSSTALK_GHOSTS` | `False` | Before the one-cluster-per-plane test, drop MuPix crosstalk ghosts (`dropCrosstalkGhosts`): a cluster whose largest ToT is at most 3 and that has a pixel of higher ToT of another cluster of the window on the same chip, at most one column and 40-43, 81-85 or 122-127 rows away. Most of the ambiguity left after the clustering is this. Needs the `PIGeometrySvc` of `PSM_DECODE`, from which each hit's column and row are recovered; `check()` refuses it without. Off until decided |
 | `PSM_AGGREGATE` | `1` | Fills the phase-space histograms inside the algorithm while the data is in memory. This is what makes the job a monitoring job rather than a converter |
 | `PSM_AGGREGATE_PROMPT_ONLY` | `1` | Restricts that filling to prompt-like tracklets: an unambiguous L1/L2 pair **and** at least one prompt-channel hit, the prompt channel being whatever `PromptChannel = -1` in the channel map resolves to (S1 on bt2026). Under a seeded configuration the seed already guarantees both and this changes nothing. In the unseeded mode this job runs (`PSM_SEED_ON = -1`) it is what keeps `PIPSMAllTrackReco`'s TH3s meaning "prompt tracks": off, an isolated delayed pulse forms its own tracklet with no L pair, its position is a sentinel, and it piles into the overflow bins of every phase-space plot |
 | `PSM_DISTANCE_L12` | `30.0` | L1 → L2 lever arm in mm, used to turn `x2 − x1` into a slope. Must match the telescope as built or every angle is scaled wrong. Source of truth: `beamline-simulation/psm/psm_scan_config.py` `DIST_L12_MM` |
@@ -468,6 +503,11 @@ the file name before the first dot:
 /workdir/scratch/nearline/run00175.root         the RNTuple
 /workdir/scratch/nearline/run00175_hists.root   the histograms
 ```
+
+The histogram file is the full set the daemon writes, the MuPix timewalk
+(`PIPSMMuPixMonitor/tw_*`, `PIPSMAllTrackReco/tw_*`, with `PSM_TIMEWALK` on) and
+the clustered L pairs (`PSM_L_CLUSTER_DIST_MM`) included: this is the way to
+remake them for one subrun file by hand.
 
 `--evt-max N` truncates, `--render-only` writes the `.py` and stops so you can
 edit it before running it, and `--job PATH` renders some other copy of the job
@@ -604,7 +644,8 @@ problem it finds in one message, rather than the first:
 29. `PSM_PHASE_SPACE_BINS` not a positive multiple of 64: the phase-space histograms would not rebin onto the 64-bin minitwin export exactly.
 30. `PSM_PHASE_SPACE_POS_RANGE_MM` or `PSM_PHASE_SPACE_SLOPE_RANGE_MRAD` not positive: both are half-widths of a symmetric axis.
 31. `PSM_L_WINDOW_BEFORE_NS` and `PSM_L_WINDOW_AFTER_NS` giving an empty L-hit window: no tracklet would get an L pair.
-32. `OUTPUT_LEVEL` not one of `DEBUG`, `ERROR`, `INFO`, `WARNING`.
+32. `PSM_DROP_CROSSTALK_GHOSTS` on without `PSM_DECODE` and a `PSM_GEOMETRY_BASE`: the ghost rule recovers each hit's column and row from the chip placement the `PIGeometrySvc` serves.
+33. `OUTPUT_LEVEL` not one of `DEBUG`, `ERROR`, `INFO`, `WARNING`.
 
 ## The phase-space histograms are minitwin input
 
