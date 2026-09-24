@@ -300,9 +300,11 @@ PSM_MUPIX_DT_BINS = 51
 # phase space instead, and expect the tails outside that window to pile up.
 PSM_MUPIX_SLOPE_RANGE_MRAD = 0.0
 # Half-width in mm of the fixed x/y axes of track_xy_expanded, xxp_central and
-# yyp_central. It covers the +-20 mm grid the stage scan is taken on plus the
-# 20.48 mm half-width of a plane (40.48 mm), rounded up to 41.6 = 130 x 0.32 so
-# the monitor's 260 bins stay 0.32 mm (four pixels) wide. It is a fixed number
+# yyp_central. It covers the standard five-point scan (PSM_POSITIONS_MM, +-17 mm)
+# and the +-20 mm 3x3 grid, plus the 20.48 mm half-width of a plane (40.48 mm),
+# rounded up to 41.6 = 130 x 0.32 so the monitor's 260 bins stay 0.32 mm (four
+# pixels) wide; the monitor shifts the axis by a quarter pixel so a half-pixel
+# stage offset such as 17 mm puts no pixel on a bin edge. It is a fixed number
 # rather than the plane footprint so that every run of a stage scan books the
 # same axes and the scan's runs merge bin by bin. Changing it without
 # ExpandedBins changes the bin width.
