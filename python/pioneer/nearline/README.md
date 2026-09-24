@@ -61,9 +61,9 @@ PIHistogramSvc        histograms/<instance>/<name> -> <out>_hists.root
 | `PIWDWaveformAnalysis` | `/Event/wd_waveform`, `wd_channel_time`, `wd_rf_phase` | `/Event/wd_features` | `ppamp`, `le_time`, `ppamp_vs_channel`; with a role table also `baseline_vs_channel`, `baseline_rms_vs_channel`, `fired_vs_channel`, `coincidence` and, per scintillator channel, `charge_vs_amp_chNN`, `letime_vs_amp_chNN`, `charge_vs_rfphase_chNN` |
 | `PIWDCalibrator` | `/Event/wd_features`, `wd_rf_phase` | `/Event/wd_hits` | — |
 | `PIWDScalerMonitor` | `/Event/wd_scalers` | — | `readings` and, per board `NNN` in `WD_SCALER_BOARDS`, `rate_vs_time_bNNN`, `mean_rate_bNNN`, `threshold_bNNN`, `fpga_temp_vs_time_bNNN` |
-| `PIPSMMuPixMonitor` | `/Event/muquad` | — | `L<n>_chip<vid>_xy` and `L<n>_xy` per MuPix chip and plane, `hits_per_chip`, `tot_vs_chip`, `L<n>_mult`, and from the L1/L2 coincidence `dt`, `npairs`, `npartners`, `dx`, `dy`, `track_xy`, `xxp`, `yyp`, and the same tracks on fixed axes `track_xy_expanded`, `xxp_central`, `yyp_central` |
+| `PIPSMMuPixMonitor` | `/Event/muquad` | — | `L<n>_chip<vid>_xy` and `L<n>_xy` per MuPix chip and plane, `hits_per_chip`, `tot_vs_chip`, `L<n>_mult`, and from the L1/L2 coincidence `dt`, `npairs`, `npartners`, `dx`, `dy`, `track_xy`, `xxp`, `yyp`, and the same tracks on fixed axes `track_xy_expanded`, `xxp_central`, `yyp_central`, plus their acceptance-weighted twins `track_xy_expanded_w`, `xxp_central_w`, `yyp_central_w` |
 | `PIPSMSMAMonitor` | `/Event/mutrig`; `/Event/rf` (optional, only when `PSM_RF_CHANNEL` is set) | — | `hits_per_counter`, `tot_vs_counter`, `hits_per_event_vs_counter`, `tot`, `fine_time_vs_counter`, `counters`; with the RF input also `rf_period`, `rf_pulses_per_gate`, `rf_offset_vs_pulse`, `rf_phase`, `rf_veto_gap`, `rf_counters` and one `rf_phase_vs_tot_<vid>` per cabled counter |
-| `PIPSMAllTrackReco` (a `PIPSMSimpleTrackReco`) | `/Event/muquad`, `/Event/mutrig`; `/Event/rf` (optional, only when `PSM_RF_CHANNEL` is set) | `/Event/exp_all_tracks` | `xy`, `xxp`, `yyp`, `nhits`, `nseed`; with the RF input also `xy_vs_s1phase` |
+| `PIPSMAllTrackReco` (a `PIPSMSimpleTrackReco`) | `/Event/muquad`, `/Event/mutrig`; `/Event/rf` (optional, only when `PSM_RF_CHANNEL` is set) | `/Event/exp_all_tracks` | `xy`, `xxp`, `yyp`, `nhits`, `nseed`, plus their acceptance-weighted twins `xy_w`, `xxp_w`, `yyp_w`; with the RF input also `xy_vs_s1phase` |
 | `PIPSMPatternReco` | `/Event/exp_all_tracks` | `/Event/exp_pattern` | — |
 | `PIPSMComputeWeight` | `/Event/exp_all_tracks` | `/Event/exp_track_weights` | — |
 | `PIPSMDelayedCoincidence` | `/Event/exp_all_tracks`, `exp_track_weights` | `/Event/exp_tagged` | `counters`, `class`, `dt`, `sb`, `stop`, `xp`, `xp_w`, `yp`, `yp_w`, `xy`, `xy_w`, `xxp`, `xxp_w`, `yyp`, `yyp_w` |
@@ -229,7 +229,7 @@ external clock; their names are in `wd_scaler_names`, recorded in the
 |---|---|---|
 | `PSM_GEOMETRY_BASE` | `"GEOCOND:psm_geometry"` | The layer `PIGeometrySvc` builds the `GeoHeader` from. Empty and the decoder throws on hit one; anything but a `GEOCOND:<table>` form is rejected, because that is the only form this job takes |
 | `PSM_GEOMETRY_MAPS` | `["MUPIX:mupix_chip_map", "MUTRIG:mutrig_channel_map"]` | Raw-readout-id → detector-id maps. The `NAME` side must match the decoder's `muPixMap`/`muTrigMap` defaults; without them the decoder cannot turn a chip id or `chipid*32+channel` into a detector id and throws naming the raw id on the first hit |
-| `PSM_GEOMETRY_TRANS` | `[]` | `["COND:isel"]` adds the XY-stage translation read from `/Equipment/XYTable`. Off because no ODB dump we have carries that equipment, so turning it on today fails at `initialize()` with "source absent" rather than silently using a stale stage position |
+| `PSM_GEOMETRY_TRANS` | `["COND:isel"]` | Adds the XY-stage translation read from `/Equipment/XYTable`. A run whose ODB has no XYTable equipment fails at `initialize()` with "source absent" rather than silently using a stale stage position; set `[]` and `PSM_WEIGHT_STRATEGY = 0` to process one (the acceptance weights need the stage position) |
 | `PSM_GEOMETRY_FILES` | `bt2026_psm_geometry.json`, `bt2026_psm_readout_map.json` | Supply the base table and the two map tables. Empty with a `GEOCOND` base is a hard indexing error at startup |
 
 ### MuPix monitor
@@ -351,8 +351,9 @@ unchanged.
 | `PSM_DELAYED_WINDOW_NS` | `(20.0, 70.0)` | The π → µ tag window in ns (τ = 26 ns), `[MIN, MAX)` |
 | `PSM_REQUIRE_SEED_HIT` | `1` | Requires the **prompt** half of a coincidence to have a prompt-channel hit of its own. Off, any tracklet inside the window can play the prompt role — including, in the unseeded mode, a delayed pulse that formed its own tracklet — and `counters`/`class` then count pairs no particle made. The delayed half is selected by `PSM_DELAYED_WINDOW_NS` and `PSM_S5_THR`, not by this |
 | `PSM_LAYER_THR` / `PSM_S5_THR` | `0.2` / `0.2` | Stopping-layer and through-going thresholds. MeV in simulation, but **raw MuTrig ToT on data** until a ToT-to-MeV calibration exists, so both need retuning the first time real hits arrive |
-| `PSM_POSITIONS_MM` | `(0,0), (17,17), (-17,17), (-17,-17), (17,-17)` | Telescope stage positions `(dx, dy)` in mm for the acceptance weighting. Source of truth: `psm_scan_config.py` `POSITIONS_MM` |
-| `PSM_WEIGHT_STRATEGY` | `0` | `0` gives every tracklet weight 1 |
+| `PSM_POSITIONS_MM` | `(0,0), (17,17), (-17,17), (-17,-17), (17,-17)` | Telescope stage positions `(dx, dy)` in mm for the acceptance weighting — XY-stage coordinates, the same numbers as `/Equipment/XYTable`. The algorithms apply isel's `(-x, y)` translation themselves, so these are not pre-negated. Source of truth: `psm_scan_config.py` `POSITIONS_MM` |
+| `PSM_WEIGHT_MARGIN_MM` | `2.0` | Fiducial erosion in mm applied to each stage position's L1/L2 plane footprint before the containment test, so a track just inside or outside a plane edge is not double-counted or lost between neighbouring scan positions |
+| `PSM_WEIGHT_STRATEGY` | `1` | `0`: every tracklet gets weight 1. `1`: weight `0` unless the track is inside this run's own window at both L1 and L2, else `1/N`, `N` the number of `PSM_POSITIONS_MM` windows containing the track at both L1 and L2, each window being the conditions footprint (`PIGeometrySvc`) of the L1/L2 plane moved from this run's own stage position to that config position and eroded by `PSM_WEIGHT_MARGIN_MM`. Over the runs of a scan the weights a trajectory would receive then sum to 1 wherever at least one run can see it; a run at none of the positions (within 0.01 mm) counts its own window as one more and warns that its weights will not sum to 1 with the scan. `2`: also require containment at the track's stop-layer depth (`PIPSMAllTrackReco` only — the MuPix monitor has no scintillators to define a stop layer and is capped at `min(strategy, 1)`). Strategies `1` and `2` need `PSM_GEOMETRY_TRANS` to include `"COND:isel"`, or every run is treated as sitting at the design position; `check()` flags both requirements |
 | `PSM_PHASE_SPACE_BINS` | `320` | Bins per axis of the tagged `xy`/`xxp`/`yyp` TH2Ds. Must be a positive multiple of 64 or `check()` refuses to start: 320 = 5 x 64, so the histogram rebins onto the minitwin's 64-bin maps without splitting a bin. Source of truth: `beamline-simulation/psm/psm_scan_config.py` `NBINS_2D` |
 | `PSM_PHASE_SPACE_POS_RANGE_MM` | `37.0` | Half-width of the x/y axis in mm, applied to both PSM algorithms. This is the minitwin det10 window (`psm_scan_config.py` `X_WINDOW`), not a display choice — move it and the histograms stop being model input. The algorithm's own default, 2.5, is a single-position zoom |
 | `PSM_PHASE_SPACE_SLOPE_RANGE_MRAD` | `950.0` | Half-width of the x'/y' axis in **mrad** (`psm_scan_config.py` `A_WINDOW`), likewise on both algorithms. The 1D `xp`/`yp` spectra keep their own narrower `SlopeRange`: they are the shift zoom, not model input |
@@ -592,18 +593,21 @@ problem it finds in one message, rather than the first:
 18. `PSM_RF_CHANNEL` not an integer, outside 0-15, or equal to `PSM_CURRENT_CHANNEL`: the SMA word's channel field is 4 bits, and the decoder takes the RF channel first, so the current pulses would become RF pulses.
 19. A `GEOCOND` base with an empty `PSM_GEOMETRY_FILES`: nothing supplies the table it names.
 20. `COND:isel` in `PSM_GEOMETRY_TRANS` without `bt2026_isel.json` in `ODB_SPECS`.
-21. Exactly one of `WD_ALIGN_TABLE` / `WD_ECAL_TABLE` set: `PIWDCalibrator` needs both.
-22. `WD_ENABLED` with an empty `WD_RF_TABLE`: `PIWDRFPhase` runs first in `WDAnalysisSeq` and `PIWDWaveformAnalysis` reads `/Event/wd_rf_phase`, so the RF table cannot be empty.
-23. `WD_ROLE_TABLE` set with an empty `WD_CONDITIONS_FILES`: nothing would supply the `wd_channel_map` table.
-24. `WD_CHANNEL_SETTINGS_TABLE` set with an empty `ODB_SPECS`: only the begin-of-run ODB dump serves `wd_channel_settings`.
-25. `WD_CAL_CHANNELS` not a subset of `WD_CHANNELS`: they would have no features to calibrate.
-26. `WD_SCALER_MONITOR` without `WD_ENABLED`: nothing would produce `/Event/wd_scalers`.
-27. `WD_SCALER_TIME_BIN_S` not positive or not below `WD_SCALER_TIME_MAX_S`, or a serial listed twice in `WD_SCALER_BOARDS`.
-28. `WD_RF_REFINE` on with `WD_RF_REFINE_POINTS` below 2: a scan needs at least 2 points.
-29. `PSM_PHASE_SPACE_BINS` not a positive multiple of 64: the phase-space histograms would not rebin onto the 64-bin minitwin export exactly.
-30. `PSM_PHASE_SPACE_POS_RANGE_MM` or `PSM_PHASE_SPACE_SLOPE_RANGE_MRAD` not positive: both are half-widths of a symmetric axis.
-31. `PSM_L_WINDOW_BEFORE_NS` and `PSM_L_WINDOW_AFTER_NS` giving an empty L-hit window: no tracklet would get an L pair.
-32. `OUTPUT_LEVEL` not one of `DEBUG`, `ERROR`, `INFO`, `WARNING`.
+21. `PSM_WEIGHT_STRATEGY` not `0`, `1` or `2`.
+22. `PSM_WEIGHT_STRATEGY >= 1` without both `PSM_DECODE` and `PSM_GEOMETRY_BASE`: no `PIGeometrySvc` to take the L1/L2 plane footprints from.
+23. `PSM_WEIGHT_STRATEGY >= 1` without `COND:isel` in `PSM_GEOMETRY_TRANS`: every run would be treated as sitting at the design stage position.
+24. Exactly one of `WD_ALIGN_TABLE` / `WD_ECAL_TABLE` set: `PIWDCalibrator` needs both.
+25. `WD_ENABLED` with an empty `WD_RF_TABLE`: `PIWDRFPhase` runs first in `WDAnalysisSeq` and `PIWDWaveformAnalysis` reads `/Event/wd_rf_phase`, so the RF table cannot be empty.
+26. `WD_ROLE_TABLE` set with an empty `WD_CONDITIONS_FILES`: nothing would supply the `wd_channel_map` table.
+27. `WD_CHANNEL_SETTINGS_TABLE` set with an empty `ODB_SPECS`: only the begin-of-run ODB dump serves `wd_channel_settings`.
+28. `WD_CAL_CHANNELS` not a subset of `WD_CHANNELS`: they would have no features to calibrate.
+29. `WD_SCALER_MONITOR` without `WD_ENABLED`: nothing would produce `/Event/wd_scalers`.
+30. `WD_SCALER_TIME_BIN_S` not positive or not below `WD_SCALER_TIME_MAX_S`, or a serial listed twice in `WD_SCALER_BOARDS`.
+31. `WD_RF_REFINE` on with `WD_RF_REFINE_POINTS` below 2: a scan needs at least 2 points.
+32. `PSM_PHASE_SPACE_BINS` not a positive multiple of 64: the phase-space histograms would not rebin onto the 64-bin minitwin export exactly.
+33. `PSM_PHASE_SPACE_POS_RANGE_MM` or `PSM_PHASE_SPACE_SLOPE_RANGE_MRAD` not positive: both are half-widths of a symmetric axis.
+34. `PSM_L_WINDOW_BEFORE_NS` and `PSM_L_WINDOW_AFTER_NS` giving an empty L-hit window: no tracklet would get an L pair.
+35. `OUTPUT_LEVEL` not one of `DEBUG`, `ERROR`, `INFO`, `WARNING`.
 
 ## The phase-space histograms are minitwin input
 
@@ -614,7 +618,7 @@ three `PSM_PHASE_SPACE_*` settings and by `check()`:
 | histogram | what fills it | binning | rebin to the model's 64 |
 |---|---|---|---|
 | `PIPSMDelayedCoincidence/{xy,xxp,yyp}` (+ `_w`) | tagged prompts | 320 x 320 | `Rebin2D(5, 5)`, exact |
-| `PIPSMAllTrackReco/{xy,xxp,yyp}` | every prompt-like tracklet | 64 x 64 x 6 (stop layer) | none needed; sum the stop axis away |
+| `PIPSMAllTrackReco/{xy,xxp,yyp}` (+ `_w`) | every prompt-like tracklet | 64 x 64 x 6 (stop layer) | none needed; sum the stop axis away |
 
 Both are on the minitwin det10 window — x, y over +-37 mm and x', y' over
 +-950 mrad — which is `beamline-simulation/psm/psm_scan_config.py`
