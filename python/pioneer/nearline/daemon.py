@@ -308,7 +308,7 @@ class NearlineDaemon:
                 self.check_for_updates()
 
             except Exception as e:
-                self.client.msg("Nearline Error" + e, is_error= True)
+                self.client.msg(f"Nearline Error {e}", is_error= True)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Good Luck Have Fun - I did not yet write documentation for this")

@@ -60,7 +60,7 @@ class miniTwinInterface:
         filename = str(ctxt)
         aFile = ROOT.TFile.Open(filename)
 
-        beam_hdr = aFile.Get("beam")
+        beam_hdr = aFile.Get("beamline")
 
         histo_names = [
 
@@ -68,12 +68,14 @@ class miniTwinInterface:
 
         histos = [self.serialise(aFile.Get(n)) for n in histo_names]
 
+        configurable_devices = [1, 4, 5]
+
         theMessage = {
             "schema" : CONTEXT_SCHEMA,
             "context_id" : ctxt,
-            "settings" : {
-                "knobs" : {k : v for k,v in zip(beam_hdr.GetNames(), beam_hdr.GetDemand())},
-                "readback" : {k : v for k,v in zip(beam_hdr.GetNames(), beam_hdr.GetMeasured())}
+            "setting" : {
+                "knobs" : {str(k) : v for k,v,t in zip(beam_hdr.GetNames(), beam_hdr.GetDemand(), beam_hdr.GetTypes()) if t in configurable_devices},
+                "readback" : {str(k) : v for k,v,t in zip(beam_hdr.GetNames(), beam_hdr.GetMeasured(), beam_hdr.GetTypes()) if t in configurable_devices}
             },
             "measurement" : {
                 "inline" : {

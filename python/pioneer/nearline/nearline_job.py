@@ -289,8 +289,10 @@ PSM_GEOMETRY_BASE = "GEOCOND:psm_geometry"
 # decoder's muPixMap/muTrigMap property defaults.
 PSM_GEOMETRY_MAPS = ["MUPIX:mupix_chip_map", "MUTRIG:mutrig_channel_map"]
 # Extra transform layers on the base; ["COND:isel"] adds the XY-stage translation
-# read from /Equipment/XYTable in the ODB.
-PSM_GEOMETRY_TRANS = []
+# read from /Equipment/XYTable in the ODB. A run whose ODB has no XYTable fails
+# at initialize() with "source absent"; set [] and PSM_WEIGHT_STRATEGY = 0 to
+# process one of those (the acceptance weights need the stage position).
+PSM_GEOMETRY_TRANS = ["COND:isel"]
 # Containers supplying the base table and the two map tables above.
 PSM_GEOMETRY_FILES = ["bt2026_psm_geometry.json", "bt2026_psm_readout_map.json"]
 # --- MuPix monitor ---------------------------------------------------------
@@ -444,13 +446,36 @@ PSM_REQUIRE_SEED_HIT = 1
 # Layer-hit energy threshold and the S5 through-going threshold; raw MuTrig ToT on data, so retune.
 PSM_LAYER_THR = 0.2
 PSM_S5_THR = 0.2
-# Telescope stage positions (dx, dy) in mm for the acceptance weighting.
+# Telescope stage positions (dx, dy) in mm for the acceptance weighting -- XY-stage
+# coordinates, the same numbers as /Equipment/XYTable. The algorithms apply isel's
+# (-x, y) translation themselves; do not pre-negate these.
 PSM_POSITIONS_MM = [(0.0, 0.0), (17.0, 17.0), (-17.0, 17.0), (-17.0, -17.0), (17.0, -17.0)]
-# Weighting strategy; 0 gives every tracklet weight 1.
-PSM_WEIGHT_STRATEGY = 0
+# Fiducial erosion in mm of each stage position's L1/L2 plane footprint before the
+# containment test: a position only counts for a track that sits at least this far
+# inside its planes, so a small error in the footprint or the stage position does
+# not decide whether a track near an edge counts once or twice.
+PSM_WEIGHT_MARGIN_MM = 2.0
+# Weighting strategy. 0: every tracklet gets weight 1. 1: weight 0 unless the
+# track is inside this run's own window at both L1 and L2, else 1/N, N the
+# number of PSM_POSITIONS_MM windows containing it at both L1 and L2, where
+# each window is the conditions footprint (PIGeometrySvc) of the L1/L2 plane
+# moved from this run's own stage position to that config position and eroded
+# by PSM_WEIGHT_MARGIN_MM. Over the runs of a scan the weights a trajectory
+# would receive then sum to 1 wherever at least one run can see it. A run at
+# none of PSM_POSITIONS_MM (within 0.01 mm) counts its own window as one more
+# position and warns that its weights will not sum to 1 with the scan.
+# 2: also require containment at the track's stop-layer depth
+# (PIPSMAllTrackReco only; the MuPix monitor has no scintillators to define a
+# stop layer and is capped at min(strategy, 1)).
+# Strategies 1 and 2 need PSM_GEOMETRY_TRANS to include "COND:isel", or every
+# run is silently treated as sitting at the design position.
+PSM_WEIGHT_STRATEGY = 1
 # Phase-space histogram axes: PIPSMDelayedCoincidence's tagged xy/xxp/yyp and
-# their weighted twins, and the position/slope windows of PIPSMAllTrackReco's
-# TH3s. These are not free monitoring knobs, they are the minitwin det10 input
+# their weighted twins, PIPSMAllTrackReco's xy/xxp/yyp TH3s and their weighted
+# twins xy_w/xxp_w/yyp_w, and (on the MuPix monitor's own axes, not these
+# ranges) track_xy_expanded/xxp_central/yyp_central and their weighted twins
+# track_xy_expanded_w/xxp_central_w/yyp_central_w. These are not free
+# monitoring knobs on the reco side, they are the minitwin det10 input
 # contract -- the histograms this job writes rebin onto the model's [3, 64, 64]
 # maps with no interpolation. Source of truth for all three numbers is
 # beamline-simulation/psm/psm_scan_config.py (X_WINDOW, A_WINDOW, NBINS_2D),
@@ -661,6 +686,18 @@ def check():
             os.path.basename(str(p)) for p in ODB_SPECS}:
         problems.append("PSM_GEOMETRY_TRANS has 'COND:isel' but ODB_SPECS has no "
                         "bt2026_isel.json, so nothing maps the isel table.")
+    if int(PSM_WEIGHT_STRATEGY) not in (0, 1, 2):
+        problems.append(f"PSM_WEIGHT_STRATEGY is {PSM_WEIGHT_STRATEGY}: it must be 0 (weight "
+                        "1 for every tracklet), 1 (L1/L2 window containment) or 2 (also the "
+                        "track's stop-layer depth).")
+    if int(PSM_WEIGHT_STRATEGY) >= 1 and not (PSM_DECODE and PSM_GEOMETRY_BASE):
+        problems.append("PSM_WEIGHT_STRATEGY >= 1 needs PIGeometrySvc for the L1/L2 plane "
+                        "footprints: set PSM_DECODE and PSM_GEOMETRY_BASE, or fall back to "
+                        "strategy 0.")
+    if int(PSM_WEIGHT_STRATEGY) >= 1 and "COND:isel" not in PSM_GEOMETRY_TRANS:
+        problems.append("PSM_WEIGHT_STRATEGY >= 1 but PSM_GEOMETRY_TRANS has no 'COND:isel': "
+                        "every run is then treated as sitting at the design stage position, "
+                        "which is silently wrong for any run that is not.")
     wants_calib = bool(WD_ALIGN_TABLE) or bool(WD_ECAL_TABLE)
     if WD_ENABLED and wants_calib and not (WD_ALIGN_TABLE and WD_ECAL_TABLE):
         problems.append("PIWDCalibrator needs BOTH WD_ALIGN_TABLE and WD_ECAL_TABLE; "
@@ -764,6 +801,12 @@ if PSM_DECODE:
     tools.append(musip)
 
 algorithms = [PIMidasDecoder(decoders=tools)]
+
+# Built once and shared by PIPSMComputeWeight, PIPSMAllTrackReco and the MuPix
+# monitor, so the three algorithms' acceptance windows agree with each other.
+_PSM_CONFIG_X = [float(p[0]) for p in PSM_POSITIONS_MM]
+_PSM_CONFIG_Y = [float(p[1]) for p in PSM_POSITIONS_MM]
+
 if WD_ENABLED and ODB_SPECS and SETTINGS_SUMMARY:
     algorithms.append(PIWDSettingsSummary(Tag=WD_TAG) if WD_TAG else PIWDSettingsSummary())
 
@@ -844,7 +887,12 @@ if PSM_MUPIX_MONITOR:
         SlopeRange=float(PSM_MUPIX_SLOPE_RANGE_MRAD),
         ExpandedPosRange=float(PSM_MUPIX_EXPANDED_RANGE_MM),
         CentralSlopeRange=float(PSM_MUPIX_CENTRAL_SLOPE_MRAD),
-        AllPairs=int(PSM_MUPIX_ALL_PAIRS))
+        AllPairs=int(PSM_MUPIX_ALL_PAIRS),
+        # min(strategy, 1): the monitor has no scintillators, so it has no
+        # stop-layer depth for strategy 2's extra check.
+        WeightStrategy=min(int(PSM_WEIGHT_STRATEGY), 1),
+        ConfigX=_PSM_CONFIG_X, ConfigY=_PSM_CONFIG_Y,
+        Margin=float(PSM_WEIGHT_MARGIN_MM))
     if _MUPIX_TIMEWALK:
         # The all-pairs timewalk reads the SMA hits as an optional input: the
         # sequencer stays gated on the MuPix hits alone, and a frame with no
@@ -902,7 +950,10 @@ if PSM_RECO:
         lClusterDistMm=float(PSM_L_CLUSTER_DIST_MM),
         dropCrosstalkGhosts=bool(PSM_DROP_CROSSTALK_GHOSTS),
         PixelPitch=float(PSM_QUAD_PIXEL_PITCH),
-        Timewalk=int(bool(PSM_TIMEWALK)))
+        Timewalk=int(bool(PSM_TIMEWALK)),
+        WeightStrategy=int(PSM_WEIGHT_STRATEGY),
+        ConfigX=_PSM_CONFIG_X, ConfigY=_PSM_CONFIG_Y,
+        Margin=float(PSM_WEIGHT_MARGIN_MM))
     if PSM_CHANNEL_MAP_TAG:
         all_reco.ConditionsTag = PSM_CHANNEL_MAP_TAG
     if PSM_DECODE and PSM_GEOMETRY_BASE:
@@ -918,8 +969,12 @@ if PSM_RECO:
     weight_reco = PIPSMComputeWeight(
         input=all_reco.output, output=_TES_PSM_WEIGHTS,
         Strategy=int(PSM_WEIGHT_STRATEGY), DistanceL12=float(PSM_DISTANCE_L12),
-        ConfigX=[float(p[0]) for p in PSM_POSITIONS_MM],
-        ConfigY=[float(p[1]) for p in PSM_POSITIONS_MM], LayerThr=float(PSM_LAYER_THR))
+        ConfigX=_PSM_CONFIG_X, ConfigY=_PSM_CONFIG_Y,
+        Margin=float(PSM_WEIGHT_MARGIN_MM), LayerThr=float(PSM_LAYER_THR))
+    if PSM_DECODE and PSM_GEOMETRY_BASE:
+        # Plane footprints for the acceptance windows, set only when
+        # PIGeometrySvc was actually created above; required when Strategy >= 1.
+        weight_reco.GeometrySvc = "PIGeometrySvc"
     tag_reco = PIPSMDelayedCoincidence(
         input=all_reco.output, weights=weight_reco.output,
         WindowMin=float(PSM_DELAYED_WINDOW_NS[0]), WindowMax=float(PSM_DELAYED_WINDOW_NS[1]),

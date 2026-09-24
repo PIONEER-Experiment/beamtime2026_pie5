@@ -55,7 +55,8 @@ class ODBRequirement:
         return False
 
     def wait(self):
-        self.seq.wait_odb(self.path, self.op, self.target, self.upper, self.stable_for, self.timeout)
+        self.seq.wait_odb(self.path, self.op, self.target, self.upper, self.stable_for)
+        #self.seq.wait_odb(self.path, self.op, self.target, self.upper, self.stable_for, self.timeout)
 
 @dataclass
 class ODBRequirementCollection:

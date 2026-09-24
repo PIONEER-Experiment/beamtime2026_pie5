@@ -26,8 +26,11 @@ def execute_run(seq : SequenceClient):
     # The wait_seconds needs to be replaced by a more reasonable
     # wait until completion logic, e.g. total number of events
     # sent by a specific frontend or some integrated beam quantity.
-    seq.wait_odb("/Equipment/WDWaveforms/Statistics/Events sent", ">", num_ev)
-    seq.stop_run()
+    while seq.odb_get("/Runinfo/State") == midas.STATE_RUNNING:
+        if seq.odb_get("/Equipment/WDWaveforms/Statistics/Events sent") > num_ev:
+            seq.stop_run()
+        else:
+            seq.wait_seconds(1)
     # Again, fail save as the nearline daemon should have
     # picked up everything during transition.
     db_interface.end_of_midas_run(run_id)
