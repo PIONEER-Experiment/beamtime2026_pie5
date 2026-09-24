@@ -25,8 +25,9 @@ def load_arcus_config(seq : SequenceClient, cfg_key : str, aConfig : dict):
     return cfg_val.ODBRequirement(
                 seq = seq,
                 path = config_odb_paths[cfg_key] + "/Variables/Measured",
-                op = "==",
-                target =  xpos,
+                op = "between",
+                target =  xpos - 0.01,
+                upper =   xpos + 0.01,
                 timeout = 60
             )
 
