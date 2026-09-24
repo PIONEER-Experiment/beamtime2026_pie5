@@ -422,13 +422,18 @@ PSM_POSITIONS_MM = [(0.0, 0.0), (17.0, 17.0), (-17.0, 17.0), (-17.0, -17.0), (17
 # inside its planes, so a small error in the footprint or the stage position does
 # not decide whether a track near an edge counts once or twice.
 PSM_WEIGHT_MARGIN_MM = 2.0
-# Weighting strategy. 0: every tracklet gets weight 1. 1: weight 1/N, N the
-# number of PSM_POSITIONS_MM windows containing the track at both L1 and L2,
-# where each window is the conditions footprint (PIGeometrySvc) of the L1/L2
-# plane moved from this run's own stage position to that config position and
-# eroded by PSM_WEIGHT_MARGIN_MM. 2: also require containment at the track's
-# stop-layer depth (PIPSMAllTrackReco only; the MuPix monitor has no
-# scintillators to define a stop layer and is capped at min(strategy, 1)).
+# Weighting strategy. 0: every tracklet gets weight 1. 1: weight 0 unless the
+# track is inside this run's own window at both L1 and L2, else 1/N, N the
+# number of PSM_POSITIONS_MM windows containing it at both L1 and L2, where
+# each window is the conditions footprint (PIGeometrySvc) of the L1/L2 plane
+# moved from this run's own stage position to that config position and eroded
+# by PSM_WEIGHT_MARGIN_MM. Over the runs of a scan the weights a trajectory
+# would receive then sum to 1 wherever at least one run can see it. A run at
+# none of PSM_POSITIONS_MM (within 0.01 mm) counts its own window as one more
+# position and warns that its weights will not sum to 1 with the scan.
+# 2: also require containment at the track's stop-layer depth
+# (PIPSMAllTrackReco only; the MuPix monitor has no scintillators to define a
+# stop layer and is capped at min(strategy, 1)).
 # Strategies 1 and 2 need PSM_GEOMETRY_TRANS to include "COND:isel", or every
 # run is silently treated as sitting at the design position.
 PSM_WEIGHT_STRATEGY = 1
