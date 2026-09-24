@@ -272,6 +272,13 @@ PSM_QUAD_TIME_BIN_NS = 8.0
 # not yet in the table; a wrong value puts every counter hit and RF pulse at a
 # time no MuPix hit shares.
 PSM_SMA_COARSE_SHIFT = None
+# Raw-word diagnostics of the SMA stream, booked by the decoder under
+# histograms/musip/sma_*: words per channel, words per frame, frame span and the
+# gap between frames (live time), the coarse-minus-fine time difference per
+# channel and the fine-bit occupancy. Counts only, so subruns merge. Off leaves
+# them unbooked; the decoder's own default is off, so any other job using it
+# (a MuPix debug job, say) does not grow them.
+PSM_SMA_DIAGNOSTICS = True
 # --- PSM geometry ----------------------------------------------------------
 # Base layer PIGeometrySvc builds the GeoHeader from, as "GEOCOND:<table>".
 PSM_GEOMETRY_BASE = "GEOCOND:psm_geometry"
@@ -720,6 +727,7 @@ if PSM_DECODE:
         musip.current_channel = int(PSM_CURRENT_CHANNEL)
     if PSM_SMA_COARSE_SHIFT is not None:
         musip.coarseShift = int(PSM_SMA_COARSE_SHIFT)
+    musip.smaDiagnostics = bool(PSM_SMA_DIAGNOSTICS)
     tools.append(musip)
 
 algorithms = [PIMidasDecoder(decoders=tools)]
