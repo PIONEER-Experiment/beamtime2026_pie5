@@ -62,8 +62,8 @@ PIHistogramSvc        histograms/<instance>/<name> -> <out>_hists.root
 | `PIWDCalibrator` | `/Event/wd_features`, `wd_rf_phase` | `/Event/wd_hits` | — |
 | `PIWDScalerMonitor` | `/Event/wd_scalers` | — | `readings` and, per board `NNN` in `WD_SCALER_BOARDS`, `rate_vs_time_bNNN`, `mean_rate_bNNN`, `threshold_bNNN`, `fpga_temp_vs_time_bNNN` |
 | `PIPSMMuPixMonitor` | `/Event/muquad` | — | `L<n>_chip<vid>_xy` and `L<n>_xy` per MuPix chip and plane, `hits_per_chip`, `tot_vs_chip`, `L<n>_mult`, and from the L1/L2 coincidence `dt`, `npairs`, `npartners`, `dx`, `dy`, `track_xy`, `xxp`, `yyp`, and the same tracks on fixed axes `track_xy_expanded`, `xxp_central`, `yyp_central` |
-| `PIPSMSMAMonitor` | `/Event/mutrig` | — | `hits_per_counter`, `tot_vs_counter`, `hits_per_event_vs_counter`, `tot`, `fine_time_vs_counter`, `counters` |
-| `PIPSMAllTrackReco` (a `PIPSMSimpleTrackReco`) | `/Event/muquad`, `/Event/mutrig` | `/Event/exp_all_tracks` | `xy`, `xxp`, `yyp`, `nhits`, `nseed` |
+| `PIPSMSMAMonitor` | `/Event/mutrig`; `/Event/rf` (optional, only when `PSM_RF_CHANNEL` is set) | — | `hits_per_counter`, `tot_vs_counter`, `hits_per_event_vs_counter`, `tot`, `fine_time_vs_counter`, `counters`; with the RF input also `rf_period`, `rf_pulses_per_gate`, `rf_offset_vs_pulse`, `rf_phase`, `rf_veto_gap`, `rf_counters` and one `rf_phase_vs_tot_<vid>` per cabled counter |
+| `PIPSMAllTrackReco` (a `PIPSMSimpleTrackReco`) | `/Event/muquad`, `/Event/mutrig`; `/Event/rf` (optional, only when `PSM_RF_CHANNEL` is set) | `/Event/exp_all_tracks` | `xy`, `xxp`, `yyp`, `nhits`, `nseed`; with the RF input also `xy_vs_s1phase` |
 | `PIPSMPatternReco` | `/Event/exp_all_tracks` | `/Event/exp_pattern` | — |
 | `PIPSMComputeWeight` | `/Event/exp_all_tracks` | `/Event/exp_track_weights` | — |
 | `PIPSMDelayedCoincidence` | `/Event/exp_all_tracks`, `exp_track_weights` | `/Event/exp_tagged` | `counters`, `class`, `dt`, `sb`, `stop`, `xp`, `xp_w`, `yp`, `yp_w`, `xy`, `xy_w`, `xxp`, `xxp_w`, `yyp`, `yyp_w` |
@@ -220,6 +220,7 @@ external clock; their names are in `wd_scaler_names`, recorded in the
 | `PSM_RF_CHANNEL` | `6` | MuTrig **raw** readout channel (`chipid*32 + channel`, consumed before the map lookup) carrying the accelerator RF gated by S1. `None` means no `/Event/rf` at all. Follows the SMA board cabling documented in the open interval of `mutrig_channel_map`; it is a job flag, not a conditions interval, so a file from an earlier cabling reprocessed with this job needs an override |
 | `PSM_CURRENT_CHANNEL` | `7` | Same raw-id convention, the proton-current pulse. It is what books `histograms/musip/current`, and **without it `combine_files.py` cannot merge sub-runs**. Same cabling caveat as `PSM_RF_CHANNEL` |
 | `PSM_QUAD_PIXEL_PITCH` | `0.08` | MuPix pitch in mm; the local hit position is `(col + 0.5) * pitch`, so a wrong pitch scales every position and every slope |
+| `PSM_SMA_COARSE_SHIFT` | `None` | The SMA word's coarse field is the time in ns shifted right by this, and it has differed between run ranges (3, i.e. 8 ns ticks, then 15, then 14). `None` takes the run's value from the `sma_coarse_shift` table in `bt2026_psm_readout_map.json`; a run no interval covers stops the job at `initialize()` rather than guessing. An integer here overrides the table, for a run whose shift has been measured (psm-analysis `sma-tot-vs-wd/mupix_phase.py RUN --time-check`) but not yet entered. Wrong, and every counter hit and RF pulse lands at a time no MuPix hit shares: the tracklets lose their L pairs while the SMA monitor's RF plots still look fine. Outside 0-18 is rejected by `check()` |
 | `PSM_QUAD_TIME_BIN_NS` | `8.0` | Hardware fact — MuPix counts in 8 ns. Change it only if the DAQ clock changes. There is no MuTrig counterpart: since the trigger encoding, `PITMidasMusip` reports that time in ns directly and `trigTimeBinWidth` is gone |
 
 ### PSM geometry
@@ -300,6 +301,39 @@ parked id in the map and this number has to follow it.
 Both shares are judgements about **cabled** counters only. The parked index is
 expected to be all 0 and 255 and is never reported for it.
 
+**RF phase.** When `PSM_RF_CHANNEL` is set, the job also hands the monitor
+`/Event/rf` (`RFInput`). The SMA sees the accelerator RF only through S1's gate:
+after each S1 hit a burst of three or four RF pulses about 19.75 ns apart comes
+through. Every S1 hit opens a 125 ns gate (`RFGateNs`); the burst ends about
+115 ns after S1. A gate that holds another S1 hit is **vetoed**:
+the second hit's own burst can land in it, still pass the pulse count and give
+the first hit the wrong phase. Two S1 hits at the same time do not veto each
+other. Among the gates that are not vetoed, the monitor's default rule,
+`RFPhaseRule = "last"`, accepts a gate holding 2 to 4 pulses and takes the
+phase from the **last** pulse in it. The first pulse of a gate is the gate
+opening itself, a fixed ~47 ns after S1, and when an RF edge falls on it the two
+merge into one pulse. The burst length therefore depends on the phase, while
+the last pulse is always a real RF edge. The musip DQM's rule is kept as
+`RFPhaseRule = "dqm"`: exactly four pulses, phase from the third. It keeps only
+the phase region where the burst has four pulses, under a fifth of the S1 hits.
+Under either rule the period is the gap between the last two pulses. Every
+other cabled counter's hit takes the phase of the nearest valid S1 gate within
+50 ns, from the same RF pulse, measured from its own time. Out come `rf_period`,
+`rf_pulses_per_gate` and `rf_offset_vs_pulse` (the burst structure, over the
+gates that were not vetoed), `rf_phase` for S1, `rf_phase_vs_tot_<vid>` per
+cabled counter, `rf_veto_gap` (time from each vetoed S1 hit to the S1 hit inside
+its gate) and `rf_counters` (frames without an RF object, pulses, S1 gates,
+valid gates, other hits, paired hits, vetoed gates). `finalize()` prints the
+vetoed share next to the valid one.
+`rf_period` has read about 19.6 ns under `last` and 20.4 ns under `dqm` against
+the RF's 19.75 ns, so it describes the SMA time stamp and is not a frequency
+measurement. The rule and its parameters are the algorithm's `RF*` properties,
+left at their defaults here. `/Event/rf` exists only in frames where the decoder
+saw an RF pulse, which the monitor treats as an empty pulse list, and when the
+run's map does not cable S1 the monitor says so at `initialize()` and books no
+RF histograms. With `PSM_RF_CHANNEL = None` none of this runs and the monitor is
+unchanged.
+
 ### PSM reco
 
 | setting | default | what goes wrong if it is wrong |
@@ -310,6 +344,7 @@ expected to be all 0 and 255 and is never reported for it.
 | `PSM_REQUIRE_L_HITS` | `0` | Requiring exactly one L1 and one L2 hit discards every delayed tracklet, because delayed pulses have no tracker hits |
 | `PSM_SEED_ON_L` | `0` | Source runs only: seed tracklets on L1 tracker hits and pair each with the nearest L2 hit inside `PSM_LPAIR_WINDOW_NS`. A source on the tracker makes L1/L2 coincidences with no scintillator involved, and both scintillator-seeded modes attach L hits only to a scintillator cluster, so they reconstruct nothing from such a run. On in beam running it throws away the scintillator seed that defines a particle |
 | `PSM_LPAIR_WINDOW_NS` | `40.0` | L1 to L2 half-window in ns for that mode. The two-plane correlation from a source is much broader than the tracker time resolution, so this is generous on purpose; inert while `PSM_SEED_ON_L` is `0` |
+| `PSM_L_WINDOW_BEFORE_NS` / `PSM_L_WINDOW_AFTER_NS` | `100.0` / `160.0` | A scintillator cluster at `t` takes its L1/L2 hits from `[t - before, t + after)` (`thrMupix` / `thrMupixUpper`). Measured with the SMA and MuPix times on one base, t(MuPix) − t(S1) has a sharp edge at −90 ns, peaks at −52 ns and has a timewalk tail to about +150 ns, so the window opens just before the edge and closes past the tail. Too narrow and prompt tracklets lose their L pair; too wide and more of them see a second hit on one plane and are flagged ambiguous. The S-S clustering window (`thrScint`, 2 ns) is separate and untouched. An empty window is rejected by `check()` |
 | `PSM_AGGREGATE` | `1` | Fills the phase-space histograms inside the algorithm while the data is in memory. This is what makes the job a monitoring job rather than a converter |
 | `PSM_AGGREGATE_PROMPT_ONLY` | `1` | Restricts that filling to prompt-like tracklets: an unambiguous L1/L2 pair **and** at least one prompt-channel hit, the prompt channel being whatever `PromptChannel = -1` in the channel map resolves to (S1 on bt2026). Under a seeded configuration the seed already guarantees both and this changes nothing. In the unseeded mode this job runs (`PSM_SEED_ON = -1`) it is what keeps `PIPSMAllTrackReco`'s TH3s meaning "prompt tracks": off, an isolated delayed pulse forms its own tracklet with no L pair, its position is a sentinel, and it piles into the overflow bins of every phase-space plot |
 | `PSM_DISTANCE_L12` | `30.0` | L1 → L2 lever arm in mm, used to turn `x2 − x1` into a slope. Must match the telescope as built or every angle is scaled wrong. Source of truth: `beamline-simulation/psm/psm_scan_config.py` `DIST_L12_MM` |
@@ -321,6 +356,22 @@ expected to be all 0 and 255 and is never reported for it.
 | `PSM_PHASE_SPACE_BINS` | `320` | Bins per axis of the tagged `xy`/`xxp`/`yyp` TH2Ds. Must be a positive multiple of 64 or `check()` refuses to start: 320 = 5 x 64, so the histogram rebins onto the minitwin's 64-bin maps without splitting a bin. Source of truth: `beamline-simulation/psm/psm_scan_config.py` `NBINS_2D` |
 | `PSM_PHASE_SPACE_POS_RANGE_MM` | `37.0` | Half-width of the x/y axis in mm, applied to both PSM algorithms. This is the minitwin det10 window (`psm_scan_config.py` `X_WINDOW`), not a display choice — move it and the histograms stop being model input. The algorithm's own default, 2.5, is a single-position zoom |
 | `PSM_PHASE_SPACE_SLOPE_RANGE_MRAD` | `950.0` | Half-width of the x'/y' axis in **mrad** (`psm_scan_config.py` `A_WINDOW`), likewise on both algorithms. The 1D `xp`/`yp` spectra keep their own narrower `SlopeRange`: they are the shift zoom, not model input |
+
+**S1 RF phase of a tracklet.** With `PSM_RF_CHANNEL` set, `PIPSMAllTrackReco`
+also reads `/Event/rf` (`RFInput`) and gives every tracklet holding an S1 hit the
+RF phase of its earliest S1 hit, in the new `s1rfphase` column of
+`/Event/exp_all_tracks` (NaN when the tracklet has no S1 hit, the gate is not
+valid, or another S1 hit of the frame lies inside it). The rule is the SMA
+monitor's, with the same `RF*` property names and defaults (the last pulse of a
+2-4 pulse gate in the 125 ns after S1, with the same S1 veto), so the two
+phases agree. The prompt tracklets that fill `xy` and have a valid phase also
+fill `xy_vs_s1phase`, a TH3F of (x at L1, y at L1, S1 RF phase) on `xy`'s 64-bin
+x/y grid and one bin per ns over the (t, t + RFGateNs] gate, 0.5 to 125.5 ns by
+default. The phase axis follows `RFGateNs` unless `nbinsS1Phase` is set non-zero,
+in which case `s1PhaseMin`/`s1PhaseMax` apply. The SMA time is a whole number of
+ns, so every whole-ns window is a whole number of bins, and bin n holds phase n
+ns. A MuPix map for any phase window is a projection of it; for [90, 105) ns,
+`h.GetZaxis().SetRange(90, 104); h.Project3D("yx")`.
 
 ### Output
 
@@ -537,19 +588,22 @@ problem it finds in one message, rather than the first:
 14. `PSM_SMA_MONITOR` without `PSM_DECODE`: nothing would produce `/Event/mutrig`, and the monitor takes the raw `MUTRIG` channel map from the `PIGeometrySvc` that `PSM_DECODE` creates.
 15. `PSM_SMA_HITS_PER_EVENT_MAX` below 1: it is the top of an axis counting hits per event.
 16. `PSM_SMA_DEGENERATE_TOT_SHARE` or `PSM_SMA_MARKER_TOT_SHARE` outside `(0, 1]`: both are shares of one counter's hits.
-17. A `GEOCOND` base with an empty `PSM_GEOMETRY_FILES`: nothing supplies the table it names.
-18. `COND:isel` in `PSM_GEOMETRY_TRANS` without `bt2026_isel.json` in `ODB_SPECS`.
-19. Exactly one of `WD_ALIGN_TABLE` / `WD_ECAL_TABLE` set: `PIWDCalibrator` needs both.
-20. `WD_ENABLED` with an empty `WD_RF_TABLE`: `PIWDRFPhase` runs first in `WDAnalysisSeq` and `PIWDWaveformAnalysis` reads `/Event/wd_rf_phase`, so the RF table cannot be empty.
-21. `WD_ROLE_TABLE` set with an empty `WD_CONDITIONS_FILES`: nothing would supply the `wd_channel_map` table.
-22. `WD_CHANNEL_SETTINGS_TABLE` set with an empty `ODB_SPECS`: only the begin-of-run ODB dump serves `wd_channel_settings`.
-23. `WD_CAL_CHANNELS` not a subset of `WD_CHANNELS`: they would have no features to calibrate.
-24. `WD_SCALER_MONITOR` without `WD_ENABLED`: nothing would produce `/Event/wd_scalers`.
-25. `WD_SCALER_TIME_BIN_S` not positive or not below `WD_SCALER_TIME_MAX_S`, or a serial listed twice in `WD_SCALER_BOARDS`.
-26. `WD_RF_REFINE` on with `WD_RF_REFINE_POINTS` below 2: a scan needs at least 2 points.
-27. `PSM_PHASE_SPACE_BINS` not a positive multiple of 64: the phase-space histograms would not rebin onto the 64-bin minitwin export exactly.
-28. `PSM_PHASE_SPACE_POS_RANGE_MM` or `PSM_PHASE_SPACE_SLOPE_RANGE_MRAD` not positive: both are half-widths of a symmetric axis.
-29. `OUTPUT_LEVEL` not one of `DEBUG`, `ERROR`, `INFO`, `WARNING`.
+17. `PSM_SMA_COARSE_SHIFT` neither `None` nor an integer 0-18: above 18 the coarse field no longer pins the fine field's wrap.
+18. `PSM_RF_CHANNEL` not an integer, outside 0-15, or equal to `PSM_CURRENT_CHANNEL`: the SMA word's channel field is 4 bits, and the decoder takes the RF channel first, so the current pulses would become RF pulses.
+19. A `GEOCOND` base with an empty `PSM_GEOMETRY_FILES`: nothing supplies the table it names.
+20. `COND:isel` in `PSM_GEOMETRY_TRANS` without `bt2026_isel.json` in `ODB_SPECS`.
+21. Exactly one of `WD_ALIGN_TABLE` / `WD_ECAL_TABLE` set: `PIWDCalibrator` needs both.
+22. `WD_ENABLED` with an empty `WD_RF_TABLE`: `PIWDRFPhase` runs first in `WDAnalysisSeq` and `PIWDWaveformAnalysis` reads `/Event/wd_rf_phase`, so the RF table cannot be empty.
+23. `WD_ROLE_TABLE` set with an empty `WD_CONDITIONS_FILES`: nothing would supply the `wd_channel_map` table.
+24. `WD_CHANNEL_SETTINGS_TABLE` set with an empty `ODB_SPECS`: only the begin-of-run ODB dump serves `wd_channel_settings`.
+25. `WD_CAL_CHANNELS` not a subset of `WD_CHANNELS`: they would have no features to calibrate.
+26. `WD_SCALER_MONITOR` without `WD_ENABLED`: nothing would produce `/Event/wd_scalers`.
+27. `WD_SCALER_TIME_BIN_S` not positive or not below `WD_SCALER_TIME_MAX_S`, or a serial listed twice in `WD_SCALER_BOARDS`.
+28. `WD_RF_REFINE` on with `WD_RF_REFINE_POINTS` below 2: a scan needs at least 2 points.
+29. `PSM_PHASE_SPACE_BINS` not a positive multiple of 64: the phase-space histograms would not rebin onto the 64-bin minitwin export exactly.
+30. `PSM_PHASE_SPACE_POS_RANGE_MM` or `PSM_PHASE_SPACE_SLOPE_RANGE_MRAD` not positive: both are half-widths of a symmetric axis.
+31. `PSM_L_WINDOW_BEFORE_NS` and `PSM_L_WINDOW_AFTER_NS` giving an empty L-hit window: no tracklet would get an L pair.
+32. `OUTPUT_LEVEL` not one of `DEBUG`, `ERROR`, `INFO`, `WARNING`.
 
 ## The phase-space histograms are minitwin input
 

@@ -28,10 +28,15 @@ agreement, registered in midas_files/wavedream-scalar-readout/docs/REGISTRY.md.
     |
     +-- PSMSMASeq ------------- gated on /Event/mutrig
     |     PIPSMSMAMonitor      -> histograms only: rate, ToT and fine time per
-    |                             counter, with no pixel hits or tracklets
+    |                             counter, with no pixel hits or tracklets;
+    |                             with PSM_RF_CHANNEL set also reads /Event/rf
+    |                             (optional per frame) for the S1-gated RF
+    |                             phase and RF phase vs ToT per counter
     |
     +-- PSMRecoSeq ------------ gated on /Event/mutrig
-    |     PIPSMSimpleTrackReco   -> /Event/exp_all_tracks   (+ histograms)
+    |     PIPSMSimpleTrackReco   -> /Event/exp_all_tracks   (+ histograms);
+    |                             with PSM_RF_CHANNEL set also reads /Event/rf
+    |                             for each tracklet's S1 RF phase
     |     PIPSMPatternReco       -> /Event/exp_pattern
     |     PIPSMComputeWeight     -> /Event/exp_track_weights
     |     PIPSMDelayedCoincidence-> /Event/exp_tagged       (+ histograms)
@@ -258,6 +263,15 @@ PSM_QUAD_PIXEL_PITCH = 0.08
 # trigger encoding reports its time in ns directly, so PITMidasMusip dropped
 # trigTimeBinWidth along with the 50 ps timestamp it used to scale.
 PSM_QUAD_TIME_BIN_NS = 8.0
+# The SMA trigger word's coarse field is the time in ns shifted right by a number
+# that has differed between run ranges (3, i.e. 8 ns ticks, then 15, then 14).
+# None takes the run's value from the sma_coarse_shift table in
+# bt2026_psm_readout_map.json, and a run no interval of it covers stops the job
+# at initialize. Set an integer here only to process a run whose shift is known
+# (measured with psm-analysis sma-tot-vs-wd/mupix_phase.py RUN --time-check) but
+# not yet in the table; a wrong value puts every counter hit and RF pulse at a
+# time no MuPix hit shares.
+PSM_SMA_COARSE_SHIFT = None
 # --- PSM geometry ----------------------------------------------------------
 # Base layer PIGeometrySvc builds the GeoHeader from, as "GEOCOND:<table>".
 PSM_GEOMETRY_BASE = "GEOCOND:psm_geometry"
@@ -362,6 +376,16 @@ PSM_SEED_ON_L = 0
 # from a source is much broader than the tracker's time resolution, so this is
 # generous on purpose; scan it rather than trusting the default.
 PSM_LPAIR_WINDOW_NS = 40.0
+# Window in ns in which a scintillator cluster takes its L1/L2 hits:
+# [t_S - PSM_L_WINDOW_BEFORE_NS, t_S + PSM_L_WINDOW_AFTER_NS). Measured with the
+# SMA and MuPix times on one base, t(MuPix) - t(S1) has a sharp edge at -90 ns,
+# peaks at -52 ns and has a timewalk tail to about +150 ns over a flat background,
+# so the window opens just before the edge and closes past the tail. The
+# algorithm's own defaults (8 before, thrScint = 2 after) sit entirely on the
+# near side of the edge. The S-S clustering window (thrScint) is separate and
+# stays at its default.
+PSM_L_WINDOW_BEFORE_NS = 100.0
+PSM_L_WINDOW_AFTER_NS = 160.0
 # Fill the phase-space histograms inside the algorithm; this is the monitoring.
 PSM_AGGREGATE = 1
 # Restrict those histograms to prompt-like tracklets: only a tracklet with an
@@ -466,9 +490,9 @@ else:
 _NTUPLE_COMPRESSION = 501
 _NTUPLE_REUSE_ENTRY = True
 
-# TES paths. The first three are the decoding tools' own defaults, and changing a
-# tool's path property without changing these breaks the sequencer gates silently.
-# The last two are names this job chooses and passes to the PSM algorithms
+# TES paths. The first five are the decoding tools' own defaults, and changing a
+# tool's path property without changing these breaks the sequencer gates (and the
+# SMA monitor's RF input) silently. The last two are names this job chooses and passes to the PSM algorithms
 # explicitly; their defaults are /Event/tracker_fr, /Event/dtar_fr and
 # /Event/exp_simple_tracks, which are the simulation's names, so the assignment is
 # what puts the testbeam chain on one set of paths.
@@ -476,6 +500,7 @@ _TES_WAVEFORM = "/Event/wd_waveform"
 _TES_SCALERS = "/Event/wd_scalers"
 _TES_MUQUAD = "/Event/muquad"
 _TES_MUTRIG = "/Event/mutrig"
+_TES_RF = "/Event/rf"
 _TES_PSM_TRACKS = "/Event/exp_all_tracks"
 _TES_PSM_WEIGHTS = "/Event/exp_track_weights"
 _TIMEBASE_TABLE = "wd_timebase"
@@ -570,6 +595,29 @@ def check():
         problems.append(f"PSM_SMA_DEGENERATE_TOT_SHARE ({PSM_SMA_DEGENERATE_TOT_SHARE}) and "
                         f"PSM_SMA_MARKER_TOT_SHARE ({PSM_SMA_MARKER_TOT_SHARE}) are shares of "
                         "one counter's hits; both must be inside (0, 1].")
+    if PSM_SMA_COARSE_SHIFT is not None:
+        try:
+            shift_ok = (int(PSM_SMA_COARSE_SHIFT) == PSM_SMA_COARSE_SHIFT
+                        and 0 <= int(PSM_SMA_COARSE_SHIFT) <= 18)
+        except (TypeError, ValueError):
+            shift_ok = False
+        if not shift_ok:
+            problems.append(f"PSM_SMA_COARSE_SHIFT is {PSM_SMA_COARSE_SHIFT!r}: it must be None "
+                            "(from the conditions) or an integer 0-18; above 18 the coarse "
+                            "field no longer pins the fine field's 2^20 ns wrap.")
+    if PSM_RF_CHANNEL is not None:
+        try:
+            rf_ok = (int(PSM_RF_CHANNEL) == PSM_RF_CHANNEL and 0 <= int(PSM_RF_CHANNEL) <= 15
+                     and (PSM_CURRENT_CHANNEL is None
+                          or int(PSM_RF_CHANNEL) != int(PSM_CURRENT_CHANNEL)))
+        except (TypeError, ValueError):
+            rf_ok = False
+        if not rf_ok:
+            problems.append(f"PSM_RF_CHANNEL is {PSM_RF_CHANNEL!r}: it must be an integer SMA "
+                            "raw channel (0-15, the word's 4-bit channel field) and not "
+                            f"PSM_CURRENT_CHANNEL ({PSM_CURRENT_CHANNEL!r}), or /Event/rf holds "
+                            "no RF or the wrong pulses and the SMA monitor's RF phase is "
+                            "meaningless.")
     if PSM_DECODE and PSM_GEOMETRY_BASE and not PSM_GEOMETRY_FILES:
         problems.append("PSM_GEOMETRY_BASE is a GEOCOND layer but PSM_GEOMETRY_FILES is "
                         "empty: nothing would supply the table it names.")
@@ -619,6 +667,10 @@ def check():
                         f"PSM_PHASE_SPACE_SLOPE_RANGE_MRAD "
                         f"({PSM_PHASE_SPACE_SLOPE_RANGE_MRAD}) are half-widths of a "
                         "symmetric axis, so both must be positive.")
+    if PSM_RECO and not (float(PSM_L_WINDOW_AFTER_NS) > -float(PSM_L_WINDOW_BEFORE_NS)):
+        problems.append(f"PSM_L_WINDOW_BEFORE_NS ({PSM_L_WINDOW_BEFORE_NS}) and "
+                        f"PSM_L_WINDOW_AFTER_NS ({PSM_L_WINDOW_AFTER_NS}) make the L-hit window "
+                        "[t - before, t + after) empty, so no tracklet would get an L pair.")
     if OUTPUT_LEVEL not in _LEVELS:
         problems.append(f"OUTPUT_LEVEL '{OUTPUT_LEVEL}' is not one of {sorted(_LEVELS)}.")
     if problems:
@@ -666,6 +718,8 @@ if PSM_DECODE:
         musip.rf_channel = int(PSM_RF_CHANNEL)
     if PSM_CURRENT_CHANNEL is not None:
         musip.current_channel = int(PSM_CURRENT_CHANNEL)
+    if PSM_SMA_COARSE_SHIFT is not None:
+        musip.coarseShift = int(PSM_SMA_COARSE_SHIFT)
     tools.append(musip)
 
 algorithms = [PIMidasDecoder(decoders=tools)]
@@ -762,12 +816,23 @@ if PSM_SMA_MONITOR:
     # about it is set here. ParkedVid is the Degrader id that map parks every
     # uncabled channel on: the idle FEB words land there, which is why that one
     # index is left out of the ToT judgements.
+    #
+    # With the RF channel decoded, the monitor also pairs each S1 hit with the
+    # S1-gated RF burst after it and fills the RF phase vs ToT per counter. The
+    # RF* properties stay at their defaults: a 125 ns gate after each S1 hit,
+    # vetoed when another S1 hit lies inside it (that hit's burst can land in
+    # it), and the phase from the last RF pulse of a gate holding 2-4 pulses
+    # (RFPhaseRule "last"; "dqm" is the musip DQM's four-pulse rule).
+    # /Event/rf is read as an optional input: a frame in which the decoder saw
+    # no RF has none.
     sma_monitor = PIPSMSMAMonitor(
         input=_TES_MUTRIG, GeometrySvc="PIGeometrySvc", RawMap="MUTRIG",
         ParkedVid=2002,
         HitsPerEventMax=int(PSM_SMA_HITS_PER_EVENT_MAX),
         DegenerateTotShare=float(PSM_SMA_DEGENERATE_TOT_SHARE),
         MarkerTotShare=float(PSM_SMA_MARKER_TOT_SHARE))
+    if PSM_RF_CHANNEL is not None:
+        sma_monitor.RFInput = _TES_RF
     algorithms.append(Gaudi__Sequencer("PSMSMASeq", RequireObjects=[_TES_MUTRIG],
                                        Members=[sma_monitor]))
 
@@ -777,6 +842,7 @@ if PSM_RECO:
         output=_TES_PSM_TRACKS, ConditionsTable=PSM_CHANNEL_MAP_TABLE,
         SeedOn=int(PSM_SEED_ON), requireLHits=int(PSM_REQUIRE_L_HITS),
         seedOnL=int(PSM_SEED_ON_L), thrLPair=float(PSM_LPAIR_WINDOW_NS),
+        thrMupix=float(PSM_L_WINDOW_BEFORE_NS), thrMupixUpper=float(PSM_L_WINDOW_AFTER_NS),
         aggregate=int(PSM_AGGREGATE),
         AggregatePromptOnly=int(PSM_AGGREGATE_PROMPT_ONLY),
         distanceL12=float(PSM_DISTANCE_L12),
@@ -789,6 +855,12 @@ if PSM_RECO:
         # Plane membership (which VID is L1 vs L2) from the psm_geometry table,
         # set only when PIGeometrySvc was actually created above.
         all_reco.GeometrySvc = "PIGeometrySvc"
+    if PSM_RF_CHANNEL is not None:
+        # Each tracklet's S1 hit gets its RF phase (s1rfphase) under the same
+        # rule and defaults as the SMA monitor's rf_phase, and the prompt
+        # tracklets fill xy_vs_s1phase, so a MuPix map for any phase window is
+        # a projection of it. /Event/rf is optional per frame, as there.
+        all_reco.RFInput = _TES_RF
     weight_reco = PIPSMComputeWeight(
         input=all_reco.output, output=_TES_PSM_WEIGHTS,
         Strategy=int(PSM_WEIGHT_STRATEGY), DistanceL12=float(PSM_DISTANCE_L12),
