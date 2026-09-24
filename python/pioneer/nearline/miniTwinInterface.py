@@ -74,8 +74,8 @@ class miniTwinInterface:
             "schema" : CONTEXT_SCHEMA,
             "context_id" : ctxt,
             "settings" : {
-                "knobs" : {k : v for k,v,t in zip(beam_hdr.GetNames(), beam_hdr.GetDemand(), beam_hdr.GetTypes()) if t in configurable_devices},
-                "readback" : {k : v for k,v,t in zip(beam_hdr.GetNames(), beam_hdr.GetMeasured(), beam_hdr.GetTypes()) if t in configurable_devices}
+                "knobs" : {str(k) : v for k,v,t in zip(beam_hdr.GetNames(), beam_hdr.GetDemand(), beam_hdr.GetTypes()) if t in configurable_devices},
+                "readback" : {str(k) : v for k,v,t in zip(beam_hdr.GetNames(), beam_hdr.GetMeasured(), beam_hdr.GetTypes()) if t in configurable_devices}
             },
             "measurement" : {
                 "inline" : {
