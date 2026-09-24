@@ -61,7 +61,7 @@ PIHistogramSvc        histograms/<instance>/<name> -> <out>_hists.root
 | `PIWDWaveformAnalysis` | `/Event/wd_waveform`, `wd_channel_time`, `wd_rf_phase` | `/Event/wd_features` | `ppamp`, `le_time`, `ppamp_vs_channel`; with a role table also `baseline_vs_channel`, `baseline_rms_vs_channel`, `fired_vs_channel`, `coincidence` and, per scintillator channel, `charge_vs_amp_chNN`, `letime_vs_amp_chNN`, `charge_vs_rfphase_chNN` |
 | `PIWDCalibrator` | `/Event/wd_features`, `wd_rf_phase` | `/Event/wd_hits` | — |
 | `PIWDScalerMonitor` | `/Event/wd_scalers` | — | `readings` and, per board `NNN` in `WD_SCALER_BOARDS`, `rate_vs_time_bNNN`, `mean_rate_bNNN`, `threshold_bNNN`, `fpga_temp_vs_time_bNNN` |
-| `PIPSMMuPixMonitor` | `/Event/muquad` | — | `L<n>_chip<vid>_xy` and `L<n>_xy` per MuPix chip and plane, `hits_per_chip`, `tot_vs_chip`, `L<n>_mult`, and from the L1/L2 coincidence `dt`, `npairs`, `npartners`, `dx`, `dy`, `track_xy`, `xxp`, `yyp` |
+| `PIPSMMuPixMonitor` | `/Event/muquad` | — | `L<n>_chip<vid>_xy` and `L<n>_xy` per MuPix chip and plane, `hits_per_chip`, `tot_vs_chip`, `L<n>_mult`, and from the L1/L2 coincidence `dt`, `npairs`, `npartners`, `dx`, `dy`, `track_xy`, `xxp`, `yyp`, and the same tracks on fixed axes `track_xy_expanded`, `xxp_central`, `yyp_central` |
 | `PIPSMSMAMonitor` | `/Event/mutrig` | — | `hits_per_counter`, `tot_vs_counter`, `hits_per_event_vs_counter`, `tot`, `fine_time_vs_counter`, `counters` |
 | `PIPSMAllTrackReco` (a `PIPSMSimpleTrackReco`) | `/Event/muquad`, `/Event/mutrig` | `/Event/exp_all_tracks` | `xy`, `xxp`, `yyp`, `nhits`, `nseed` |
 | `PIPSMPatternReco` | `/Event/exp_all_tracks` | `/Event/exp_pattern` | — |
@@ -254,6 +254,8 @@ the chip index that `hits_per_chip` and `tot_vs_chip` run over.
 | `PSM_MUPIX_PIXELS_PER_BIN` | `1` | Pixels per bin of every hit map. 1 is one bin per pixel — 256 x 250 per chip and 512 x 500 per plane on bt2026, about 4 MB of histogram, and the granularity at which a dead column or a hot pixel is visible. `n` divides the bin count of every map by `n²` |
 | `PSM_MUPIX_DT_RANGE_NS` / `PSM_MUPIX_DT_BINS` | `204.0` / `51` | Half-width and bins of the `dt` histogram. 204 over 51 bins puts each 8 ns MuPix tick at a bin **centre**; a round 200 puts it on a bin edge, where ROOT's edge convention splits the coincidence peak across two bins |
 | `PSM_MUPIX_SLOPE_RANGE_MRAD` | `0.0` | Half-width in mrad of this module's own x'/y' axes. `0` derives the full geometric acceptance of the two planes at the lever arm (±1365 / ±1333 mrad on bt2026), so nothing a pair can produce reaches an overflow bin. Set it to `PSM_PHASE_SPACE_SLOPE_RANGE_MRAD` to read these next to `PIPSMAllTrackReco`'s phase space instead, and expect the tails outside that window to pile up |
+| `PSM_MUPIX_EXPANDED_RANGE_MM` | `41.6` | Half-width in mm of the fixed x/y axes of `track_xy_expanded`, `xxp_central` and `yyp_central` (260 bins, 0.32 mm = 4 pixels). It covers the standard five-point scan at +-17 mm (`PSM_POSITIONS_MM`) and the +-20 mm 3x3 grid, plus the 20.48 mm half-width of a plane (40.48 mm), rounded up to a whole number of 0.32 mm bins. The monitor shifts the axis by a quarter pixel (0.02 mm), so a half-pixel stage offset such as 17 mm puts no pixel centre on a bin edge. It is fixed rather than taken from the plane footprint so that every run of a stage scan books the same axes and the runs merge bin by bin. Too small, and tracks go to the overflow bins; `initialize()` warns when the L1 footprint is not inside it |
+| `PSM_MUPIX_CENTRAL_SLOPE_MRAD` | `100.0` | Rough half-width in mrad of the x'/y' axes of `xxp_central` and `yyp_central`. A slope from two pixel planes only takes whole multiples of one pixel over the lever arm (2.67 mrad on bt2026), so the monitor books one bin per step, each step at a bin **centre**, and rounds this up to a whole number of steps: 100 gives 77 bins over ±102.67 mrad. A fixed bin width would show a comb of alternately full and empty bins instead |
 | `PSM_MUPIX_ALL_PAIRS` | `0` | Pairs every L2 hit inside the window instead of only the one nearest in time. Each extra pair is a combinatorial ghost carrying a slope no particle had, so this is a diagnostic for a busy run, not a production setting. `npartners` reports the ambiguity either way |
 
 `PixelPitch` is passed `PSM_QUAD_PIXEL_PITCH`, the same number the decoder
@@ -531,22 +533,23 @@ problem it finds in one message, rather than the first:
 10. `PSM_MUPIX_PIXELS_PER_BIN` below 1: it is how many pixels share one bin of a hit map.
 11. `PSM_MUPIX_DT_RANGE_NS` or `PSM_MUPIX_DT_BINS` not positive: a half-width and a bin count.
 12. `PSM_MUPIX_WINDOW_NS` not positive: a non-positive half-window pairs nothing at all.
-13. `PSM_SMA_MONITOR` without `PSM_DECODE`: nothing would produce `/Event/mutrig`, and the monitor takes the raw `MUTRIG` channel map from the `PIGeometrySvc` that `PSM_DECODE` creates.
-14. `PSM_SMA_HITS_PER_EVENT_MAX` below 1: it is the top of an axis counting hits per event.
-15. `PSM_SMA_DEGENERATE_TOT_SHARE` or `PSM_SMA_MARKER_TOT_SHARE` outside `(0, 1]`: both are shares of one counter's hits.
-16. A `GEOCOND` base with an empty `PSM_GEOMETRY_FILES`: nothing supplies the table it names.
-17. `COND:isel` in `PSM_GEOMETRY_TRANS` without `bt2026_isel.json` in `ODB_SPECS`.
-18. Exactly one of `WD_ALIGN_TABLE` / `WD_ECAL_TABLE` set: `PIWDCalibrator` needs both.
-19. `WD_ENABLED` with an empty `WD_RF_TABLE`: `PIWDRFPhase` runs first in `WDAnalysisSeq` and `PIWDWaveformAnalysis` reads `/Event/wd_rf_phase`, so the RF table cannot be empty.
-20. `WD_ROLE_TABLE` set with an empty `WD_CONDITIONS_FILES`: nothing would supply the `wd_channel_map` table.
-21. `WD_CHANNEL_SETTINGS_TABLE` set with an empty `ODB_SPECS`: only the begin-of-run ODB dump serves `wd_channel_settings`.
-22. `WD_CAL_CHANNELS` not a subset of `WD_CHANNELS`: they would have no features to calibrate.
-23. `WD_SCALER_MONITOR` without `WD_ENABLED`: nothing would produce `/Event/wd_scalers`.
-24. `WD_SCALER_TIME_BIN_S` not positive or not below `WD_SCALER_TIME_MAX_S`, or a serial listed twice in `WD_SCALER_BOARDS`.
-25. `WD_RF_REFINE` on with `WD_RF_REFINE_POINTS` below 2: a scan needs at least 2 points.
-26. `PSM_PHASE_SPACE_BINS` not a positive multiple of 64: the phase-space histograms would not rebin onto the 64-bin minitwin export exactly.
-27. `PSM_PHASE_SPACE_POS_RANGE_MM` or `PSM_PHASE_SPACE_SLOPE_RANGE_MRAD` not positive: both are half-widths of a symmetric axis.
-28. `OUTPUT_LEVEL` not one of `DEBUG`, `ERROR`, `INFO`, `WARNING`.
+13. `PSM_MUPIX_EXPANDED_RANGE_MM` or `PSM_MUPIX_CENTRAL_SLOPE_MRAD` not positive: both are half-widths of symmetric axes.
+14. `PSM_SMA_MONITOR` without `PSM_DECODE`: nothing would produce `/Event/mutrig`, and the monitor takes the raw `MUTRIG` channel map from the `PIGeometrySvc` that `PSM_DECODE` creates.
+15. `PSM_SMA_HITS_PER_EVENT_MAX` below 1: it is the top of an axis counting hits per event.
+16. `PSM_SMA_DEGENERATE_TOT_SHARE` or `PSM_SMA_MARKER_TOT_SHARE` outside `(0, 1]`: both are shares of one counter's hits.
+17. A `GEOCOND` base with an empty `PSM_GEOMETRY_FILES`: nothing supplies the table it names.
+18. `COND:isel` in `PSM_GEOMETRY_TRANS` without `bt2026_isel.json` in `ODB_SPECS`.
+19. Exactly one of `WD_ALIGN_TABLE` / `WD_ECAL_TABLE` set: `PIWDCalibrator` needs both.
+20. `WD_ENABLED` with an empty `WD_RF_TABLE`: `PIWDRFPhase` runs first in `WDAnalysisSeq` and `PIWDWaveformAnalysis` reads `/Event/wd_rf_phase`, so the RF table cannot be empty.
+21. `WD_ROLE_TABLE` set with an empty `WD_CONDITIONS_FILES`: nothing would supply the `wd_channel_map` table.
+22. `WD_CHANNEL_SETTINGS_TABLE` set with an empty `ODB_SPECS`: only the begin-of-run ODB dump serves `wd_channel_settings`.
+23. `WD_CAL_CHANNELS` not a subset of `WD_CHANNELS`: they would have no features to calibrate.
+24. `WD_SCALER_MONITOR` without `WD_ENABLED`: nothing would produce `/Event/wd_scalers`.
+25. `WD_SCALER_TIME_BIN_S` not positive or not below `WD_SCALER_TIME_MAX_S`, or a serial listed twice in `WD_SCALER_BOARDS`.
+26. `WD_RF_REFINE` on with `WD_RF_REFINE_POINTS` below 2: a scan needs at least 2 points.
+27. `PSM_PHASE_SPACE_BINS` not a positive multiple of 64: the phase-space histograms would not rebin onto the 64-bin minitwin export exactly.
+28. `PSM_PHASE_SPACE_POS_RANGE_MM` or `PSM_PHASE_SPACE_SLOPE_RANGE_MRAD` not positive: both are half-widths of a symmetric axis.
+29. `OUTPUT_LEVEL` not one of `DEBUG`, `ERROR`, `INFO`, `WARNING`.
 
 ## The phase-space histograms are minitwin input
 
@@ -611,10 +614,10 @@ of `fake_run00913_mutrig.mid` measured 172 kB on disk (33 kB before they were
 widened), because the arrays are mostly exact zeros and compress hard. Each Hive
 slot clones every prototype, so that 7.4 MB is per slot — irrelevant under the
 sequential event loop this job runs, but not free if it ever goes concurrent.
-`PIPSMMuPixMonitor` adds about 4.4 MB uncompressed on top of that — 4.1 MB of it
+`PIPSMMuPixMonitor` adds about 4.8 MB uncompressed on top of that — 4.1 MB of it
 one bin per pixel over eight chips and two planes, which is the price of seeing
 a single dead column, and `PSM_MUPIX_PIXELS_PER_BIN` is the knob that gives it
-back. It compresses at least as hard as the phase space does: on a 400-event
+back. The three fixed-axis track plots are about 0.4 MB of the rest. It compresses at least as hard as the phase space does: on a 400-event
 slice of run 166 the whole histogram file went from 48 kB to 101 kB with the
 module on. The per-plane `L<n>_mult` axes account for most of the rest, and they
 run to 16383 hits per event on purpose — a MuPix readout frame is not one
