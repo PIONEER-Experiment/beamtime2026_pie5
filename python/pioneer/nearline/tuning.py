@@ -328,6 +328,8 @@ class TuningLoop:
         self._last_events = None
         self._last_report = None
         self._last_monitor_error = None
+        #: nearline output tree to use instead of /Nearline/config/Output path
+        self.output_override = None
 
     def restore(self):
         """Take the last proposal id and the active step from the ODB, so a
@@ -398,6 +400,8 @@ class TuningLoop:
 
     @property
     def output_path(self):
+        if self.output_override:
+            return self.output_override
         return odb_value(self.odb, ODB_CONFIG + "/Output path", DEFAULT_OUTPUT_PATH)
 
     @property
@@ -498,11 +502,15 @@ class TuningLoop:
         context_id, files, numbers, header = self.context_parts(run_ids)
         return self.mt.BuildContextFiles(context_id, files, numbers, header, step=step)
 
-    def post_runs(self, run_ids, step=None):
+    def post_runs(self, run_ids, step=None, require_delivery=False):
         """Build the context of `run_ids` and post it through the retry queue.
-        With `step` (the active one), report `posted` and clear the step."""
+        With `step` (the active one), report `posted` and clear the step.
+        With `require_delivery` (the CLI, which has no later retry) raise
+        when the service did not take it, leaving the step as it was."""
         context_id, files, numbers, header = self.context_parts(run_ids)
         context = self.mt.AddContextFiles(context_id, files, numbers, header, step=step)
+        if require_delivery and self.mt.pending:
+            raise RuntimeError("the service did not take context %s" % context_id)
         if step is not None:
             queued = self.mt.pending > 0
             self._report_final(step, "posted", "context %s %s" % (
@@ -660,3 +668,166 @@ def _report_key(report):
     return (report.get("stage"),
             tuple((r.get("run_db_id"), r.get("status")) for r in report.get("runs") or []),
             tuple(sorted((report.get("subruns") or {}).items())))
+
+
+# ---------------------------------------------------------------------------
+# manual path: python -m pioneer.nearline.tuning {schedule,post}
+# ---------------------------------------------------------------------------
+
+class MemoryOdb:
+    """Stand-in ODB for --no-odb: the defaults plus what the command line
+    gives, kept in memory and forgotten at exit."""
+
+    def __init__(self, values=None):
+        self.values = dict(values or {})
+
+    def odb_exists(self, path):
+        return path in self.values
+
+    def odb_get(self, path):
+        return self.values[path]
+
+    def odb_set(self, path, value):
+        self.values[path] = value
+
+
+def _parser():
+    import argparse
+    import os
+
+    # the same options on both commands, after the command name
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--url", default=None,
+                        help="beam-tuning service (default: /Nearline/config/MiniTwin URL)")
+    common.add_argument("--dry-run", action="store_true",
+                        help="print what would be scheduled or sent; write and send nothing")
+    common.add_argument("--no-odb", action="store_true",
+                        help="do not connect to MIDAS: ODB defaults, nothing remembered")
+    common.add_argument("--output-path", default=None,
+                        help="nearline output tree (default: /Nearline/config/Output path)")
+    common.add_argument("--midas-host", default=os.environ.get("MIDAS_SERVER_HOST", "localhost"))
+    common.add_argument("--midas-expt", default=os.environ.get("MIDAS_EXPT_NAME"))
+
+    parser = argparse.ArgumentParser(
+        prog="python -m pioneer.nearline.tuning",
+        description="Drive the tuning loop by hand, exactly as the nearline daemon does.")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sched = sub.add_parser("schedule", parents=[common],
+                           help="take the current proposal once and write its run")
+    sched.add_argument("--since", type=int, default=None,
+                       help="proposal id to ask past (default: /Nearline/MiniTwin/Last proposal id); "
+                            "one less than a proposal id retakes that proposal")
+    post = sub.add_parser("post", parents=[common],
+                          help="post run N's histogram files as a context")
+    post.add_argument("--run", type=int, required=True, help="MIDAS run number")
+    return parser
+
+
+def _connect_odb(args):
+    if args.no_odb:
+        values = {ODB_CONFIG + "/" + k: v for k, v in CONFIG_DEFAULTS.items()}
+        values.update({ODB_STATE + "/" + k: v for k, v in STATE_DEFAULTS.items()})
+        return MemoryOdb(values), None
+    import midas.client
+    client = midas.client.MidasClient("NearlineTuning", host_name=args.midas_host,
+                                      expt_name=args.midas_expt)
+    return client, client
+
+
+def _print_json(obj):
+    import json
+    print(json.dumps(obj, indent=2, default=str))
+
+
+def main(argv=None, db=None, odb=None, http=None, header_reader=None):
+    """The command line.  `db`, `odb`, `http` and `header_reader` replace the
+    real run database, MIDAS client, service client and ROOT header reader
+    (the tests use them)."""
+    from pioneer.nearline.beamtune_client import DEFAULT_URL
+    from pioneer.nearline.miniTwinInterface import miniTwinInterface
+
+    args = _parser().parse_args(argv)
+    client = None
+    if odb is None:
+        odb, client = _connect_odb(args)
+    try:
+        if db is None:
+            import pioneer.rundb.interface
+            db = pioneer.rundb.interface.interface(user="bot", password="bot")
+        if not args.dry_run and not args.no_odb:
+            ensure_odb_keys(odb)
+
+        url = args.url or odb_value(odb, ODB_CONFIG + "/MiniTwin URL", DEFAULT_URL)
+        table = odb_value(odb, ODB_CONFIG + "/MiniTwin updates", "pim1_epics")
+        mt = miniTwinInterface(base_url=url, config_type=table,
+                               logger=lambda m: print("[beamtune] " + m))
+        if http is not None:
+            mt.client = http
+
+        def message(text, is_error=False):
+            print(("ERROR: " if is_error else "") + text)
+
+        loop = TuningLoop(db, mt, odb, message=message,
+                          header_reader=header_reader or read_beamline_header)
+        # a one-off override, not written to the ODB
+        loop.output_override = args.output_path
+        loop.restore()
+
+        if args.command == "schedule":
+            return _cmd_schedule(args, loop, odb, url)
+        return _cmd_post(args, loop, db)
+    finally:
+        if client is not None:
+            client.disconnect()
+
+
+def _cmd_schedule(args, loop, odb, url):
+    if args.since is not None:
+        loop.mt.last_proposal_id = args.since
+    if not args.dry_run and odb_value(odb, ODB_CONFIG + "/MiniTwin enable", False) and not args.no_odb:
+        print("note: MiniTwin enable is on, so a running daemon polls the service too; "
+              "the proposal id is shared through the ODB")
+    since = loop.mt.last_proposal_id
+    try:
+        scheduled = loop.poll_and_schedule(dry_run=args.dry_run)
+    except ScheduleError as exc:
+        print("ERROR: %s" % exc)
+        return 2
+    if not scheduled:
+        print("no proposal newer than %d from %s" % (since, url))
+        return 1
+    if args.dry_run:
+        print("dry run: would schedule (nothing written)")
+    _print_json(scheduled)
+    return 0
+
+
+def _cmd_post(args, loop, db):
+    run_id = db.get_run_id(args.run)
+    if run_id is None:
+        print("ERROR: MIDAS run %d is not in the run database" % args.run)
+        return 2
+    step = loop.step_for_run(run_id)
+    if step is None:
+        print("run %d is not the active step's run: posting without responds_to/step_id" % args.run)
+    try:
+        if args.dry_run:
+            context = loop.build_context([run_id], step=step)
+            print("dry run: would send (nothing sent)")
+            _print_json(context)
+            return 0
+        context = loop.post_runs([run_id], step=step, require_delivery=True)
+    except Exception as exc:                           # noqa: BLE001 -- a shifter reads this
+        print("ERROR: run %d not posted: %s" % (args.run, exc))
+        return 2
+    if step is not None and step.get("seq_id"):
+        # the daemon must not post this sequence again
+        db.update_status("run_sequence", step["seq_id"], "DONE")
+    print("posted context %s with %d file(s)" % (context["context_id"],
+                                                   len(context["measurement"]["files"])))
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())

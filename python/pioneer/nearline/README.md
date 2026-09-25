@@ -21,6 +21,7 @@ pass.
 | `run.py` | run-sequence definitions (`midas_run_sequence`, `midas_run`) written into the run database |
 | `combine_files.py` | merges the sub-run histograms of one run into a single normalised file |
 | `beamtune_client.py`, `miniTwinInterface.py` | the daemon's clients for the beam-tune service and the mini-twin |
+| `tuning.py` | the tuning loop: a proposal becomes one run, the run's histogram files go back as a context, DAQ progress is reported; `python -m pioneer.nearline.tuning {schedule,post}` runs it by hand |
 | `README.md` | this file |
 
 ## What the job runs
@@ -530,6 +531,45 @@ settings block, or by editing a rendered copy and running that.
 block, not in the environment.** The environment is for the one-off; the block
 is the record of how this experiment processes its data.
 
+### The tuning loop by hand
+
+The daemon takes proposals from the beam-tuning service and sends back what
+the DAQ measured (`tuning.py`, see "The tuning loop" below). The same two
+steps run by hand, for when the daemon is down or a step has to be retaken:
+
+```bash
+cd /home/pinky/bt2026/beamtime2026_pie5/python      # the environment the daemon runs in
+python -m pioneer.nearline.tuning schedule --dry-run # show the run the current proposal would give
+python -m pioneer.nearline.tuning schedule           # write it to the run database
+python -m pioneer.nearline.tuning post --run <N> --dry-run   # show the context of MIDAS run N
+python -m pioneer.nearline.tuning post --run <N>             # send it
+```
+
+Both commands connect to MIDAS as `NearlineTuning`, read their settings from
+`/Nearline/config` and share `/Nearline/MiniTwin` with the daemon, so a step
+taken by hand is not taken again by the daemon, and a step posted by hand is
+closed for both. Options, after the command name:
+
+| option | what it does |
+|---|---|
+| `--dry-run` | print the rows that would be scheduled, or the JSON that would be sent; nothing is written or sent |
+| `--url URL` | the service, instead of `/Nearline/config/MiniTwin URL` |
+| `--since N` | `schedule` only: ask for a proposal newer than `N` instead of the last one seen. One less than a proposal id retakes that proposal |
+| `--output-path DIR` | the nearline output tree, instead of `/Nearline/config/Output path` |
+| `--no-odb` | do not connect to MIDAS: defaults only, nothing remembered. For a look on a machine without the experiment |
+| `--midas-host`, `--midas-expt` | as for the daemon; default from `MIDAS_SERVER_HOST` / `MIDAS_EXPT_NAME` |
+
+`schedule` exits 0 when it wrote (or would write) a run, 1 when the service
+has no newer proposal, 2 on an error. `post` exits 0 when the service took the
+context and 2 otherwise; unlike the daemon it does not keep a context it could
+not deliver, so run it again once the service answers. `post` needs ROOT with
+the PIONEER dictionaries to read the beam header of the first subrun file.
+
+`schedule` ignores `MiniTwin enable`: it is how a step is taken while the
+daemon's loop is paused. With the loop running as well, both poll the same
+service; the proposal id in the ODB keeps them from scheduling one proposal
+twice.
+
 ## Via the daemon
 
 `GaudiJob.format_config_file()` calls `render_job()` on `nearline_job.py` and
@@ -567,6 +607,64 @@ default `CONDITIONS_DIR` is wrong there: `NL_CONDITIONS_DIR` is not optional.
 It is now baked into every file the daemon renders, which is the other half of
 the reason a pinky-rendered job re-runs correctly anywhere the conditions tree
 is at that path.
+
+## The tuning loop
+
+`tuning.py` is the daemon's side of the loop with the beam-tuning service; the
+daemon calls it and the command line above runs the same functions.
+
+1. **A proposal becomes one run.** Every mainloop iteration, while `MiniTwin
+   enable` is on, the daemon asks the service for a proposal newer than the
+   last one seen. A new one is written as its row of the `MiniTwin updates`
+   table times one `target_position` config (`MiniTwin target config`, the
+   stage centre by default), 10^6 events, in a sequence with `on_complete =
+   mt_add`. No five-point scan, no merge.
+2. **The run is taken.** The sequencer runs it; the daemon's nearline jobs
+   process every subrun as usual. The run database marks the sequence
+   `RUNSDONE` once the run and every nearline job of it are `DONE`.
+3. **The context is posted.** The daemon claims the sequence and posts a
+   context made of file paths: every subrun's `run<N>/<filebase>_hists.root`,
+   with `MiniTwin local prefix` replaced by `MiniTwin remote prefix` (the
+   service reads piana's mirror of the output tree), role `hist_root`; the
+   knobs (Demand) and readback (Measured) of the type 1/4/5 channels in the
+   first subrun's `beamline` header; the step (`responds_to`, `step_id`,
+   `attempt`, `plan`) when the sequence is the one the active step was
+   scheduled in. The sequence is then `DONE`, or `FAILED` with a MIDAS error
+   message when the context could not be built. A context the service does not
+   take stays queued in the daemon and is retried.
+4. **Progress is reported.** While a step is active the daemon posts
+   `beamtune.daq/v1` reports to `POST /v1/daq`, at most every 10 s and only
+   when something changed: `scheduled`, `running` (events sent / requested),
+   `nearline` (subruns done / total), `posted`, `failed` with the reason, and
+   `paused`. A failure to report is logged and never stops the daemon.
+
+**Pause:** set `/Nearline/config/MiniTwin enable` to `n`. It is read every
+iteration: the daemon stops asking for proposals and reports `paused` once. A
+run already scheduled is still taken and its context still posted. Set it back
+to `y` to resume.
+
+**Restart:** the last proposal id and the active step are kept in the ODB
+under `/Nearline/MiniTwin`, so a restarted daemon neither schedules the
+outstanding proposal again nor forgets which step the run in flight belongs
+to. The proposal id is stored before the run is written: a proposal whose
+scheduling failed (MIDAS error, `failed` report) is not retried by itself;
+retake it with `schedule --since <id - 1>`.
+
+| ODB key | default | what it is |
+|---|---|---|
+| `/Nearline/config/MiniTwin URL` | `http://127.0.0.1:8420` | the service (read once at start-up) |
+| `/Nearline/config/MiniTwin updates` | `pim1_epics` | the config table a proposal's row goes to |
+| `/Nearline/config/MiniTwin enable` | `y` | the pause switch, read every iteration |
+| `/Nearline/config/MiniTwin target config` | `2` | `config.target_position` id of the one run per proposal |
+| `/Nearline/config/MiniTwin local prefix` | `/home/pinky/nearline/` | start of a file path as the daemon writes it |
+| `/Nearline/config/MiniTwin remote prefix` | `/home/pioneer/nearline/histograms/` | what replaces it in a posted path |
+| `/Nearline/MiniTwin/Last proposal id` | `0` | newest proposal id seen |
+| `/Nearline/MiniTwin/Active step/Proposal id` | `0` | proposal of the run in flight; `0` = none |
+| `/Nearline/MiniTwin/Active step/Step id`, `Attempt`, `Plan` | `""`, `-1`, `""` | the proposal's plan step; empty / `-1` = not known |
+| `/Nearline/MiniTwin/Active step/Seq id` | `0` | the run-database sequence of the run in flight |
+
+The keys this loop added are created with their defaults when the daemon
+starts and are never overwritten.
 
 ## What fails early, on purpose
 

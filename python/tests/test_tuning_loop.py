@@ -677,3 +677,99 @@ def test_daemon_check_for_updates_schedules_the_centre(daemon_module):
     d.check_for_updates()
     assert len(db.runs) == 1
     assert "mt_add" in [s["on_complete"] for s in db.sequences.values()]
+
+
+# -- A5: the manual path -------------------------------------------------------
+
+def cli_setup(proposals=None):
+    odb = FakeOdb({"/Nearline/config/MiniTwin updates": "pim1_epics",
+                   "/Nearline/config/MiniTwin enable": False})
+    tuning.ensure_odb_keys(odb)
+    return FakeDb(), odb, FakeHttp(proposals or [])
+
+
+def test_cli_schedule_dry_run_writes_nothing(capsys):
+    db, odb, http = cli_setup([proposal(5)])
+    rc = tuning.main(["schedule", "--dry-run"], db=db, odb=odb, http=http)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "dry run" in out and '"on_complete": "mt_add"' in out
+    assert db.runs == {} and odb.values["/Nearline/MiniTwin/Last proposal id"] == 0
+
+
+def test_cli_schedule_takes_the_proposal_once(capsys):
+    db, odb, http = cli_setup([proposal(5)])
+    assert tuning.main(["schedule"], db=db, odb=odb, http=http) == 0
+    assert len(db.runs) == 1
+    assert odb.values["/Nearline/MiniTwin/Last proposal id"] == 5
+    assert odb.values["/Nearline/MiniTwin/Active step/Step id"] == "ASM12_90.44"
+    assert http.daq[-1]["stage"] == "scheduled"
+    # again: the ODB remembers proposal 5
+    assert tuning.main(["schedule"], db=db, odb=odb, http=http) == 1
+    assert len(db.runs) == 1
+    assert "no proposal newer than 5" in capsys.readouterr().out
+    # --since 4 retakes it
+    assert tuning.main(["schedule", "--since", "4"], db=db, odb=odb, http=http) == 0
+    assert len(db.runs) == 2
+
+
+def schedule_and_finish(db, odb, http):
+    tuning.main(["schedule"], db=db, odb=odb, http=http)
+    seq_id = odb.values["/Nearline/MiniTwin/Active step/Seq id"]
+    (run_id,) = db.sequences[seq_id]["runs"]
+    db.runs[run_id].update(status="DONE", midas_run_number=604)
+    db.files.append({"run_id": run_id, "filebase": "run00604_00000", "fileext": "root", "status": "DONE"})
+    return seq_id
+
+
+def test_cli_post_dry_run_prints_the_context(capsys):
+    db, odb, http = cli_setup([proposal(5)])
+    schedule_and_finish(db, odb, http)
+    capsys.readouterr()
+    rc = tuning.main(["post", "--run", "604", "--dry-run"], db=db, odb=odb, http=http,
+                     header_reader=HeaderReader())
+    out = capsys.readouterr().out
+    assert rc == 0 and http.contexts == []
+    assert '"context_id": "run00604"' in out and '"proposal_id": 5' in out
+    assert "/home/pioneer/nearline/histograms/run00604/run00604_00000_hists.root" in out
+    assert odb.values["/Nearline/MiniTwin/Active step/Proposal id"] == 5
+
+
+def test_cli_post_sends_the_step_and_closes_it():
+    db, odb, http = cli_setup([proposal(5)])
+    seq_id = schedule_and_finish(db, odb, http)
+    rc = tuning.main(["post", "--run", "604"], db=db, odb=odb, http=http,
+                     header_reader=HeaderReader())
+    assert rc == 0
+    assert http.contexts[-1]["responds_to"] == {"proposal_id": 5}
+    assert http.daq[-1]["stage"] == "posted"
+    assert odb.values["/Nearline/MiniTwin/Active step/Proposal id"] == 0
+    assert db.sequences[seq_id]["status"] == "DONE"
+
+
+def test_cli_post_with_the_service_down_fails_and_keeps_the_step(capsys):
+    db, odb, http = cli_setup([proposal(5)])
+    schedule_and_finish(db, odb, http)
+    http.fail = True
+    rc = tuning.main(["post", "--run", "604"], db=db, odb=odb, http=http,
+                     header_reader=HeaderReader())
+    assert rc == 2
+    assert "not posted" in capsys.readouterr().out
+    assert odb.values["/Nearline/MiniTwin/Active step/Proposal id"] == 5
+
+
+def test_cli_post_unknown_run():
+    db, odb, http = cli_setup()
+    assert tuning.main(["post", "--run", "999"], db=db, odb=odb, http=http) == 2
+
+
+@pytest.mark.skipif(not (DATA / "run00588").is_dir(), reason="run00588 test files not present")
+def test_cli_post_without_midas(capsys):
+    db = FakeDb()
+    db.add_run(588, subruns=3)
+    reader = HeaderReader()
+    rc = tuning.main(["post", "--run", "588", "--dry-run", "--no-odb", "--output-path", str(DATA)],
+                     db=db, http=FakeHttp(), header_reader=reader)
+    assert rc == 0
+    assert reader.paths == [str(DATA / "run00588" / "run00588_00000_hists.root")]
+    assert '"context_id": "run00588"' in capsys.readouterr().out

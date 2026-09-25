@@ -177,6 +177,19 @@ class interface:
         conn.close()
         return result[0] if result is not None else None
 
+    def get_run_id(self, midas_run_number : int) -> int | None:
+        """Run database id of MIDAS run `midas_run_number` (the newest, should
+        a number have been used twice), or None."""
+        conn = connect(self.user, self.password)
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id FROM state.midas_run WHERE midas_run_number = %s ORDER BY id DESC LIMIT 1",
+                (midas_run_number, )
+            )
+            result = cursor.fetchone()
+        conn.close()
+        return result[0] if result is not None else None
+
     def schedule_postproc_job(self, run_id : int, task : str):
         conn = connect(self.user, self.password)
         with conn.cursor() as cursor:
