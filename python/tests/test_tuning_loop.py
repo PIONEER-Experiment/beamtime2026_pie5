@@ -656,6 +656,7 @@ def test_daemon_mt_add_branch_posts_and_closes_the_sequence(daemon_module):
     db = FakeDb()
     db.add_run(604, subruns=1, seq_id=57)
     loop, _, odb, _ = make_loop(db=db)
+    odb.values["/Nearline/config/MiniTwin post delay"] = 0
     d = bare_daemon(daemon_module, loop, db, odb)
     d.build_and_dispatch_seq({"id": 57, "on_complete": "mt_add", "status": "CLAIMED"})
     assert db.sequences[57]["status"] == "DONE"
@@ -678,6 +679,7 @@ def test_daemon_does_not_poll_while_paused(daemon_module):
 def test_daemon_posts_a_finished_step_even_while_paused(daemon_module):
     loop, db, odb, http, _ = loop_with_service([])
     db.add_run(604, subruns=1, seq_id=57)
+    odb.values["/Nearline/config/MiniTwin post delay"] = 0
     d = bare_daemon(daemon_module, loop, db, odb)
     d.minitwin_enabled = False
     d.build_and_dispatch_seq({"id": 57, "on_complete": "mt_add", "status": "CLAIMED"})
@@ -1180,3 +1182,33 @@ def test_cli_schedule_refuses_while_the_loop_is_enabled(capsys):
     assert db.runs == {}
     assert tuning.main(["schedule", "--force"], db=db, odb=odb, http=http) == 0
     assert len(db.runs) == 1
+
+
+# -- review should-fix 9: wait for the mirror before posting -------------------
+
+def test_a_claimed_sequence_is_posted_after_the_post_delay(daemon_module):
+    loop, db, odb, http, _ = loop_with_service([])
+    loop.clock = Clock()
+    assert odb.values["/Nearline/config/MiniTwin post delay"] == 60
+    db.add_run(604, subruns=1, seq_id=57)
+    d = bare_daemon(daemon_module, loop, db, odb)
+    d.build_and_dispatch_seq({"id": 57, "on_complete": "mt_add", "status": "CLAIMED"})
+    assert http.contexts == [] and db.sequences[57]["status"] == "CLAIMED"
+    loop.clock.t += 59
+    loop.post_due()
+    assert http.contexts == []
+    loop.clock.t += 1
+    loop.post_due()
+    assert [c["context_id"] for c in http.contexts] == ["run00604"]
+    assert db.sequences[57]["status"] == "DONE"
+    loop.clock.t += 100
+    loop.post_due()
+    assert len(http.contexts) == 1
+
+
+def test_cli_post_ignores_the_post_delay():
+    db, odb, http = cli_setup([proposal(5)])
+    schedule_and_finish(db, odb, http)
+    assert tuning.main(["post", "--run", "604"], db=db, odb=odb, http=http,
+                       header_reader=HeaderReader()) == 0
+    assert len(http.contexts) == 1

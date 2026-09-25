@@ -31,6 +31,9 @@ CONFIG_DEFAULTS = {
     # the second.
     "MiniTwin local prefix": "/home/pinky/nearline/",
     "MiniTwin remote prefix": "/home/pioneer/nearline/histograms/",
+    # seconds a finished sequence waits before its context is posted, so
+    # the service's mirror (rsync every 30 s) has the last subrun's files
+    "MiniTwin post delay": 60,
 }
 
 #: The loop's memory, under /Nearline/MiniTwin: the newest proposal id seen,
@@ -381,6 +384,8 @@ class TuningLoop:
         self._watermark_error = False
         self._watermark_warned = None
         self._column_map_warned = None
+        #: seq id -> time it was claimed, for sequences waiting out the post delay
+        self._waiting = {}
         self.enabled = None
         # progress reports: what was last sent, and when the state was last looked at
         self._last_monitor = 0.0
@@ -733,6 +738,34 @@ class TuningLoop:
             self.db.update_status("run_sequence", seq_id, "FAILED")
             return None
         return context
+
+    @property
+    def post_delay(self):
+        return float(odb_value(self.odb, ODB_CONFIG + "/MiniTwin post delay",
+                               CONFIG_DEFAULTS["MiniTwin post delay"]))
+
+    def claim(self, seq_id):
+        """The daemon claimed finished `mt_add` sequence `seq_id`: post it
+        once it has waited `MiniTwin post delay` seconds (post_due)."""
+        self._waiting.setdefault(seq_id, self.clock())
+        self.post_due()
+
+    def post_due(self):
+        """Post every waiting sequence whose delay is over.  Called every
+        mainloop iteration; never blocks, never raises."""
+        try:
+            delay = self.post_delay
+        except Exception:                              # noqa: BLE001
+            delay = CONFIG_DEFAULTS["MiniTwin post delay"]
+        now = self.clock()
+        for seq_id, since in sorted(self._waiting.items()):
+            if now - since < delay:
+                continue
+            del self._waiting[seq_id]
+            try:
+                self.post_sequence(seq_id)
+            except Exception as exc:                   # noqa: BLE001 -- never into the mainloop
+                self.message("Tuning: sequence %d not posted: %s" % (seq_id, exc), is_error=True)
 
     def resume_claimed(self):
         """At daemon start-up: post again every `mt_add` sequence left

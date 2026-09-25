@@ -198,7 +198,8 @@ class NearlineDaemon:
             # right here. The sequence ends up DONE, or FAILED if it raised.
             # Posted even while "MiniTwin enable" is off: the pause stops new
             # proposals, not the result of a run that was already taken.
-            self.tuning.post_sequence(seq_cfg['id'])
+            # Posted after "MiniTwin post delay" seconds (see post_due).
+            self.tuning.claim(seq_cfg['id'])
 
     def communicate_with_midas(self):
         if (self.client):
@@ -244,6 +245,9 @@ class NearlineDaemon:
             newSeq = self.db_interface.claim_sequences(limit = numOpen)
             for seq in newSeq:
                 self.build_and_dispatch_seq(seq)
+
+        # mt_add sequences whose post delay is over
+        self.tuning.post_due()
 
     def check_for_updates(self):
         if not self.minitwin_enabled:

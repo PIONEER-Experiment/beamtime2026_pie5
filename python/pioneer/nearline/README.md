@@ -635,8 +635,11 @@ daemon calls it and the command line above runs the same functions.
 2. **The run is taken.** The sequencer runs it; the daemon's nearline jobs
    process every subrun as usual. The run database marks the sequence
    `RUNSDONE` once the run and every nearline job of it are `DONE`.
-3. **The context is posted.** The daemon claims the sequence and posts a
-   context made of file paths: every subrun's `run<N>/<filebase>_hists.root`,
+3. **The context is posted.** The daemon claims the sequence, waits
+   `MiniTwin post delay` seconds (the service's mirror of the output tree is
+   refreshed every 30 s, so the last subrun's file has to reach it first;
+   the daemon keeps working meanwhile) and posts a context made of file
+   paths: every subrun's `run<N>/<filebase>_hists.root`,
    with `MiniTwin local prefix` replaced by `MiniTwin remote prefix` (the
    service reads piana's mirror of the output tree), role `hist_root`; the
    knobs (Demand) and readback (Measured) of the type 1/4/5 channels in the
@@ -692,6 +695,7 @@ service's number by hand to take them.
 | `/Nearline/config/MiniTwin target config` | `1` | `config.target_position` id of the one run per proposal (id 1 = seq 1, the centre (0, 0)) |
 | `/Nearline/config/MiniTwin local prefix` | `/home/pinky/nearline/` | start of a file path as the daemon writes it |
 | `/Nearline/config/MiniTwin remote prefix` | `/home/pioneer/nearline/histograms/` | what replaces it in a posted path |
+| `/Nearline/config/MiniTwin post delay` | `60` | seconds between claiming a finished sequence and posting it (`post` by hand does not wait) |
 | `/Nearline/MiniTwin/Last proposal id` | `0` | newest proposal id seen |
 | `/Nearline/MiniTwin/Active step/Proposal id` | `0` | proposal of the run in flight; `0` = none |
 | `/Nearline/MiniTwin/Active step/Step id`, `Attempt`, `Plan` | `""`, `-1`, `""` | the proposal's plan step; empty / `-1` = not known |
