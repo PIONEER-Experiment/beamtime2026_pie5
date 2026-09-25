@@ -1042,3 +1042,51 @@ def test_resume_claimed_leaves_other_sequences_alone():
     db.sequences[58]["status"] = "DONE"
     assert loop.resume_claimed() == []
     assert http.contexts == []
+
+
+# -- review blocker 3 and should-fix 4/5: the proposal watermark ---------------
+
+def test_schedule_since_never_lowers_the_stored_watermark():
+    db, odb, http = cli_setup([proposal(4), proposal(5)])
+    assert tuning.main(["schedule"], db=db, odb=odb, http=http) == 0       # takes 4
+    assert tuning.main(["schedule"], db=db, odb=odb, http=http) == 0       # takes 5
+    assert odb.values["/Nearline/MiniTwin/Last proposal id"] == 5
+    # a shifter retakes proposal 4 by hand
+    assert tuning.main(["schedule", "--since", "3"], db=db, odb=odb, http=http) == 0
+    assert odb.values["/Nearline/MiniTwin/Last proposal id"] == 5
+    assert len(db.runs) == 3
+    # a daemon (re)started now does not take proposal 5 again
+    loop, _, _, http2, _ = loop_with_service([proposal(4), proposal(5)], odb=odb, db=db)
+    assert loop.poll_and_schedule() == []
+    assert len(db.runs) == 3
+
+
+def test_a_failing_watermark_write_still_schedules_and_says_so_once():
+    class BrokenOdb(FakeOdb):
+        def odb_set(self, path, value):
+            if path.endswith("/Last proposal id"):
+                raise OSError("ODB full")
+            super().odb_set(path, value)
+
+    odb = BrokenOdb({"/Nearline/config/MiniTwin updates": "pim1_epics",
+                     "/Nearline/config/MiniTwin enable": True,
+                     "/Nearline/MiniTwin/Last proposal id": 0})
+    loop, db, odb, http, messages = loop_with_service([proposal(5), proposal(6)], odb=odb)
+    loop.poll_and_schedule()
+    loop.poll_and_schedule()
+    assert len(db.runs) == 2
+    errors = [m for m, e in messages if e and "Last proposal id" in m]
+    assert len(errors) == 1 and "ODB full" in errors[0]
+
+
+def test_a_service_below_the_watermark_is_one_error():
+    odb = FakeOdb({"/Nearline/config/MiniTwin updates": "pim1_epics",
+                   "/Nearline/config/MiniTwin enable": True,
+                   "/Nearline/MiniTwin/Last proposal id": 5})
+    loop, db, odb, http, messages = loop_with_service([proposal(1), proposal(2)], odb=odb)
+    for _ in range(3):
+        assert loop.poll_and_schedule() == []
+    errors = [m for m, e in messages if e and "below" in m]
+    assert len(errors) == 1
+    assert "#2" in errors[0] and "#5" in errors[0] and "/Nearline/MiniTwin/Last proposal id" in errors[0]
+    assert odb.values["/Nearline/MiniTwin/Last proposal id"] == 5

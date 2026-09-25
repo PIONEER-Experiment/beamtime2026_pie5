@@ -348,7 +348,8 @@ class TuningLoop:
         self.header_reader = header_reader
         #: the step whose run is being taken (see STATE_DEFAULTS), or None
         self.active = None
-        self._saved_last_id = 0
+        self._watermark_error = False
+        self._watermark_warned = None
         self.enabled = None
         # progress reports: what was last sent, and when the state was last looked at
         self._last_monitor = 0.0
@@ -372,7 +373,6 @@ class TuningLoop:
         which step the run in flight belongs to."""
         last_id, self.active = load_state(self.odb)
         self.mt.last_proposal_id = last_id
-        self._saved_last_id = last_id
         if last_id or self.active:
             self.message("Tuning: restored last proposal id %d%s" % (
                 last_id, ", active step %s (seq %s)" % (self.active.get("step_id"), self.active.get("seq_id"))
@@ -384,7 +384,6 @@ class TuningLoop:
         last_id, active = load_state(self.odb)
         if last_id > self.mt.last_proposal_id:
             self.mt.last_proposal_id = last_id
-        self._saved_last_id = max(self._saved_last_id, last_id)
         if active != self.active:
             self.active = active
             self._last_key = None
@@ -535,11 +534,13 @@ class TuningLoop:
         whose scheduling fails is reported (MIDAS error, `failed` DAQ report),
         raises ScheduleError, and is not retried by itself -- retake it with the CLI,
         see the README -- rather than scheduled twice."""
+        before = self.mt.last_proposal_id
         configs = self.mt.NextConfiguration()
         proposal_id = self.mt.last_proposal_id
-        if not dry_run and proposal_id != self._saved_last_id:
-            save_last_id(self.odb, proposal_id)
-            self._saved_last_id = proposal_id
+        # NextConfiguration moves the watermark only for a proposal it received
+        if not dry_run and proposal_id != before:
+            self._store_watermark(proposal_id)
+        self._check_service_watermark()
         if not configs:
             return []
         hints = self.mt.last_run_hints or {}
@@ -573,6 +574,40 @@ class TuningLoop:
                     ", ".join(str(r) for r in entry["run_ids"]), entry["seq_id"]))
                 self.report_progress(reply=reply)
         return scheduled
+
+    def _store_watermark(self, proposal_id):
+        """Persist `proposal_id` as the last proposal id, but only when it is
+        above the stored one: nothing ever lowers it (`schedule --since`
+        lowers the in-memory watermark only).  A failed ODB write is one
+        MIDAS error; scheduling goes on."""
+        try:
+            stored = int(odb_value(self.odb, ODB_STATE + "/Last proposal id", 0) or 0)
+            if proposal_id > stored:
+                save_last_id(self.odb, proposal_id)
+            self._watermark_error = False
+        except Exception as exc:                       # noqa: BLE001 -- schedule anyway
+            if not self._watermark_error:
+                self._watermark_error = True
+                self.message("Tuning: could not store proposal id %d in %s/Last proposal id: %s; "
+                             "a restart may take this proposal again"
+                             % (proposal_id, ODB_STATE, exc), is_error=True)
+
+    def _check_service_watermark(self):
+        """A service whose newest proposal is below our watermark (a new state
+        directory, or a reset one) is ignored until it passes it.  Say so once
+        per pair of numbers; do not reset anything automatically."""
+        service_id = getattr(self.mt, "service_last_id", None)
+        ours = self.mt.last_proposal_id
+        if service_id is None or service_id >= ours:
+            self._watermark_warned = None
+            return
+        if self._watermark_warned == (service_id, ours):
+            return
+        self._watermark_warned = (service_id, ours)
+        self.message("Tuning: the service's last proposal is #%d, below our last proposal id #%d "
+                     "(%s/Last proposal id): its proposals are ignored until one passes #%d. "
+                     "If the service was restarted with a new state, set that key to %d."
+                     % (service_id, ours, ODB_STATE, ours, service_id), is_error=True)
 
     def step_for_sequence(self, seq_id):
         """The active step when `seq_id` is its sequence, else None."""

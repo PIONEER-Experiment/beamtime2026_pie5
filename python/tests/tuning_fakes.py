@@ -169,7 +169,8 @@ class FakeHttp:
         for p in self.proposals:
             if p.get("proposal_id", 0) > since:
                 return dict(p)
-        return {"ready": False}
+        return {"ready": False, "state": "ready",
+                "last_proposal_id": max([p.get("proposal_id", 0) for p in self.proposals] or [0])}
 
     #: context_id -> HTTP status the service answers that context with
     reject = None

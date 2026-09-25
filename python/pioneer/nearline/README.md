@@ -664,7 +664,12 @@ under `/Nearline/MiniTwin`, so a restarted daemon neither schedules the
 outstanding proposal again nor forgets which step the run in flight belongs
 to. The proposal id is stored before the run is written: a proposal whose
 scheduling failed (MIDAS error, `failed` report) is not retried by itself;
-retake it with `schedule --since <id - 1>`.
+retake it with `schedule --since <id - 1>`. The stored id is only ever raised:
+`--since` lowers it for that one command, not in the ODB. If the service's own
+last proposal is below the stored id (it was restarted with a new state
+directory), its proposals are ignored and the daemon says so once, as a MIDAS
+error naming both numbers; set `/Nearline/MiniTwin/Last proposal id` to the
+service's number by hand to take them.
 
 | ODB key | default | what it is |
 |---|---|---|

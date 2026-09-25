@@ -76,6 +76,8 @@ class miniTwinInterface:
         #: service had fed its backend before computing it, and the outcome.
         #: None when the service sent none (a kick, or an older service).
         self._last_reply = None
+        #: the service's newest proposal id as last reported, or None
+        self.service_last_id = None
         #: called with each context the service took; the tuning loop keeps
         #: the id of the last one in the ODB
         self.on_delivered = None
@@ -189,9 +191,12 @@ class miniTwinInterface:
             return []
 
         if not payload.get("ready"):
+            if payload.get("last_proposal_id") is not None:
+                self.service_last_id = int(payload["last_proposal_id"])
             return []
 
         proposal_id = int(payload.get("proposal_id", 0))
+        self.service_last_id = proposal_id
         if proposal_id <= self._last_id:
             return []
         self._last_id = proposal_id
