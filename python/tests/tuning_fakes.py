@@ -12,7 +12,10 @@ class FakeOdb:
     def odb_exists(self, path):
         return path in self.values or any(k.startswith(path + "/") for k in self.values)
 
-    def odb_get(self, path):
+    def odb_get(self, path, just_key_list=False):
+        if just_key_list:
+            prefix = path.rstrip("/") + "/"
+            return sorted({k[len(prefix):].split("/")[0] for k in self.values if k.startswith(prefix)})
         if path not in self.values:
             raise KeyError(path)
         return self.values[path]
@@ -110,6 +113,32 @@ class FakeDb:
             extensions = [extensions]
         rows = [f for f in self.files if f["run_id"] in run_ids and f["fileext"] in extensions]
         return sorted(rows, key=lambda f: f["filebase"])
+
+    #: MIDAS run number -> {"bor": datetime or None, "eor": ...}; an
+    #: exception instance here is raised by get_run_times
+    run_times = None
+
+    def get_run_times(self, midas_run_numbers):
+        if isinstance(self.run_times, Exception):
+            raise self.run_times
+        if isinstance(midas_run_numbers, int):
+            midas_run_numbers = [midas_run_numbers]
+        known = self.run_times or {}
+        return {int(n): dict(known.get(int(n)) or {"bor": None, "eor": None})
+                for n in midas_run_numbers}
+
+    # what the daemon's stop transition calls
+    def close_files_in_channel(self, logger_channel):
+        return []
+
+    def schedule_postproc_job_on_file(self, file_id, task):
+        return -1
+
+    def end_of_midas_run(self, run_id, schedule_post_processing=True):
+        if run_id not in self.runs:
+            return False
+        self.runs[run_id]["status"] = "DONE"
+        return True
 
     def update_status(self, table, id, new_status):
         self.status_updates.append((table, id, new_status))

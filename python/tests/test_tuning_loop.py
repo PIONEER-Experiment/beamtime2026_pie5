@@ -2107,3 +2107,95 @@ def test_get_run_times_against_the_scratch_database(fresh_db, seeded):
         assert (entry["eor"] - entry["bor"]).total_seconds() == seeded["durations"][number]
     running = times[seeded["running_run_number"]]
     assert running["bor"] is not None and running["eor"] is None
+
+
+EVENTS_SENT = "/Equipment/WDWaveforms/Statistics/Events sent"
+EOR_KEY = "/Nearline/MiniTwin/Active step/Events at EOR"
+
+
+def running_step(run_number=604, events=1_000_123):
+    """A loop whose proposal 5 was scheduled and whose run is being taken:
+    ``(loop, db, odb, http, run_id)``."""
+    loop, db, odb, http, _ = loop_with_service([proposal(5)])
+    seq_id = loop.poll_and_schedule()[0]["seq_id"]
+    (run_id,) = db.sequences[seq_id]["runs"]
+    db.runs[run_id].update(status="RUNNING", midas_run_number=run_number)
+    odb.values["/Runinfo/Run DB PK"] = run_id
+    odb.values[EVENTS_SENT] = events
+    return loop, db, odb, http, run_id
+
+
+def test_events_at_eor_key_is_created_and_kept():
+    odb = FakeOdb()
+    tuning.ensure_odb_keys(odb)
+    assert odb.values[EOR_KEY] == -1
+    odb.values[EOR_KEY] = 1234
+    tuning.ensure_odb_keys(odb)
+    assert odb.values[EOR_KEY] == 1234
+
+
+def test_a_new_step_starts_with_unknown_events():
+    loop, db, odb, http, run_id = running_step()
+    assert odb.values[EOR_KEY] == -1
+    assert loop.active["eor_events"] is None
+
+
+def test_the_stop_transition_stores_the_steps_events(daemon_module):
+    loop, db, odb, http, run_id = running_step(events=1_000_123)
+    odb.values["/Logger/Channels/0/Settings/Current filename"] = "run00604.mid.lz4"
+    d = bare_daemon(daemon_module, loop, db, odb)
+    assert d.end_of_run_callback(odb, 604) == 1
+    assert odb.values[EOR_KEY] == 1_000_123
+    assert loop.active["eor_events"] == 1_000_123
+    assert db.runs[run_id]["status"] == "DONE"
+    # the in-memory step and the ODB agree: nothing looks changed to sync_state
+    loop._last_key = "kept"
+    loop.sync_state()
+    assert loop._last_key == "kept"
+
+
+def test_another_runs_stop_leaves_the_steps_events_alone(daemon_module):
+    loop, db, odb, http, run_id = running_step()
+    other = db.add_run(700, status="RUNNING")
+    odb.values["/Runinfo/Run DB PK"] = other
+    d = bare_daemon(daemon_module, loop, db, odb)
+    d.end_of_run_callback(odb, 700)
+    assert odb.values[EOR_KEY] == -1 and loop.active["eor_events"] is None
+
+
+def test_the_stop_transition_never_raises_over_the_events(daemon_module):
+    loop, db, odb, http, run_id = running_step()
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("run database down")
+    db.get_all_runs_in_sequence = boom
+    d = bare_daemon(daemon_module, loop, db, odb)
+    assert d.end_of_run_callback(odb, 604) == 1
+    assert odb.values[EOR_KEY] == -1
+    assert db.runs[run_id]["status"] == "DONE"
+
+
+def test_missing_events_counter_is_a_message_not_an_error():
+    loop, db, odb, http, run_id = running_step()
+    del odb.values[EVENTS_SENT]
+    messages = []
+    loop._message = lambda m, is_error=False: messages.append((m, is_error))
+    assert loop.record_eor_events(run_id) is None
+    assert odb.values[EOR_KEY] == -1
+    assert any("Events sent" in m and not e for m, e in messages)
+
+
+def test_events_at_eor_survive_a_restart_and_a_claim():
+    loop, db, odb, http, run_id = running_step(events=987_654)
+    assert loop.record_eor_events(run_id) == 987_654
+    seq_id = loop.active["seq_id"]
+
+    # a new daemon on the same ODB
+    loop2, _, _, _, _ = loop_with_service([], odb=odb, db=db)
+    assert loop2.active["eor_events"] == 987_654
+    # the claimed sequence keeps it, also through the Pending record
+    tuning.save_pending(odb, seq_id, loop2.step_for_sequence(seq_id))
+    assert tuning.load_pending(odb, seq_id)["eor_events"] == 987_654
+    # a record without the key (written before it existed) reads as unknown
+    del odb.values["/Nearline/MiniTwin/Pending/%d/Events at EOR" % seq_id]
+    assert tuning.load_pending(odb, seq_id)["eor_events"] is None

@@ -304,6 +304,10 @@ class NearlineDaemon:
 
     def end_of_run_callback(self, client, run_number):
         run_db_pk = client.odb_get("/Runinfo/Run DB PK")
+        # the tuning step's WaveDREAM events, for measurement.exposure (never raises)
+        tuning = getattr(self, "tuning", None)
+        if tuning is not None:
+            tuning.record_eor_events(run_db_pk)
         logger_channels = self.client.odb_get("/Logger/Channels", just_key_list = True)
         for log_channel in logger_channels:
             self.finish_file(log_channel)

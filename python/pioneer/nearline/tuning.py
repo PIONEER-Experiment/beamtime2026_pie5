@@ -43,7 +43,10 @@ CONFIG_DEFAULTS = {
 #: the step whose run is being taken, and the id of the last context the
 #: service took (checked against a new proposal's ``in_reply_to``).  Restored at start-up, so a restart
 #: never schedules the outstanding proposal again.  Proposal id 0 means no
-#: active step; an empty string or attempt -1 means "not known".
+#: active step; an empty string, attempt -1 or events -1 means "not known".
+#: ``Active step/Events at EOR`` is the WaveDREAM events sent
+#: (ODB_EVENTS_SENT) at the end of the step's run, stored by the daemon's
+#: stop transition (record_eor_events) for measurement.exposure.
 ODB_STATE = "/Nearline/MiniTwin"
 STATE_DEFAULTS = {
     "Last proposal id": 0,
@@ -52,6 +55,7 @@ STATE_DEFAULTS = {
     "Active step/Attempt": -1,
     "Active step/Plan": "",
     "Active step/Seq id": 0,
+    "Active step/Events at EOR": -1,
     "Last context id": "",
 }
 
@@ -97,12 +101,14 @@ def load_state(odb):
     if proposal_id <= 0:
         return last_id, None
     attempt = int(get("Active step/Attempt"))
+    events = int(get("Active step/Events at EOR"))
     step = {
         "proposal_id": proposal_id,
         "step_id": str(get("Active step/Step id")) or None,
         "attempt": attempt if attempt >= 0 else None,
         "plan": str(get("Active step/Plan")) or None,
         "seq_id": int(get("Active step/Seq id") or 0) or None,
+        "eor_events": events if events >= 0 else None,
     }
     return last_id, step
 
@@ -122,8 +128,15 @@ def save_step(odb, step):
     odb.odb_set(ODB_STATE + "/Active step/Attempt", int(attempt) if attempt is not None else -1)
     odb.odb_set(ODB_STATE + "/Active step/Plan", str(step.get("plan") or ""))
     odb.odb_set(ODB_STATE + "/Active step/Seq id", int(step.get("seq_id") or 0))
+    odb.odb_set(ODB_STATE + "/Active step/Events at EOR", _events_or_unknown(step))
     if step.get("proposal_id"):
         odb.odb_set(ODB_STATE + "/Active step/Proposal id", int(step["proposal_id"]))
+
+
+def _events_or_unknown(step):
+    """A step's ``eor_events`` as the ODB keeps it: -1 when not known."""
+    events = step.get("eor_events")
+    return int(events) if events is not None and int(events) >= 0 else -1
 
 
 def _pending_base(seq_id):
@@ -140,6 +153,7 @@ def save_pending(odb, seq_id, step):
     odb.odb_set(base + "/Step id", str(step.get("step_id") or ""))
     odb.odb_set(base + "/Attempt", int(attempt) if attempt is not None else -1)
     odb.odb_set(base + "/Plan", str(step.get("plan") or ""))
+    odb.odb_set(base + "/Events at EOR", _events_or_unknown(step))
     odb.odb_set(base + "/Proposal id", int(step["proposal_id"]))
 
 
@@ -150,12 +164,14 @@ def load_pending(odb, seq_id):
     if proposal_id <= 0:
         return None
     attempt = int(odb_value(odb, base + "/Attempt", -1))
+    events = int(odb_value(odb, base + "/Events at EOR", -1))
     return {
         "proposal_id": proposal_id,
         "step_id": str(odb_value(odb, base + "/Step id", "")) or None,
         "attempt": attempt if attempt >= 0 else None,
         "plan": str(odb_value(odb, base + "/Plan", "")) or None,
         "seq_id": int(seq_id),
+        "eor_events": events if events >= 0 else None,
     }
 
 
@@ -580,6 +596,9 @@ class TuningLoop:
         one MIDAS error; the step is kept in memory and written again every
         iteration until it goes through."""
         self.active = dict(step) if step else None
+        if self.active is not None:
+            # the same keys load_state gives, so sync_state sees no change
+            self.active.setdefault("eor_events", None)
         self._last_key = None
         self._last_events = None
         self._save_step()
@@ -881,6 +900,32 @@ class TuningLoop:
         if run_id in self.db.get_all_runs_in_sequence(self.active["seq_id"]):
             return dict(self.active)
         return None
+
+    def record_eor_events(self, run_id):
+        """At the stop transition of run `run_id` (run database id): when it
+        is the active step's run, store the WaveDREAM events sent
+        (ODB_EVENTS_SENT) as the step's ``eor_events``, in memory and in
+        /Nearline/MiniTwin/Active step/Events at EOR, for
+        measurement.exposure.  Returns the number stored, or None.  Called
+        inside a MIDAS transition callback: never raises."""
+        try:
+            if not run_id or not self.active:
+                return None
+            if self.step_for_run(int(run_id)) is None:
+                return None
+            sent = odb_value(self.odb, ODB_EVENTS_SENT, None)
+            if sent is None:
+                self.message("Tuning: %s is missing: the events of step %s are not known"
+                             % (ODB_EVENTS_SENT, self.active.get("step_id")))
+                return None
+            events = int(sent)
+            self.odb.odb_set(ODB_STATE + "/Active step/Events at EOR", events)
+            self.active["eor_events"] = events
+            return events
+        except Exception as exc:                       # noqa: BLE001 -- inside a transition
+            self.message("Tuning: events at the end of run (db id %s) not recorded: %s"
+                         % (run_id, exc))
+            return None
 
     # -- finished runs -> context ------------------------------------------
 
