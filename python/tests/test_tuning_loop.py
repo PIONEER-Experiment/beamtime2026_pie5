@@ -1651,3 +1651,52 @@ def test_resume_reads_no_histograms():
     loop.clock = Clock()
     assert loop.resume_claimed() == [seq_id]
     assert calls == []
+
+
+# -- second review S5: a run-database error while posting ------------------------
+
+def test_a_db_error_while_posting_is_retried_not_stuck():
+    loop, db, odb, http, messages = loop_with_service([proposal(5)])
+    loop.clock = Clock()
+    odb.values["/Nearline/config/MiniTwin post delay"] = 0
+    seq_id = finished_step(loop, db, 604)
+    db.sequences[seq_id]["status"] = "CLAIMED"
+    runs, update = db.get_all_runs_in_sequence, db.update_status
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("db down")
+    db.get_all_runs_in_sequence = db.update_status = boom
+    loop.claim(seq_id)
+    loop.clock.t += 10
+    loop.post_due()
+    assert db.sequences[seq_id]["status"] == "CLAIMED"
+    assert seq_id in loop._waiting
+    assert sum(1 for m, e in messages if e and "db down" in m) == 1
+    # the database is back: posted on the next retry
+    db.get_all_runs_in_sequence, db.update_status = runs, update
+    loop.clock.t += 5
+    loop.post_due()
+    assert http.contexts == []           # not before 30 s
+    loop.clock.t += 20
+    loop.post_due()
+    assert [c["context_id"] for c in http.contexts] == ["run00604"]
+    assert db.sequences[seq_id]["status"] == "DONE"
+    assert http.contexts[0]["responds_to"] == {"proposal_id": 5}
+
+
+def test_a_failed_update_after_a_context_error_is_retried():
+    db = FakeDb()
+    db.add_run(604, subruns=0, seq_id=57)        # no files: a context error
+    loop, _, odb, messages = make_loop(db=db, mt=real_mt())
+    loop.clock = Clock()
+    update = db.update_status
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("db down")
+    db.update_status = boom
+    loop.post_sequence(57)
+    assert 57 in loop._waiting and db.sequences[57]["status"] == "CLAIMED"
+    db.update_status = update
+    loop.clock.t += 30
+    loop.post_due()
+    assert db.sequences[57]["status"] == "FAILED"

@@ -272,7 +272,7 @@ def hist_files(db, run_ids, output_path):
     for run_id in run_ids:
         number = db.get_midas_run_number(run_id)
         if number is None:
-            raise RuntimeError("run %d has no MIDAS run number (never started?)" % run_id)
+            raise ContextError("run %d has no MIDAS run number (never started?)" % run_id)
         numbers[run_id] = int(number)
     found, skipped = [], []
     for row in db.find_files(list(run_ids), "root"):
@@ -302,6 +302,19 @@ class ScheduleError(RuntimeError):
 
 class ContextRejected(RuntimeError):
     """The service refused a context for good; already reported when raised."""
+
+
+class ContextError(RuntimeError):
+    """A context cannot be made from what the run left behind (no files, no
+    run number, ...): retrying does not help, the sequence is FAILED."""
+
+
+#: errors that are about the context itself; anything else (the run database,
+#: the ODB, a file system) is taken as passing and the post retried
+CONTEXT_ERRORS = (ContextError, ValueError, KeyError)
+
+#: seconds before a post that failed for a passing reason is tried again
+RETRY_DELAY_S = 30.0
 
 
 def utc_now(clock=time.time):
@@ -476,6 +489,8 @@ class TuningLoop:
         self._waiting = {}
         #: seq id -> the step it was claimed with (or None), see claim()
         self._claim_steps = {}
+        #: sequences whose post failed for a passing reason (one message each)
+        self._retrying = set()
         self.enabled = None
         # progress reports: what was last sent, and when the state was last looked at
         self._last_monitor = 0.0
@@ -815,7 +830,7 @@ class TuningLoop:
         for local, status in skipped:
             self.message("Tuning: leaving out %s (file status %s)" % (local, status))
         if not files:
-            raise RuntimeError("no finished nearline histogram files for run(s) %s"
+            raise ContextError("no finished nearline histogram files for run(s) %s"
                                % ", ".join(str(n) for n in numbers))
         remote = []
         for f in files:
@@ -875,8 +890,11 @@ class TuningLoop:
     def post_sequence(self, seq_id):
         """Post the context of a finished `mt_add` sequence.  The sequence
         becomes DONE when the service took it, FAILED with a MIDAS error
-        message when it could not be built or was refused, and stays CLAIMED
-        while it waits in the queue."""
+        message when it cannot be built (CONTEXT_ERRORS) or was refused, and
+        stays CLAIMED while it waits in the queue.  Any other error (the run
+        database, the ODB, a file system) leaves it CLAIMED and puts it back
+        into the waiting set, tried again after RETRY_DELAY_S, with one MIDAS
+        error per episode.  Never raises."""
         step = self.step_of_claimed(seq_id)
         try:
             run_ids = self.db.get_all_runs_in_sequence(seq_id)
@@ -884,14 +902,33 @@ class TuningLoop:
         except ContextRejected:
             # context_rejected has sent the error, the report and set FAILED
             return None
-        except Exception as exc:                       # noqa: BLE001 -- reported, sequence FAILED
+        except CONTEXT_ERRORS as exc:
             self.message("Tuning: context for sequence %d not posted: %s" % (seq_id, exc),
                          is_error=True)
             if step is not None:
                 self._report_final(step, "failed", "context not posted: %s" % exc)
-            self.db.update_status("run_sequence", seq_id, "FAILED")
+            try:
+                self.db.update_status("run_sequence", seq_id, "FAILED")
+            except Exception as db_exc:                # noqa: BLE001 -- try again later
+                self._retry_later(seq_id, db_exc)
             return None
+        except Exception as exc:                       # noqa: BLE001 -- passing: try again later
+            self._retry_later(seq_id, exc)
+            return None
+        self._retrying.discard(seq_id)
         return context
+
+    def _retry_later(self, seq_id, exc):
+        try:
+            delay = self.post_delay
+        except Exception:                              # noqa: BLE001
+            delay = CONFIG_DEFAULTS["MiniTwin post delay"]
+        # due RETRY_DELAY_S from now, whatever the post delay
+        self._waiting[seq_id] = self.clock() - delay + RETRY_DELAY_S
+        if seq_id not in self._retrying:
+            self._retrying.add(seq_id)
+            self.message("Tuning: sequence %d not posted (%s); it stays CLAIMED and is tried "
+                         "again every %.0f s" % (seq_id, exc, RETRY_DELAY_S), is_error=True)
 
     @property
     def post_delay(self):
