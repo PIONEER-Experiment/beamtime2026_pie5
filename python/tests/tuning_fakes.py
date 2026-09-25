@@ -29,6 +29,7 @@ class FakeDb:
 
     def __init__(self):
         self.configs = {"target_position": {
+            1: {"id": 1, "seq_id": 1, "xpos": 0.0, "ypos": 0.0},
             2: {"id": 2, "seq_id": 2, "xpos": 0.0, "ypos": 0.0},
             3: {"id": 3, "seq_id": 2, "xpos": 17.0, "ypos": 17.0},
             4: {"id": 4, "seq_id": 2, "xpos": -17.0, "ypos": 17.0},

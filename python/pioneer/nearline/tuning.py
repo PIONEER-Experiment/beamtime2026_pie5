@@ -23,9 +23,9 @@ ODB_CONFIG = "/Nearline/config"
 #: keys under /Nearline/config this module needs, with their defaults.  They
 #: are created when missing and never overwritten.
 CONFIG_DEFAULTS = {
-    # config.target_position id the one run per proposal is taken at; id 2 is
-    # the centre (0, 0) of the standard five-point sequence.
-    "MiniTwin target config": 2,
+    # config.target_position id the one run per proposal is taken at; id 1 is
+    # the one-point centre sequence (seq 1, (0, 0)).
+    "MiniTwin target config": 1,
     # the nearline output tree as pinky writes it, and where the service
     # reads the mirror of it; a posted file path has the first replaced by
     # the second.

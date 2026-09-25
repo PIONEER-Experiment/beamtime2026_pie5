@@ -655,7 +655,7 @@ retake it with `schedule --since <id - 1>`.
 | `/Nearline/config/MiniTwin URL` | `http://127.0.0.1:8420` | the service (read once at start-up) |
 | `/Nearline/config/MiniTwin updates` | `pim1_epics` | the config table a proposal's row goes to |
 | `/Nearline/config/MiniTwin enable` | `y` | the pause switch, read every iteration |
-| `/Nearline/config/MiniTwin target config` | `2` | `config.target_position` id of the one run per proposal |
+| `/Nearline/config/MiniTwin target config` | `1` | `config.target_position` id of the one run per proposal (id 1 = seq 1, the centre (0, 0)) |
 | `/Nearline/config/MiniTwin local prefix` | `/home/pinky/nearline/` | start of a file path as the daemon writes it |
 | `/Nearline/config/MiniTwin remote prefix` | `/home/pioneer/nearline/histograms/` | what replaces it in a posted path |
 | `/Nearline/MiniTwin/Last proposal id` | `0` | newest proposal id seen |

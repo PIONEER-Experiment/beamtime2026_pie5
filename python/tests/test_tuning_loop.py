@@ -91,7 +91,7 @@ def test_iter_schedules_one_run_at_the_centre():
     assert run["requested_events"] == 1000000
     # the pim1 row was written as a new config, the centre was reused by id
     assert db.written == [("pim1_epics", {"ASM12:SOL:2": 90.44})]
-    assert sorted(run["configs"]) == [2, 100]
+    assert sorted(run["configs"]) == [1, 100]
     # the sequence around the run posts without a merge; the wrapper has no
     # on_complete and so goes straight to DONE in the run database
     on_completes = sorted((s["on_complete"] or "") for s in db.sequences.values())
@@ -121,7 +121,7 @@ def test_dry_run_writes_nothing():
     loop, db, _, _ = make_loop(mt=FakeMt([iter_config()]))
     scheduled = loop.poll_and_schedule(dry_run=True)
     assert db.runs == {} and db.sequences == {} and db.written == []
-    assert scheduled[0]["target_position"]["id"] == 2
+    assert scheduled[0]["target_position"]["id"] == 1
     assert scheduled[0]["on_complete"] == "mt_add"
 
 
@@ -141,7 +141,7 @@ def test_ensure_odb_keys_keeps_existing_values():
     assert odb.values["/Nearline/config/MiniTwin target config"] == 4
     odb = FakeOdb()
     tuning.ensure_odb_keys(odb)
-    assert odb.values["/Nearline/config/MiniTwin target config"] == 2
+    assert odb.values["/Nearline/config/MiniTwin target config"] == 1
 
 
 def test_post_sequence_marks_done():
@@ -304,7 +304,7 @@ def test_schedule_keeps_the_sequence_id():
     import pioneer.nearline.run as nl_run
     db = FakeDb()
     mrs = nl_run.midas_run_sequence(db, num_ev=1e6)
-    mrs.set_config_id("target_position", 2)
+    mrs.set_config_id("target_position", 1)
     mrs.schedule()
     assert mrs.seq_id in db.sequences
 
