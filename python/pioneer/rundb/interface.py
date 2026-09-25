@@ -190,6 +190,42 @@ class interface:
         conn.close()
         return result[0] if result is not None else None
 
+    def get_run_times(self, midas_run_numbers : int | list[int]) -> dict:
+        """Start and stop time of MIDAS runs `midas_run_numbers`.
+
+        Returns ``{run number: {"bor": datetime | None, "eor": datetime | None}}``
+        with an entry for every number asked about.  The times are the
+        ``log_time`` of the begin-of-run and end-of-run rows the slow-control
+        logger writes to ``logs.slow_control`` (earliest BOR, latest EOR, as
+        the run database page shows them); a run without such a row gets None.
+        Read-only.
+        """
+        if isinstance(midas_run_numbers, int):
+            midas_run_numbers = [midas_run_numbers]
+        numbers = sorted({int(n) for n in midas_run_numbers})
+        out = {n: {"bor": None, "eor": None} for n in numbers}
+        if not numbers:
+            return out
+        conn = connect(self.user, self.password)
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT midas_run_number,
+                           min(log_time) FILTER (WHERE reason = 'BOR'),
+                           max(log_time) FILTER (WHERE reason = 'EOR')
+                    FROM logs.slow_control
+                    WHERE reason IN ('BOR', 'EOR')
+                      AND midas_run_number = ANY(%s)
+                    GROUP BY midas_run_number
+                    """, (numbers, )
+                )
+                for number, started, stopped in cursor.fetchall():
+                    out[number] = {"bor": started, "eor": stopped}
+        finally:
+            conn.close()
+        return out
+
     def schedule_postproc_job(self, run_id : int, task : str):
         conn = connect(self.user, self.password)
         with conn.cursor() as cursor:

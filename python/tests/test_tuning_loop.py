@@ -2016,3 +2016,94 @@ def test_inconsistent_axes_post_files_only_with_an_error(monkeypatch):
     assert "inline" not in context["measurement"] and len(context["measurement"]["files"]) == 1
     assert any(e and "x-y map" in m and "piana's file mirror" in m for m, e in messages)
     assert db.sequences[57]["status"] == "DONE"
+
+
+# -- WP10: run exposure (measurement.exposure) --------------------------------
+
+class _FakeCursor:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.conn.executed.append((sql, params))
+        if self.conn.fail:
+            raise RuntimeError("connection lost")
+
+    def fetchall(self):
+        return list(self.conn.rows)
+
+
+class _FakeConn:
+    def __init__(self, rows=(), fail=False):
+        self.rows, self.fail = list(rows), fail
+        self.executed = []
+        self.closed = False
+        self.committed = False
+
+    def cursor(self, *args, **kwargs):
+        return _FakeCursor(self)
+
+    def commit(self):
+        self.committed = True
+
+    def close(self):
+        self.closed = True
+
+
+def test_get_run_times_reads_bor_and_eor_rows(monkeypatch):
+    from datetime import datetime, timezone
+    import pioneer.rundb.interface as rundb_iface
+    bor = datetime(2026, 9, 25, 10, 0, 0, tzinfo=timezone.utc)
+    eor = datetime(2026, 9, 25, 10, 5, 12, tzinfo=timezone.utc)
+    conn = _FakeConn(rows=[(604, bor, eor), (605, bor, None)])
+    monkeypatch.setattr(rundb_iface, "connect", lambda *a, **k: conn)
+    times = rundb_iface.interface().get_run_times([605, 604, 606])
+    assert times == {604: {"bor": bor, "eor": eor}, 605: {"bor": bor, "eor": None},
+                     606: {"bor": None, "eor": None}}
+    ((sql, params),) = conn.executed
+    assert "logs.slow_control" in sql and params == ([604, 605, 606],)
+    # read-only, and the connection is closed
+    assert conn.closed and not conn.committed
+    assert not any(word in sql.upper() for word in ("INSERT", "UPDATE", "DELETE"))
+
+
+def test_get_run_times_closes_the_connection_on_error(monkeypatch):
+    import pioneer.rundb.interface as rundb_iface
+    conn = _FakeConn(fail=True)
+    monkeypatch.setattr(rundb_iface, "connect", lambda *a, **k: conn)
+    with pytest.raises(RuntimeError):
+        rundb_iface.interface().get_run_times(604)
+    assert conn.closed
+
+
+def test_get_run_times_of_nothing_does_not_connect(monkeypatch):
+    import pioneer.rundb.interface as rundb_iface
+    monkeypatch.setattr(rundb_iface, "connect", lambda *a, **k: pytest.fail("connected"))
+    assert rundb_iface.interface().get_run_times([]) == {}
+
+
+def test_get_run_times_against_the_scratch_database(fresh_db, seeded):
+    """The real query, on the seeded runs (needs $PIONEER_RUNDB_TEST_DSN)."""
+    import psycopg
+    from rundb_seed import _patch_config, _restore_config
+    from pioneer.rundb.interface import interface
+
+    params = psycopg.conninfo.conninfo_to_dict(fresh_db)
+    saved = _patch_config(fresh_db)
+    try:
+        numbers = list(seeded["finished_run_numbers"]) + [seeded["running_run_number"]]
+        times = interface(user=params.get("user") or "postgres",
+                          password=params.get("password") or "").get_run_times(numbers)
+    finally:
+        _restore_config(saved)
+    for number in seeded["finished_run_numbers"]:
+        entry = times[number]
+        assert (entry["eor"] - entry["bor"]).total_seconds() == seeded["durations"][number]
+    running = times[seeded["running_run_number"]]
+    assert running["bor"] is not None and running["eor"] is None
