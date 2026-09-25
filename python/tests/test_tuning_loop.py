@@ -2066,11 +2066,34 @@ def test_get_run_times_reads_bor_and_eor_rows(monkeypatch):
     times = rundb_iface.interface().get_run_times([605, 604, 606])
     assert times == {604: {"bor": bor, "eor": eor}, 605: {"bor": bor, "eor": None},
                      606: {"bor": None, "eor": None}}
-    ((sql, params),) = conn.executed
+    (timeout, _), (sql, params) = conn.executed
+    # the scan is bounded: 5 s by default, local to this read-only transaction
+    assert timeout == "SET LOCAL statement_timeout = '5000ms'"
     assert "logs.slow_control" in sql and params == ([604, 605, 606],)
     # read-only, and the connection is closed
     assert conn.closed and not conn.committed
     assert not any(word in sql.upper() for word in ("INSERT", "UPDATE", "DELETE"))
+
+
+def test_get_run_times_timeout_is_configurable(monkeypatch):
+    import pioneer.rundb.interface as rundb_iface
+    conn = _FakeConn()
+    monkeypatch.setattr(rundb_iface, "connect", lambda *a, **k: conn)
+    rundb_iface.interface().get_run_times([604], timeout_s=0.25)
+    assert conn.executed[0][0] == "SET LOCAL statement_timeout = '250ms'"
+
+
+def test_get_all_runs_in_sequence_closes_its_connection(monkeypatch):
+    import pioneer.rundb.interface as rundb_iface
+    conn = _FakeConn(rows=[(401,), (402,)])
+    monkeypatch.setattr(rundb_iface, "connect", lambda *a, **k: conn)
+    assert rundb_iface.interface().get_all_runs_in_sequence(57) == [401, 402]
+    assert conn.closed
+    failing = _FakeConn(fail=True)
+    monkeypatch.setattr(rundb_iface, "connect", lambda *a, **k: failing)
+    with pytest.raises(RuntimeError):
+        rundb_iface.interface().get_all_runs_in_sequence(57)
+    assert failing.closed
 
 
 def test_get_run_times_closes_the_connection_on_error(monkeypatch):
@@ -2080,6 +2103,7 @@ def test_get_run_times_closes_the_connection_on_error(monkeypatch):
     with pytest.raises(RuntimeError):
         rundb_iface.interface().get_run_times(604)
     assert conn.closed
+    assert "statement_timeout" in conn.executed[0][0]
 
 
 def test_get_run_times_of_nothing_does_not_connect(monkeypatch):

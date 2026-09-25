@@ -190,7 +190,7 @@ class interface:
         conn.close()
         return result[0] if result is not None else None
 
-    def get_run_times(self, midas_run_numbers : int | list[int]) -> dict:
+    def get_run_times(self, midas_run_numbers : int | list[int], timeout_s : float = 5.0) -> dict:
         """Start and stop time of MIDAS runs `midas_run_numbers`.
 
         Returns ``{run number: {"bor": datetime | None, "eor": datetime | None}}``
@@ -199,6 +199,11 @@ class interface:
         logger writes to ``logs.slow_control`` (earliest BOR, latest EOR, as
         the run database page shows them); a run without such a row gets None.
         Read-only.
+
+        Without the index on (midas_run_number, reason) that db_viewer.sql
+        creates this scans the whole log, which only grows: the query is
+        cancelled after `timeout_s` seconds (statement_timeout, raised as
+        psycopg.errors.QueryCanceled).
         """
         if isinstance(midas_run_numbers, int):
             midas_run_numbers = [midas_run_numbers]
@@ -209,6 +214,9 @@ class interface:
         conn = connect(self.user, self.password)
         try:
             with conn.cursor() as cursor:
+                # an int, not user input: SET takes no bind parameters
+                cursor.execute("SET LOCAL statement_timeout = '%dms'"
+                               % max(1, int(float(timeout_s) * 1000)))
                 cursor.execute(
                     """
                     SELECT midas_run_number,
@@ -544,11 +552,14 @@ class interface:
 
     def get_all_runs_in_sequence(self, id : int) -> list[int]:
         conn = connect(user = self.user, password = self.password)
-        with conn.cursor() as cursor:
-            cursor.execute(
-                "SELECT midas_run_id FROM state.runs_in_sequence WHERE seq_id = %s", (id, )
-            )
-            run_ids = cursor.fetchall()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT midas_run_id FROM state.runs_in_sequence WHERE seq_id = %s", (id, )
+                )
+                run_ids = cursor.fetchall()
+        finally:
+            conn.close()
         return [r[0] for r in run_ids]
 
 
