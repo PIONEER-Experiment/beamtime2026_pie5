@@ -2328,7 +2328,7 @@ def test_the_context_carries_the_recorded_exposure():
         "wd_events": 1_000_123,
         "per_run": [{"run": 604, "seconds": 312.0, "wd_events": 1_000_123,
                      "bor": "2026-09-25T10:00:00.000Z", "eor": "2026-09-25T10:05:12.000Z",
-                     "time_source": "odb"}],
+                     "time_source": "odb", "complete": True}],
         "source": tuning.EXPOSURE_SOURCES,
     }
     assert set(context["measurement"]["exposure"]["source"]) == {"seconds", "wd_events"}
@@ -2389,7 +2389,8 @@ def test_a_run_without_bor_has_null_seconds():
     exposure = context["measurement"]["exposure"]
     assert exposure["seconds"] is None
     assert exposure["per_run"] == [{"run": 604, "seconds": None, "wd_events": None, "bor": None,
-                                    "eor": "2026-09-25T10:05:12.000Z", "time_source": "run_db"}]
+                                    "eor": "2026-09-25T10:05:12.000Z", "time_source": "run_db",
+                                    "complete": True}]
     (text,) = exposure_messages(messages)
     assert "no BOR row" in text
 
@@ -2454,10 +2455,85 @@ def test_the_merge_path_carries_the_exposure(monkeypatch):
     assert got["per_run"][0]["seconds"] == 60.0 and got["seconds"] is None
 
 
-def test_exposure_of_unknown_runs_is_none():
+def test_exposure_of_unknown_runs_is_all_null():
     loop, db, _, messages = make_loop()
-    assert loop.exposure_of([12345]) is None
+    exposure = loop.exposure_of([12345])
+    # the key is always there on the merge path, with nothing known
+    assert exposure == tuning.empty_exposure([None])
+    assert exposure["seconds"] is None and exposure["wd_events"] is None
+    assert exposure["per_run"][0]["run"] is None
     assert [m for m, e in messages if "exposure" in m]
+
+    def boom(run_id):
+        raise RuntimeError("run database down")
+    db.get_midas_run_number = boom
+    assert loop.exposure_of([401, 402]) == tuning.empty_exposure([])
+
+
+def test_the_merge_path_always_posts_an_exposure(daemon_module, monkeypatch):
+    """iterate_sequences hands AddContext an exposure even when the run
+    numbers cannot be read."""
+    loop, db, odb, _ = make_loop()
+    added = []
+
+    class Job:
+        config = {"on_complete": "merge mt_add", "id": 57, "output_file": "/n/seq00057.root",
+                  "midas_run_ids": [12345]}
+
+        def finalise(self):
+            pass
+
+    class Queue:
+        def get_finshed(self):
+            return [Job()]
+
+        def getOpenSlots(self):                        # noqa: N802
+            return 0
+
+    loop.mt.AddContext = lambda path, step=None, exposure=None: added.append(exposure)
+    d = bare_daemon(daemon_module, loop, db, odb)
+    d.sequence_queue = Queue()
+    d.iterate_sequences()
+    assert added == [tuning.empty_exposure([None])]
+
+
+def test_a_run_with_files_left_out_has_null_exposure():
+    loop, db, odb, http, run_id = running_step()
+    messages = []
+    loop._message = lambda m, is_error=False: messages.append((m, is_error))
+    start_run(loop, odb, run_id)
+    stop_run(loop, odb, run_id)
+    db.runs[run_id]["status"] = "DONE"
+    db.files += [{"run_id": run_id, "filebase": "run00604_00000", "fileext": "root",
+                  "status": "DONE"},
+                 {"run_id": run_id, "filebase": "run00604_00001", "fileext": "root",
+                  "status": "FAILED"}]
+    loop.post_sequence(loop.active["seq_id"])
+    (context,) = http.contexts
+    exposure = context["measurement"]["exposure"]
+    assert len(context["measurement"]["files"]) == 1
+    assert exposure["seconds"] is None and exposure["wd_events"] is None
+    assert exposure["per_run"][0]["complete"] is False
+    assert exposure["per_run"][0]["seconds"] is None and exposure["per_run"][0]["wd_events"] is None
+    # no run-database lookup for a run whose numbers would not describe the data
+    assert db.run_times_calls == []
+    (text,) = exposure_messages(messages)
+    assert "left out" in text
+
+
+def test_only_the_incomplete_run_is_nulled():
+    db = FakeDb()
+    a = db.add_run(604, subruns=1)
+    b = db.add_run(605, subruns=2)
+    db.files[-1]["status"] = "RUNNING"
+    c = db.add_run(606)                   # no histogram file at all
+    db.run_times = {n: {"bor": _utc(10, 0, 0), "eor": _utc(10, 1, 0)} for n in (604, 605, 606)}
+    loop, _, _, _ = make_loop(db=db, mt=real_mt())
+    exposure = loop.build_context([a, b, c])["measurement"]["exposure"]
+    assert [r["complete"] for r in exposure["per_run"]] == [True, False, False]
+    assert [r["seconds"] for r in exposure["per_run"]] == [60.0, None, None]
+    assert exposure["seconds"] is None
+    assert db.run_times_calls == [([604], tuning.RUN_TIMES_TIMEOUT_S)]
 
 
 # -- the scratch-database guards in conftest.py (no database touched) ---------

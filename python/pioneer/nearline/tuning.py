@@ -338,7 +338,8 @@ def hist_files(db, run_ids, output_path):
     One entry per state.file_list 'root' row with status DONE, in filebase
     order: ``{"run_db_id", "run_number", "local"}``, where ``local`` is
     ``<output_path>/run<N>/<filebase>_hists.root`` as jobs.py writes it.
-    Rows in any other status are left out and listed in ``skipped``.
+    Rows in any other status are left out and listed in ``skipped`` as
+    ``(local, status, run number)``.
     """
     numbers = {}
     for run_id in run_ids:
@@ -351,7 +352,7 @@ def hist_files(db, run_ids, output_path):
         number = numbers[row["run_id"]]
         local = "%s/run%05d/%s_hists.root" % (str(output_path).rstrip("/"), number, row["filebase"])
         if row.get("status", "DONE") != "DONE":
-            skipped.append((local, row.get("status")))
+            skipped.append((local, row.get("status"), number))
             continue
         found.append({"run_db_id": row["run_id"], "run_number": number, "local": local})
     return found, skipped, [numbers[r] for r in run_ids]
@@ -369,12 +370,13 @@ def iso_utc(when):
 
 
 def empty_exposure(numbers):
-    """``measurement.exposure`` with nothing known."""
+    """``measurement.exposure`` with nothing known; a run number that is not
+    known is null."""
     return {
         "seconds": None,
         "wd_events": None,
-        "per_run": [{"run": int(n), "seconds": None, "wd_events": None, "bor": None, "eor": None,
-                     "time_source": None}
+        "per_run": [{"run": int(n) if n is not None else None, "seconds": None, "wd_events": None,
+                     "bor": None, "eor": None, "time_source": None, "complete": None}
                     for n in numbers],
         "source": dict(EXPOSURE_SOURCES),
     }
@@ -1049,8 +1051,11 @@ class TuningLoop:
         `step` (the step the runs were taken for, or None) gives the
         events of the exposure."""
         files, skipped, numbers = hist_files(self.db, run_ids, self.output_path)
-        for local, status in skipped:
+        for local, status, _ in skipped:
             self.message("Tuning: leaving out %s (file status %s)" % (local, status))
+        # runs whose histograms are not all in the context
+        incomplete = {number for _, _, number in skipped}
+        incomplete |= set(numbers) - {f["run_number"] for f in files}
         if not files:
             raise ContextError("no finished nearline histogram files for run(s) %s"
                                % ", ".join(str(n) for n in numbers))
@@ -1065,9 +1070,10 @@ class TuningLoop:
         header = self.header_reader(files[0]["local"])
         context_id = "_".join("run%05d" % n for n in numbers)
         inline = self.inline_maps([f["local"] for f in files], context_id)
-        return context_id, remote, numbers, header, inline, self.exposure(numbers, step)
+        return context_id, remote, numbers, header, inline, self.exposure(numbers, step,
+                                                                          incomplete=incomplete)
 
-    def exposure(self, numbers, step=None):
+    def exposure(self, numbers, step=None, incomplete=None):
         """``measurement.exposure`` of MIDAS runs `numbers`, so the service
         can normalise rates by run time when the SMA proton current is empty.
 
@@ -1077,7 +1083,11 @@ class TuningLoop:
         from the run database (get_run_times, cancelled after
         RUN_TIMES_TIMEOUT_S) and no events.  A value that is not known, not
         positive seconds or a negative event count, is null, and so is a
-        total over runs with a null.  Whatever is missing is said in one
+        total over runs with a null.  `incomplete` (run numbers with subrun
+        files left out of the context) makes those runs' seconds and events
+        null, so the exposure describes only data that is in the histograms;
+        per_run.complete is False for them, True for the others, null when
+        `incomplete` is None (not known).  Whatever is missing is said in one
         MIDAS message; this never raises, a context is never held up by it.
         See EXPOSURE_SOURCES."""
         exposure, notes = empty_exposure([]), []
@@ -1088,6 +1098,12 @@ class TuningLoop:
             record = step if (step or {}).get("run_number") else None
             fallback = []
             for entry in per_run:
+                if incomplete is not None:
+                    entry["complete"] = entry["run"] not in incomplete
+                if entry["complete"] is False:
+                    notes.append("run %d has subrun files left out of the context: its seconds "
+                                 "and events are null" % entry["run"])
+                    continue
                 if record is not None and record["run_number"] == entry["run"]:
                     self._exposure_from_record(entry, record, notes)
                 elif step is not None and len(per_run) == 1:
@@ -1167,8 +1183,10 @@ class TuningLoop:
             entry["seconds"] = round(seconds, 3)
 
     def exposure_of(self, run_ids, step=None):
-        """``exposure`` of run database ids `run_ids` (the merge path), or
-        None when their run numbers cannot be read.  Never raises."""
+        """``exposure`` of run database ids `run_ids` (the merge path); all
+        null (empty_exposure) when their run numbers cannot be read, so the
+        key is always there.  Never raises."""
+        numbers = []
         try:
             numbers = [self.db.get_midas_run_number(r) for r in run_ids]
             if any(n is None for n in numbers):
@@ -1176,7 +1194,7 @@ class TuningLoop:
         except Exception as exc:                       # noqa: BLE001 -- never blocks the post
             self.message("Tuning: exposure of run(s) (db id) %s not known: %s"
                          % (", ".join(str(r) for r in run_ids), exc))
-            return None
+            return empty_exposure(numbers)
         return self.exposure(numbers, step)
 
     def inline_maps(self, local_paths, context_id):
