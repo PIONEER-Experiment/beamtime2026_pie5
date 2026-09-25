@@ -374,8 +374,20 @@ class miniTwinInterface:
         self._pending.extend(kept)
 
     def Flush(self):                                   # noqa: N802
-        """Retry queued contexts without asking for a proposal.  Never raises."""
+        """Retry queued contexts without asking for a proposal (the daemon
+        while paused).  With no proposal poll to show the service is up, a
+        failing head context gets one GET /v1/health first: only when that
+        answers does its next failure count against it.  Never raises."""
         try:
+            if self._pending and not self._muted():
+                rec = self._ctx_failures.get(self._pending[0].get("context_id"))
+                if rec is not None and rec["serial"] == self._success_serial:
+                    try:
+                        self.client.health()
+                        self._succeed()
+                    except Exception as exc:           # noqa: BLE001 -- the service is not well
+                        self._fail("health: %r" % (exc,))
+                        return False
             return self._flush()
         except Exception as exc:                       # noqa: BLE001 -- never escape
             self._log("Flush: %r" % (exc,))

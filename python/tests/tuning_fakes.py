@@ -201,6 +201,10 @@ class FakeHttp:
     #: what GET /v1/config answers: a dict, or an exception to raise
     config_answer = None
 
+    def health(self):
+        self._maybe_fail()
+        return {"state": "ready"}
+
     def config(self):
         if isinstance(self.config_answer, Exception):
             raise self.config_answer

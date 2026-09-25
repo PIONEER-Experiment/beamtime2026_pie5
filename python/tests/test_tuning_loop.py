@@ -1765,3 +1765,24 @@ def test_combine_normalises_all_runs_or_none(monkeypatch, capsys):
     assert "histograms/musip/current" not in histos
     out = capsys.readouterr().out
     assert out.count("warning") == 1 and "b0" in out
+
+
+def test_a_failing_context_is_moved_aside_while_paused_too():
+    """Paused, the daemon only flushes; a health check stands in for the poll."""
+    from pioneer.nearline.beamtune_client import BeamTuneError
+    loop, db, odb, http, messages = loop_with_service([])
+    original = http.post_context
+
+    def post_context(context):
+        if context["context_id"] == "run00604":
+            raise BeamTuneError("POST /v1/context -> 500: boom", status=500)
+        return original(context)
+    http.post_context = post_context
+    db.add_run(604, subruns=1, seq_id=57)
+    db.add_run(605, subruns=1, seq_id=58)
+    loop.post_sequence(57)
+    loop.post_sequence(58)
+    for _ in range(10):
+        loop.mt._muted_until = 0.0
+        loop.mt.Flush()
+    assert [c["context_id"] for c in http.contexts] == ["run00605"]
