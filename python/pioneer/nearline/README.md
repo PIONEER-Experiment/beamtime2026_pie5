@@ -643,18 +643,21 @@ daemon calls it and the command line above runs the same functions.
 2. **The run is taken.** The sequencer runs it; the daemon's nearline jobs
    process every subrun as usual. The run database marks the sequence
    `RUNSDONE` once the run and every nearline job of it are `DONE`.
-3. **The context is posted.** The daemon claims the sequence, waits
-   `MiniTwin post delay` seconds (the service's mirror of the output tree is
-   refreshed every 30 s, so the last subrun's file has to reach it first;
-   the daemon keeps working meanwhile) and posts a context made of file
-   paths: every subrun's `run<N>/<filebase>_hists.root`,
+3. **The context is posted.** The daemon claims the sequence and posts its
+   context at once (after `MiniTwin post delay` seconds when that is set
+   above 0, to let the service's file mirror catch up; the daemon keeps
+   working meanwhile). The context lists every subrun's
+   `run<N>/<filebase>_hists.root`,
    with `MiniTwin local prefix` replaced by `MiniTwin remote prefix` (the
    service reads piana's mirror of the output tree), role `hist_root`; the
    three MuPix maps (`miniTwinInterface.miniTwin_histograms`: x-x', y-y',
-   x-y) summed over those subruns with ROOT, rebinned to 64 x 64 and sent
-   inline with the axes read from the histograms (the service reads inline
-   maps first, the files as a fallback; when the maps cannot be read the
-   context goes out with its files only and a warning); the
+   x-y) summed with ROOT over those subruns' files on this machine, rebinned
+   to 64 x 64 and sent inline -- they are the measurement, so the loop does
+   not wait for the mirror -- with the axes read from the histograms and
+   `names`, `source` ("daemon"), `n_files` and `rebin` saying where they come
+   from. When they cannot be made (no ROOT, unreadable files, empty maps,
+   inconsistent axes) the context goes out with its files only and a MIDAS
+   error: the step's measurement then depends on the mirror; the
    knobs (Demand) and readback (Measured) of the type 1/4/5 channels in the
    first subrun's `beamline` header; the step (`responds_to`, `step_id`,
    `attempt`, `plan`) when the sequence is the one the active step was
@@ -734,7 +737,7 @@ recognises a repeated context by its id.
 | `/Nearline/config/MiniTwin local prefix` | `/home/pinky/nearline/` | start of a file path as the daemon writes it |
 | `/Nearline/config/MiniTwin remote prefix` | `/home/pioneer/nearline/histograms/` | what replaces it in a posted path |
 | `/Nearline/config/MiniTwin max events` | `10000000` | most events a proposal's `run.stop` may request; more is an error and capped |
-| `/Nearline/config/MiniTwin post delay` | `60` | seconds between claiming a finished sequence and posting it (`post` by hand does not wait) |
+| `/Nearline/config/MiniTwin post delay` | `0` | seconds between claiming a finished sequence and posting it (`post` by hand does not wait). The default was 60 before; an ODB that already has the key keeps its value, so set it to 0 by hand to stop waiting |
 | `/Nearline/MiniTwin/Last proposal id` | `0` | newest proposal id seen |
 | `/Nearline/MiniTwin/Active step/Proposal id` | `0` | proposal of the run in flight; `0` = none |
 | `/Nearline/MiniTwin/Active step/Step id`, `Attempt`, `Plan` | `""`, `-1`, `""` | the proposal's plan step; empty / `-1` = not known |

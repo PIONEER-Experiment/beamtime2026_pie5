@@ -1196,7 +1196,8 @@ def test_cli_schedule_refuses_while_the_loop_is_enabled(capsys):
 def test_a_claimed_sequence_is_posted_after_the_post_delay(daemon_module):
     loop, db, odb, http, _ = loop_with_service([])
     loop.clock = Clock()
-    assert odb.values["/Nearline/config/MiniTwin post delay"] == 60
+    assert odb.values["/Nearline/config/MiniTwin post delay"] == 0     # the default
+    odb.values["/Nearline/config/MiniTwin post delay"] = 60            # a positive value still works
     db.add_run(604, subruns=1, seq_id=57)
     d = bare_daemon(daemon_module, loop, db, odb)
     d.build_and_dispatch_seq({"id": 57, "on_complete": "mt_add", "status": "CLAIMED"})
@@ -1406,7 +1407,7 @@ def test_unreadable_maps_still_post_the_files():
     assert "inline" not in context["measurement"]
     assert len(context["measurement"]["files"]) == 1
     assert db.sequences[57]["status"] == "DONE"
-    assert any("warning" in m.lower() and "no ROOT here" in m and not e for m, e in messages)
+    assert any(e and "no ROOT here" in m and "mirror" in m for m, e in messages)
 
 
 def test_merge_path_add_context_takes_axes_from_the_file(monkeypatch):
@@ -1592,6 +1593,7 @@ def test_a_reply_without_a_context_id_is_none():
 def test_a_kick_while_waiting_out_the_delay_keeps_the_old_steps_provenance():
     loop, db, odb, http, _ = loop_with_service([proposal(5)])
     loop.clock = Clock()
+    odb.values["/Nearline/config/MiniTwin post delay"] = 60
     seq_id = finished_step(loop, db, 604)
     db.sequences[seq_id]["status"] = "CLAIMED"
     loop.claim(seq_id)
@@ -1613,6 +1615,7 @@ def test_a_kick_while_waiting_out_the_delay_keeps_the_old_steps_provenance():
 def test_a_restart_during_the_delay_keeps_the_provenance():
     loop, db, odb, http, _ = loop_with_service([proposal(5)])
     loop.clock = Clock()
+    odb.values["/Nearline/config/MiniTwin post delay"] = 60
     seq_id = finished_step(loop, db, 604)
     db.sequences[seq_id]["status"] = "CLAIMED"
     loop.claim(seq_id)
@@ -1732,7 +1735,7 @@ def test_empty_maps_are_not_sent_inline():
     (context,) = http.contexts
     assert "inline" not in context["measurement"]
     assert len(context["measurement"]["files"]) == 1
-    assert any("empty" in m and "warning" in m.lower() for m, _ in messages)
+    assert any(e and "empty" in m and "mirror" in m for m, e in messages)
 
 
 # -- second review N9: combine_files across runs ---------------------------------
@@ -1957,3 +1960,59 @@ def test_cli_schedule_dry_run_shows_the_requested_events(capsys):
     assert '"num_ev": 1000' in out and db.runs == {}
     assert tuning.main(["schedule"], db=db, odb=odb, http=http) == 0
     assert list(db.runs.values())[0]["requested_events"] == 1000
+
+
+# -- inline maps are the measurement: no wait, labelled, failures are errors -----
+
+def test_the_default_post_delay_posts_at_claim(daemon_module):
+    loop, db, odb, http, _ = loop_with_service([])
+    loop.clock = Clock()
+    assert odb.values["/Nearline/config/MiniTwin post delay"] == 0
+    db.add_run(604, subruns=1, seq_id=57)
+    d = bare_daemon(daemon_module, loop, db, odb)
+    d.build_and_dispatch_seq({"id": 57, "on_complete": "mt_add", "status": "CLAIMED"})
+    assert [c["context_id"] for c in http.contexts] == ["run00604"]
+
+
+def test_an_existing_post_delay_is_kept():
+    odb = FakeOdb({"/Nearline/config/MiniTwin post delay": 60})
+    tuning.ensure_odb_keys(odb)
+    assert odb.values["/Nearline/config/MiniTwin post delay"] == 60
+
+
+def test_inline_maps_are_labelled(monkeypatch):
+    files = {"a": mupix_maps(10.0), "b": mupix_maps(20.0), "c": mupix_maps(5.0)}
+    monkeypatch.setitem(sys.modules, "ROOT", fake_root(files))
+    inline = tuning.read_inline_maps(["a", "b", "c"])
+    assert inline["names"] == [XXP, YYP, XY]
+    assert inline["source"] == "daemon"
+    assert inline["n_files"] == 3
+    assert inline["rebin"] == 2
+    assert set(inline) == {"maps", "axes", "names", "source", "n_files", "rebin"}
+    assert inline["axes"] == {"x": list(X_RANGE), "px": list(PX_RANGE),
+                              "y": list(Y_RANGE), "py": list(PY_RANGE)}
+    assert sum(map(sum, inline["maps"][0])) == 35.0
+
+
+def test_rebin_is_listed_per_map_when_the_maps_differ():
+    from pioneer.nearline.miniTwinInterface import inline_maps
+    maps = mupix_maps()
+    maps[YYP] = FakeTH2.blob(320, 128, Y_RANGE, PY_RANGE, (5.0, 0.0))
+    inline = inline_maps([maps[XXP], maps[YYP], maps[XY]])
+    assert inline["rebin"] == [[2, 2], [5, 2], [2, 2]]
+
+
+def test_inconsistent_axes_post_files_only_with_an_error(monkeypatch):
+    db = FakeDb()
+    db.add_run(604, subruns=1, seq_id=57)
+    local = "/home/pinky/nearline/run00604/run00604_00000_hists.root"
+    maps = mupix_maps()
+    maps[XY] = FakeTH2.blob(128, 128, (-3.48, 37.48), Y_RANGE, (5.0, 5.0))
+    monkeypatch.setitem(sys.modules, "ROOT", fake_root({local: maps}))
+    http = FakeHttp()
+    loop, _, _, messages = make_loop(db=db, mt=real_mt(http), maps_reader=tuning.read_inline_maps)
+    loop.post_sequence(57)
+    (context,) = http.contexts
+    assert "inline" not in context["measurement"] and len(context["measurement"]["files"]) == 1
+    assert any(e and "x-y map" in m and "piana's file mirror" in m for m, e in messages)
+    assert db.sequences[57]["status"] == "DONE"

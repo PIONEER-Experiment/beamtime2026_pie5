@@ -31,9 +31,10 @@ CONFIG_DEFAULTS = {
     # the second.
     "MiniTwin local prefix": "/home/pinky/nearline/",
     "MiniTwin remote prefix": "/home/pioneer/nearline/histograms/",
-    # seconds a finished sequence waits before its context is posted, so
-    # the service's mirror (rsync every 30 s) has the last subrun's files
-    "MiniTwin post delay": 60,
+    # seconds a finished sequence waits before its context is posted; 0 posts
+    # at once, the inline maps being the measurement (a positive value lets
+    # the service's file mirror, rsync every 30 s, catch up first)
+    "MiniTwin post delay": 0,
     # upper limit on the events a proposal may request for its run
     "MiniTwin max events": 10000000,
 }
@@ -237,7 +238,8 @@ def read_inline_maps(paths, names=None):
     from the MuPix maps summed over the subrun files `paths` (local paths).
     Needs ROOT, imported here; every file must bin each map the same way."""
     import ROOT
-    from pioneer.nearline.miniTwinInterface import inline_maps, miniTwin_histograms, hist_ranges
+    from pioneer.nearline.miniTwinInterface import (inline_maps, miniTwin_histograms, hist_ranges,
+                                                    label_inline)
 
     names = list(names or miniTwin_histograms)
     total = [None] * len(names)
@@ -260,7 +262,7 @@ def read_inline_maps(paths, names=None):
                 total[i].Add(hist)
         finally:
             aFile.Close()
-    return inline_maps(total)
+    return label_inline(inline_maps(total), names, len(paths))
 
 
 def hist_files(db, run_ids, output_path):
@@ -907,17 +909,18 @@ class TuningLoop:
         return context_id, remote, numbers, header, inline
 
     def inline_maps(self, local_paths, context_id):
-        """The maps to send inline, or None -- a context is never lost over
-        them: when they cannot be read it goes out with its files only."""
+        """The maps to send inline -- the measurement -- or None.  A context
+        is never lost over them: when they cannot be made it goes out with
+        its files only, and a MIDAS error says the step's measurement then
+        depends on the service's file mirror."""
         try:
             inline = self.maps_reader(local_paths)
-        except Exception as exc:                       # noqa: BLE001 -- display artefact only
-            self.message("Tuning warning: maps of %s not sent inline (files only): %s"
-                         % (context_id, exc))
-            return None
-        if inline is not None and not any(sum(map(sum, plane)) for plane in inline["maps"]):
-            self.message("Tuning warning: maps of %s are empty; not sent inline (files only)"
-                         % context_id)
+            if inline is not None and not any(sum(map(sum, plane)) for plane in inline["maps"]):
+                raise ValueError("the maps are empty")
+        except Exception as exc:                       # noqa: BLE001 -- files only, never lost
+            self.message("Tuning: inline maps of %s could not be made (%s); posted with files "
+                         "only, so its measurement depends on piana's file mirror"
+                         % (context_id, exc), is_error=True)
             return None
         return inline
 

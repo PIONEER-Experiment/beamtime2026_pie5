@@ -108,10 +108,23 @@ def inline_maps(hists):
     if not (_same_range(xy_x, x) and _same_range(xy_y, y)):
         raise ValueError("x-y map spans x %s, y %s but x-x' and y-y' span x %s, y %s"
                          % (list(xy_x), list(xy_y), list(x), list(y)))
+    factors = [(h.GetNbinsX() // MAP_BINS, h.GetNbinsY() // MAP_BINS) for h in hists]
+    flat = {f for pair in factors for f in pair}
     return {
         "maps": [serialise_hist(h) for h in hists],
         "axes": {"x": list(x), "px": list(px), "y": list(y), "py": list(py)},
+        # bins summed into one per axis: one number when all agree
+        "rebin": flat.pop() if len(flat) == 1 else [list(pair) for pair in factors],
     }
+
+
+def label_inline(inline, names, n_files):
+    """Say where inline maps come from, for the service to show: the
+    histogram paths, that the daemon made them, and from how many files."""
+    inline["names"] = list(names)
+    inline["source"] = "daemon"
+    inline["n_files"] = int(n_files)
+    return inline
 
 
 class miniTwinInterface:
@@ -201,7 +214,7 @@ class miniTwinInterface:
             for name, hist in zip(miniTwin_histograms, hists):
                 if not hist:
                     raise KeyError("%s has no %s" % (filename, name))
-            inline = inline_maps(hists)
+            inline = label_inline(inline_maps(hists), miniTwin_histograms, 1)
         finally:
             aFile.Close()
 
