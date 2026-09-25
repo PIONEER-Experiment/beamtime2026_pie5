@@ -849,11 +849,16 @@ class TuningLoop:
         """The maps to send inline, or None -- a context is never lost over
         them: when they cannot be read it goes out with its files only."""
         try:
-            return self.maps_reader(local_paths)
+            inline = self.maps_reader(local_paths)
         except Exception as exc:                       # noqa: BLE001 -- display artefact only
             self.message("Tuning warning: maps of %s not sent inline (files only): %s"
                          % (context_id, exc))
             return None
+        if inline is not None and not any(sum(map(sum, plane)) for plane in inline["maps"]):
+            self.message("Tuning warning: maps of %s are empty; not sent inline (files only)"
+                         % context_id)
+            return None
+        return inline
 
     def build_context(self, run_ids, step=None):
         """The context of `run_ids` as it would be posted; nothing is sent."""

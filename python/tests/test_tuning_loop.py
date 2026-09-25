@@ -1717,3 +1717,19 @@ def test_a_config_answer_with_an_error_is_not_cached():
     http.config_answer = {"config": {"knobs": {"columns": {"ASM12": "ASM12:SOL:2"}}}}
     assert len(loop.poll_and_schedule()) == 1
     assert db.written == [("pim1_epics", {"ASM12:SOL:2": 90.44})]
+
+
+# -- second review N7: empty maps are not sent inline ----------------------------
+
+def test_empty_maps_are_not_sent_inline():
+    db = FakeDb()
+    db.add_run(604, subruns=1, seq_id=57)
+    http = FakeHttp()
+    empty = {"maps": [[[0.0] * 64 for _ in range(64)]] * 3,
+             "axes": {"x": [0, 1], "px": [0, 1], "y": [0, 1], "py": [0, 1]}}
+    loop, _, _, messages = make_loop(db=db, mt=real_mt(http), maps_reader=lambda paths: empty)
+    loop.post_sequence(57)
+    (context,) = http.contexts
+    assert "inline" not in context["measurement"]
+    assert len(context["measurement"]["files"]) == 1
+    assert any("empty" in m and "warning" in m.lower() for m, _ in messages)

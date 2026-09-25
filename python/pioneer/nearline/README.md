@@ -563,8 +563,10 @@ closed for both. Options, after the command name:
 `schedule` exits 0 when it wrote (or would write) a run, 1 when the service
 has no newer proposal, 2 on an error. `post` exits 0 when the service took the
 context and 2 otherwise; unlike the daemon it does not keep a context it could
-not deliver, so run it again once the service answers. `post` needs ROOT with
-the PIONEER dictionaries to read the beam header of the first subrun file.
+not deliver, so run it again once the service answers. `post` reads the beam
+header of the first subrun file through ROOT when the PIONEER dictionaries are
+loaded, else through uproot; the inline maps need ROOT, and without it the
+context goes out with its files only.
 
 **Before enabling the loop**, run `post --dry-run` on a recent run in the
 daemon's exact environment (same user, same shell setup, same `PYTHONPATH`):
@@ -663,7 +665,12 @@ daemon calls it and the command line above runs the same functions.
    any other `CLAIMED` sequence is named in one MIDAS message and left for
    `post --run N`. A context the service refuses (a 4xx about its content) is
    dropped: the sequence is `FAILED`, with a MIDAS error and a `failed`
-   report. So is a context that could not be built.
+   report. So is a context that could not be built, one that failed 20 times
+   while the service answered other calls (after 5 failures in a row it is
+   moved behind the others), and one pushed out of a full queue. A context
+   naming a knob the service does not know, for instance after the service
+   switched to another beam file, is refused with a permanent 400 and
+   dropped this way; post it again by hand once the beam files agree.
 4. **Progress is reported.** While a step is active the daemon posts
    `beamtune.daq/v1` reports to `POST /v1/daq`, at most every 10 s and only
    when something changed: `scheduled`, `running` (events sent / requested),
@@ -705,7 +712,10 @@ posted. Reprocess the failed subrun (re-queue its nearline job, or run
 database moves the sequence on to `RUNSDONE` and the daemon posts it with its
 step as usual; if it stays `FAILED`, post it by hand with
 `python -m pioneer.nearline.tuning post --run <N>`, which sends the step and
-closes the sequence.
+closes the sequence. A `FAILED` sequence can also move back to `RUNSDONE` on
+its own when a later job of its run (backup, remote copy, cleanup) changes
+status, and is then posted again; that is expected, and the service
+recognises a repeated context by its id.
 
 | ODB key | default | what it is |
 |---|---|---|
