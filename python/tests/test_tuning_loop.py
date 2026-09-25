@@ -1459,3 +1459,64 @@ def test_combine_normalises_by_the_current_pulses(monkeypatch):
     headers, histos = combine_files.merge_sub_runs(["a", "b"])
     assert histos[XXP].scaled == pytest.approx(0.1)
     assert histos[XXP].Integral() == pytest.approx(2.0)
+
+
+# -- second review S1 / N3: a context that always fails must not block others --
+
+def test_a_context_that_always_gets_a_5xx_lets_the_others_through():
+    from pioneer.nearline.beamtune_client import BeamTuneError
+    loop, db, odb, http, messages = loop_with_service([])
+    original = http.post_context
+
+    def post_context(context):
+        if context["context_id"] == "run00604":
+            raise BeamTuneError("POST /v1/context -> 500: boom", status=500)
+        return original(context)
+    http.post_context = post_context
+    db.add_run(604, subruns=1, seq_id=57)
+    db.add_run(605, subruns=1, seq_id=58)
+    loop.post_sequence(57)
+    loop.post_sequence(58)
+    # the daemon's loop: a proposal poll (which succeeds) every iteration
+    for _ in range(6):
+        loop.mt.NextConfiguration()
+    assert [c["context_id"] for c in http.contexts] == ["run00605"]
+    assert db.sequences[58]["status"] == "DONE"
+    stuck = [m for m, e in messages if e and "keeps failing" in m]
+    assert len(stuck) == 1 and "run00604" in stuck[0]
+    # given up after 20 failures: dropped, sequence FAILED
+    for _ in range(30):
+        loop.mt.NextConfiguration()
+    assert loop.mt.pending == 0
+    assert db.sequences[57]["status"] == "FAILED"
+    assert any(e and "dropped undelivered context run00604" in m for m, e in messages)
+
+
+def test_a_service_that_is_down_costs_no_context_anything():
+    loop, db, odb, http, _ = loop_with_service([])
+    http.fail = True
+    db.add_run(604, subruns=1, seq_id=57)
+    db.add_run(605, subruns=1, seq_id=58)
+    loop.post_sequence(57)
+    loop.post_sequence(58)
+    for _ in range(50):
+        loop.mt._muted_until = 0.0
+        loop.mt.NextConfiguration()
+    assert loop.mt.pending == 2
+    assert db.sequences[57]["status"] == "CLAIMED"
+    http.fail = False
+    loop.mt._muted_until = 0.0
+    loop.mt.Flush()
+    assert [c["context_id"] for c in http.contexts] == ["run00604", "run00605"]
+
+
+def test_a_full_queue_fails_the_dropped_sequence():
+    loop, db, odb, http, messages = loop_with_service([])
+    http.fail = True
+    loop.mt._pending = __import__("collections").deque(maxlen=2)
+    for i, seq in enumerate((57, 58, 59)):
+        db.add_run(604 + i, subruns=1, seq_id=seq)
+        loop.post_sequence(seq)
+    assert loop.mt.pending == 2
+    assert db.sequences[57]["status"] == "FAILED"
+    assert any(e and "run00604" in m and "full" in m for m, e in messages)

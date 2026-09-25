@@ -435,6 +435,7 @@ class TuningLoop:
         # every context the service takes becomes /Nearline/MiniTwin/Last context id
         self.mt.on_delivered = self.context_delivered
         self.mt.on_rejected = self.context_rejected
+        self.mt.on_stuck = self.context_stuck
         #: context id -> {"seq_id", "step"} of contexts handed to the queue
         self._inflight = {}
         #: context id -> reason, for contexts refused while post_runs waited
@@ -512,14 +513,18 @@ class TuningLoop:
                 self.set_active(None)
 
     def context_rejected(self, context, exc):
-        """The service refused `context` for good (a 4xx about its body): it
-        is dropped from the queue, its sequence FAILED, its step reported
-        `failed` and left active, so it can be posted by hand once fixed."""
+        """`context` left the queue undelivered: the service refused it for
+        good (a 4xx about its body), it failed GIVE_UP_AFTER times, or the
+        queue was full.  Its sequence is FAILED, its step reported `failed`
+        and left active, so it can be posted by hand once fixed."""
+        from pioneer.nearline.beamtune_client import is_permanent_rejection
+
         context_id = context.get("context_id")
         info = self._inflight.pop(context_id, None) or {}
         self._rejected[context_id] = str(exc)
         seq_id, step = info.get("seq_id"), info.get("step")
-        self.message("Tuning: the service rejected context %s%s: %s" % (
+        self.message("Tuning: %s context %s%s: %s" % (
+            "the service rejected" if is_permanent_rejection(exc) else "dropped undelivered",
             context_id, " (sequence %s set FAILED)" % seq_id if seq_id else "", exc), is_error=True)
         if step is not None:
             self._report_final(step, "failed", "context %s rejected: %s" % (context_id, exc))
@@ -529,6 +534,12 @@ class TuningLoop:
             except Exception as db_exc:                # noqa: BLE001 -- inside the queue
                 self.message("Tuning: could not set sequence %s FAILED: %s" % (seq_id, db_exc),
                              is_error=True)
+
+    def context_stuck(self, context, exc):
+        """`context` failed STUCK_AFTER times in a row while the service
+        answered other calls: it was moved behind the others."""
+        self.message("Tuning: context %s keeps failing (%s); moved to the back of the queue so "
+                     "the others get through" % (context.get("context_id"), exc), is_error=True)
 
     @property
     def last_context_id(self):

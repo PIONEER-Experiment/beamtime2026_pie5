@@ -9,10 +9,18 @@ import os
 
 from pioneer.nearline.beamtune_client import (
     BeamTuneClient,
+    BeamTuneError,
     DEFAULT_URL,
     CONTEXT_SCHEMA,
+    NOT_ABOUT_THE_BODY,
     is_permanent_rejection,
 )
+
+#: failures in a row, counted against one context (see _count_failure),
+#: after which it goes to the back of the queue so the others get through
+STUCK_AFTER = 5
+#: failures in total after which a context is dropped as if refused
+GIVE_UP_AFTER = 20
 
 #: beam-header device types whose Demand the loop can set (the knobs)
 CONFIGURABLE_DEVICES = (1, 4, 5)
@@ -144,6 +152,14 @@ class miniTwinInterface:
         #: called with (context, error) for a context the service refused for
         #: good (see beamtune_client.is_permanent_rejection); it is dropped
         self.on_rejected = None
+        #: called once with (context, error) when a context is moved to the
+        #: back of the queue after STUCK_AFTER failures in a row
+        self.on_stuck = None
+        #: context id -> {"row", "total", "serial", "warned"}: failures that
+        #: count against that context
+        self._ctx_failures = {}
+        #: goes up with every successful call; shows the service is answering
+        self._success_serial = 0
         self._columns_fetched = False
         #: why the column map could not be fetched, while it cannot; no
         #: proposal is taken meanwhile
@@ -238,10 +254,12 @@ class miniTwinInterface:
         """Poll for a newer proposal.  Returns ``[]`` for anything but success.
 
         Called every mainloop iteration, so it also doubles as the retry pump
-        for contexts that could not be delivered earlier.
+        for contexts that could not be delivered earlier.  The proposal is
+        asked for first: a context the service keeps failing on must not
+        stop the polling (and a successful poll is what lets that context's
+        failures count, see _count_failure).
         """
         try:
-            self._flush()
             if self._muted():
                 return []
             payload = self.client.proposal(self._last_id)
@@ -249,6 +267,11 @@ class miniTwinInterface:
         except Exception as exc:                       # noqa: BLE001 -- never escape
             self._fail("NextConfiguration: %r" % (exc,))
             return []
+        finally:
+            try:
+                self._flush()
+            except Exception as exc:                   # noqa: BLE001 -- never escape
+                self._log("flush: %r" % (exc,))
 
         if not payload.get("ready"):
             if payload.get("last_proposal_id") is not None:
@@ -424,11 +447,48 @@ class miniTwinInterface:
 
     def _enqueue(self, context):
         if len(self._pending) == self._pending.maxlen:
-            dropped = self._pending[0]
+            dropped = self._pending.popleft()
             self._log("pending queue full; dropping oldest context %s"
                       % dropped.get("context_id"))
+            self._drop(dropped, BeamTuneError("dropped: the queue of %d undelivered contexts was full"
+                                              % self._pending.maxlen))
         self._pending.append(context)
         return self._flush()
+
+    def _drop(self, context, exc):
+        """A context leaves the queue undelivered: tell on_rejected."""
+        self._ctx_failures.pop(context.get("context_id"), None)
+        if self.on_rejected is not None:
+            try:
+                self.on_rejected(context, exc)
+            except Exception as cb_exc:                # noqa: BLE001 -- never escape
+                self._log("on_rejected(%s): %r" % (context.get("context_id"), cb_exc))
+
+    def _count_failure(self, context, exc):
+        """Count a failed post against `context` -- but only when the service
+        has answered some other call since this context last failed, so a
+        service that is simply down (every call failing) is left to the
+        breaker and costs no context anything.  Token, route and rate
+        answers (NOT_ABOUT_THE_BODY) never count either.  Returns
+        "rotate", "drop" or None."""
+        if getattr(exc, "status", None) in NOT_ABOUT_THE_BODY:
+            return None
+        context_id = context.get("context_id")
+        rec = self._ctx_failures.get(context_id)
+        if rec is None:
+            rec = self._ctx_failures[context_id] = {"row": 0, "total": 0, "serial": None,
+                                                    "warned": False}
+        if rec["serial"] is not None and rec["serial"] == self._success_serial:
+            return None
+        rec["serial"] = self._success_serial
+        rec["row"] += 1
+        rec["total"] += 1
+        if rec["total"] >= GIVE_UP_AFTER:
+            return "drop"
+        if rec["row"] >= STUCK_AFTER and len(self._pending) > 1:
+            rec["row"] = 0
+            return "rotate"
+        return None
 
     def _flush(self):
         """Deliver queued contexts oldest-first.  Safe to call at 1 Hz."""
@@ -446,15 +506,32 @@ class miniTwinInterface:
                     self._succeed()
                     self._pending.popleft()
                     self._log("context %s rejected, dropped: %s" % (context.get("context_id"), exc))
-                    if self.on_rejected is not None:
-                        try:
-                            self.on_rejected(context, exc)
-                        except Exception as cb_exc:    # noqa: BLE001 -- never escape
-                            self._log("on_rejected(%s): %r" % (context.get("context_id"), cb_exc))
+                    self._drop(context, exc)
                     continue
+                verdict = self._count_failure(context, exc)
                 self._fail("post_context(%s): %r" % (context.get("context_id"), exc))
+                if verdict == "drop":
+                    self._pending.popleft()
+                    self._log("context %s dropped after %d failures" % (context.get("context_id"),
+                                                                        GIVE_UP_AFTER))
+                    self._drop(context, BeamTuneError("given up after %d failed posts; last: %s"
+                                                      % (GIVE_UP_AFTER, exc),
+                                                      status=getattr(exc, "status", None)))
+                    continue
+                if verdict == "rotate":
+                    # let the contexts behind it through; it is tried again later
+                    self._pending.rotate(-1)
+                    rec = self._ctx_failures[context.get("context_id")]
+                    if not rec["warned"] and self.on_stuck is not None:
+                        rec["warned"] = True
+                        try:
+                            self.on_stuck(context, exc)
+                        except Exception as cb_exc:    # noqa: BLE001 -- never escape
+                            self._log("on_stuck(%s): %r" % (context.get("context_id"), cb_exc))
+                    continue
                 return False
             self._pending.popleft()
+            self._ctx_failures.pop(context.get("context_id"), None)
             if self.on_delivered is not None:
                 try:
                     self.on_delivered(context)
@@ -472,6 +549,7 @@ class miniTwinInterface:
     def _succeed(self):
         self._failures = 0
         self._muted_until = 0.0
+        self._success_serial += 1
 
     def _fail(self, message):
         self._failures += 1
