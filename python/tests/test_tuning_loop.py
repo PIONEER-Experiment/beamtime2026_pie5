@@ -1786,3 +1786,41 @@ def test_a_failing_context_is_moved_aside_while_paused_too():
         loop.mt._muted_until = 0.0
         loop.mt.Flush()
     assert [c["context_id"] for c in http.contexts] == ["run00605"]
+
+
+# -- planner N5: never knob names as run-database columns -------------------------
+
+@pytest.mark.parametrize("config", [{"config": {}}, {"config": {"knobs": {"columns": {}}}}])
+def test_a_config_without_columns_blocks_the_proposal(config):
+    loop, db, odb, http, messages = loop_with_service([proposal(5)])
+    http.config_answer = config
+    for _ in range(3):
+        assert loop.poll_and_schedule() == []
+    assert db.runs == {} and loop.mt.last_proposal_id == 0
+    assert odb.values["/Nearline/MiniTwin/Last proposal id"] == 0
+    assert sum(1 for m, e in messages if e and "knobs.columns" in m) == 1
+    http.config_answer = None                      # the default map
+    assert len(loop.poll_and_schedule()) == 1
+    assert db.written == [("pim1_epics", {"ASM12:SOL:2": 90.44, "QTB12:SOL:2": 56.12})]
+
+
+def test_a_knob_without_a_column_blocks_the_proposal_and_refetches_the_map():
+    loop, db, odb, http, messages = loop_with_service(
+        [proposal(5, currents={"ASM12": 90.44, "QSL18": 20.0})])
+    for _ in range(3):
+        assert loop.poll_and_schedule() == []
+    assert db.runs == {} and odb.values["/Nearline/MiniTwin/Last proposal id"] == 0
+    errors = [m for m, e in messages if e and "QSL18" in m]
+    assert len(errors) == 1
+    # the service's beam file gains the column: taken on the next poll
+    http.config_answer = {"config": {"knobs": {"columns": {"ASM12": "ASM12:SOL:2",
+                                                           "QSL18": "QSL18:SOL:2"}}}}
+    assert len(loop.poll_and_schedule()) == 1
+    assert db.written == [("pim1_epics", {"ASM12:SOL:2": 90.44, "QSL18:SOL:2": 20.0})]
+
+
+def test_a_done_proposal_needs_no_column_map():
+    loop, db, odb, http, _ = loop_with_service([dict(proposal(5), done=True)])
+    http.config_answer = {"config": {}}
+    assert loop.poll_and_schedule() == []
+    assert loop.mt.last_proposal_id == 5

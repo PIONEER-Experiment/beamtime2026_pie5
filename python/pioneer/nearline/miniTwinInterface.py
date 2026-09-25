@@ -132,6 +132,8 @@ class miniTwinInterface:
         #: the daemon's `nearline_output_path` from the ODB.
         self.config_type = config_type
         self.column_map = dict(column_map or {})
+        #: a map given here is used as it is, never fetched
+        self._fixed_columns = bool(self.column_map)
         self.value_format = value_format
         self.logger = logger or (lambda message: print("[beamtune] " + message))
 
@@ -280,23 +282,24 @@ class miniTwinInterface:
         self.service_last_id = proposal_id
         if proposal_id <= self._last_id:
             return []
-        try:
-            self._column_map()
-        except Exception as exc:                       # noqa: BLE001 -- retried next call
-            # Without the map the row would carry knob names where the table
-            # has column names; leave the proposal for the next call rather
-            # than take it (the watermark does not move).
-            error = "knobs.columns not available from the service: %s" % exc
-            if error != self.column_map_error:
-                self._log(error)            # once per episode, not every call
-            self.column_map_error = error
-            return []
+        currents = payload.get("currents") or {}
+        if currents and not payload.get("done"):
+            try:
+                self._check_columns(proposal_id, currents)
+            except Exception as exc:                   # noqa: BLE001 -- retried next call
+                # Every knob needs its run-database column, or the insert of
+                # the row fails after the proposal was taken; leave the
+                # proposal for the next call (the watermark does not move).
+                error = "proposal %d not taken, no usable knobs.columns: %s" % (proposal_id, exc)
+                if error != self.column_map_error:
+                    self._log(error)        # once per episode, not every call
+                self.column_map_error = error
+                return []
         self.column_map_error = None
         self._last_id = proposal_id
         reply = payload.get("in_reply_to")
         self._last_reply = dict(reply) if isinstance(reply, dict) else None
 
-        currents = payload.get("currents") or {}
         if payload.get("done"):
             self._log("strategy reports done at proposal %d; not scheduling" % proposal_id)
             return []
@@ -401,18 +404,30 @@ class miniTwinInterface:
     # -- helpers ------------------------------------------------------------
 
     def _row(self, currents):
+        """The run-database row of a proposal: every knob under its column.
+        _check_columns has made sure each knob has one; knob names are never
+        used as columns."""
         columns = self._column_map()
-        row = {}
-        for name, value in currents.items():
-            row[columns.get(name, name)] = self.value_format(value)
-        return row
+        return {columns[name]: self.value_format(value) for name, value in currents.items()}
+
+    def _check_columns(self, proposal_id, currents):
+        """Raise unless every knob of `currents` has a column.  A knob the
+        cached map does not have makes the next call fetch the map again
+        (the service may have switched beam files)."""
+        columns = self._column_map()
+        missing = sorted(name for name in currents if name not in columns)
+        if missing:
+            if not self._fixed_columns:
+                self.column_map, self._columns_fetched = {}, False
+            raise BeamTuneError("knob(s) %s have no run-database column in knobs.columns"
+                                % ", ".join(missing))
 
     def _column_map(self):
         """``column_map`` given at construction, else the service's
-        ``knobs.columns`` (from the beam file), fetched lazily until it has
-        been fetched once.  A service that answers without ``knobs.columns``
-        leaves the row with knob names; one that cannot be asked raises, and
-        is asked again next time."""
+        ``knobs.columns`` (from the beam file), fetched lazily.  No answer,
+        an error answer, or a config without (or with an empty)
+        ``knobs.columns`` raises, and it is asked again next time: rows are
+        never written with knob names as columns."""
         if self.column_map or self._columns_fetched:
             return self.column_map
         answer = self.client.config()
@@ -420,12 +435,12 @@ class miniTwinInterface:
         if not isinstance(answer, dict) or answer.get("error") or not isinstance(answer.get("config"), dict):
             raise BeamTuneError("GET /v1/config gave no config: %r"
                                 % ((answer or {}).get("error") if isinstance(answer, dict) else answer))
-        config = answer["config"]
+        columns = (answer["config"].get("knobs") or {}).get("columns") or {}
+        if not isinstance(columns, dict) or not columns:
+            raise BeamTuneError("GET /v1/config has no knobs.columns (knob -> run-database column)")
+        self.column_map = {str(k): str(v) for k, v in columns.items()}
         self._columns_fetched = True
-        columns = (config.get("knobs") or {}).get("columns") or {}
-        if isinstance(columns, dict) and columns:
-            self.column_map = {str(k): str(v) for k, v in columns.items()}
-            self._log("column map from service: %d knobs" % len(self.column_map))
+        self._log("column map from service: %d knobs" % len(self.column_map))
         return self.column_map
 
     def _envelope(self, context_id, files=None, inline=None, knobs=None,

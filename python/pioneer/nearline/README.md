@@ -633,7 +633,11 @@ daemon calls it and the command line above runs the same functions.
    last one seen. A new one is written as its row of the `MiniTwin updates`
    table times one `target_position` config (`MiniTwin target config`, the
    stage centre by default), 10^6 events, in a sequence with `on_complete =
-   mt_add`. No five-point scan, no merge.
+   mt_add`. No five-point scan, no merge. Each knob of the proposal goes into the
+   row under its run-database column, from the service's `knobs.columns`
+   (`GET /v1/config`); while that map cannot be fetched, is empty, or lacks a
+   knob of the proposal, the proposal is not taken (one MIDAS error, asked
+   again every iteration). Knob names are never used as columns.
 2. **The run is taken.** The sequencer runs it; the daemon's nearline jobs
    process every subrun as usual. The run database marks the sequence
    `RUNSDONE` once the run and every nearline job of it are `DONE`.

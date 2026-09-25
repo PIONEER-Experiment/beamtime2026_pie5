@@ -152,6 +152,10 @@ class FakeDb:
         return run_id
 
 
+#: knob -> run-database column, as the service's GET /v1/config gives it
+DEFAULT_COLUMNS = {"ASM12": "ASM12:SOL:2", "QTB12": "QTB12:SOL:2"}
+
+
 class FakeHttp:
     """Stands in for `BeamTuneClient` inside a `miniTwinInterface`."""
 
@@ -208,7 +212,7 @@ class FakeHttp:
     def config(self):
         if isinstance(self.config_answer, Exception):
             raise self.config_answer
-        return self.config_answer or {"config": {}}
+        return self.config_answer or {"config": {"knobs": {"columns": DEFAULT_COLUMNS}}}
 
 
 _ABSENT = object()
