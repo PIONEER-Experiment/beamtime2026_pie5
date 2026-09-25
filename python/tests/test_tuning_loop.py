@@ -1700,3 +1700,20 @@ def test_a_failed_update_after_a_context_error_is_retried():
     loop.clock.t += 30
     loop.post_due()
     assert db.sequences[57]["status"] == "FAILED"
+
+
+# -- second review N5: column map errors ----------------------------------------
+
+def test_a_config_answer_with_an_error_is_not_cached():
+    logged = []
+    loop, db, odb, http, messages = loop_with_service(
+        [proposal(5, currents={"ASM12": 90.44})])
+    loop.mt.logger = logged.append
+    http.config_answer = {"error": {"type": "Conflict", "message": "backend restarting"}}
+    for _ in range(3):
+        assert loop.poll_and_schedule() == []
+    assert db.runs == {}
+    assert sum("knobs.columns" in m for m in logged) == 1
+    http.config_answer = {"config": {"knobs": {"columns": {"ASM12": "ASM12:SOL:2"}}}}
+    assert len(loop.poll_and_schedule()) == 1
+    assert db.written == [("pim1_epics", {"ASM12:SOL:2": 90.44})]

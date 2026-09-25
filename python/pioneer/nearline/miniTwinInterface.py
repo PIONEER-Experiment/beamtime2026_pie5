@@ -286,8 +286,10 @@ class miniTwinInterface:
             # Without the map the row would carry knob names where the table
             # has column names; leave the proposal for the next call rather
             # than take it (the watermark does not move).
-            self.column_map_error = "knobs.columns not available from the service: %s" % exc
-            self._log(self.column_map_error)
+            error = "knobs.columns not available from the service: %s" % exc
+            if error != self.column_map_error:
+                self._log(error)            # once per episode, not every call
+            self.column_map_error = error
             return []
         self.column_map_error = None
         self._last_id = proposal_id
@@ -401,7 +403,12 @@ class miniTwinInterface:
         is asked again next time."""
         if self.column_map or self._columns_fetched:
             return self.column_map
-        config = (self.client.config().get("config") or {})
+        answer = self.client.config()
+        # _call hands some 4xx back as a payload: that is no answer either
+        if not isinstance(answer, dict) or answer.get("error") or not isinstance(answer.get("config"), dict):
+            raise BeamTuneError("GET /v1/config gave no config: %r"
+                                % ((answer or {}).get("error") if isinstance(answer, dict) else answer))
+        config = answer["config"]
         self._columns_fetched = True
         columns = (config.get("knobs") or {}).get("columns") or {}
         if isinstance(columns, dict) and columns:
