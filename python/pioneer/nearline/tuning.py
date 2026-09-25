@@ -24,7 +24,15 @@ CONFIG_DEFAULTS = {
     # config.target_position id the one run per proposal is taken at; id 2 is
     # the centre (0, 0) of the standard five-point sequence.
     "MiniTwin target config": 2,
+    # the nearline output tree as pinky writes it, and where the service
+    # reads the mirror of it; a posted file path has the first replaced by
+    # the second.
+    "MiniTwin local prefix": "/home/pinky/nearline/",
+    "MiniTwin remote prefix": "/home/pioneer/nearline/histograms/",
 }
+
+#: the daemon's own /Nearline/config/Output path default
+DEFAULT_OUTPUT_PATH = "/home/pinky/nearline"
 
 #: requested WaveDREAM events per run
 ITER_EVENTS = 1e6
@@ -46,6 +54,67 @@ def odb_value(odb, path, default):
     if not odb.odb_exists(path):
         return default
     return odb.odb_get(path)
+
+
+def read_beamline_header(path):
+    """The ``beamline`` header of a nearline histogram file, as plain lists.
+
+    Needs ROOT with the PIONEER dictionaries (``PIODBBeamEntry``); imported
+    here, not at module level, so everything else runs without it.
+    """
+    import ROOT
+
+    aFile = ROOT.TFile.Open(str(path))
+    if not aFile or aFile.IsZombie():
+        raise OSError("cannot open %s" % path)
+    try:
+        hdr = aFile.Get("beamline")
+        if not hdr:
+            raise KeyError("no 'beamline' header in %s" % path)
+        return {
+            "names": [str(n) for n in hdr.GetNames()],
+            "demand": [float(v) for v in hdr.GetDemand()],
+            "measured": [float(v) for v in hdr.GetMeasured()],
+            "types": [int(t) for t in hdr.GetTypes()],
+        }
+    finally:
+        aFile.Close()
+
+
+def hist_files(db, run_ids, output_path):
+    """Per-subrun histogram files of `run_ids` (run database ids).
+
+    One entry per state.file_list 'root' row with status DONE, in filebase
+    order: ``{"run_db_id", "run_number", "local"}``, where ``local`` is
+    ``<output_path>/run<N>/<filebase>_hists.root`` as jobs.py writes it.
+    Rows in any other status are left out and listed in ``skipped``.
+    """
+    numbers = {}
+    for run_id in run_ids:
+        number = db.get_midas_run_number(run_id)
+        if number is None:
+            raise RuntimeError("run %d has no MIDAS run number (never started?)" % run_id)
+        numbers[run_id] = int(number)
+    found, skipped = [], []
+    for row in db.find_files(list(run_ids), "root"):
+        number = numbers[row["run_id"]]
+        local = "%s/run%05d/%s_hists.root" % (str(output_path).rstrip("/"), number, row["filebase"])
+        if row.get("status", "DONE") != "DONE":
+            skipped.append((local, row.get("status")))
+            continue
+        found.append({"run_db_id": row["run_id"], "run_number": number, "local": local})
+    return found, skipped, [numbers[r] for r in run_ids]
+
+
+def remote_path(local, local_prefix, remote_prefix):
+    """`local` with `local_prefix` replaced by `remote_prefix`, or None when
+    it does not start with `local_prefix`."""
+    local_prefix = str(local_prefix).rstrip("/") + "/"
+    remote_prefix = str(remote_prefix).rstrip("/") + "/"
+    local = str(local)
+    if not local.startswith(local_prefix):
+        return None
+    return remote_prefix + local[len(local_prefix):]
 
 
 def schedule_configs(db, configs, table, target_config, dry_run=False):
@@ -119,11 +188,14 @@ class TuningLoop:
     where errors go.
     """
 
-    def __init__(self, db, mt, odb, message=None, clock=time.time):
+    def __init__(self, db, mt, odb, message=None, header_reader=read_beamline_header,
+                 clock=time.time):
         self.db = db
         self.mt = mt
         self.odb = odb
         self.clock = clock
+        #: path -> beam header dict; tests replace it, the default needs ROOT
+        self.header_reader = header_reader
         self._message = message or (lambda msg, is_error=False: print(msg))
 
     def message(self, msg, is_error=False):
@@ -143,6 +215,20 @@ class TuningLoop:
         return int(odb_value(self.odb, ODB_CONFIG + "/MiniTwin target config",
                              CONFIG_DEFAULTS["MiniTwin target config"]))
 
+    @property
+    def output_path(self):
+        return odb_value(self.odb, ODB_CONFIG + "/Output path", DEFAULT_OUTPUT_PATH)
+
+    @property
+    def local_prefix(self):
+        return odb_value(self.odb, ODB_CONFIG + "/MiniTwin local prefix",
+                         CONFIG_DEFAULTS["MiniTwin local prefix"])
+
+    @property
+    def remote_prefix(self):
+        return odb_value(self.odb, ODB_CONFIG + "/MiniTwin remote prefix",
+                         CONFIG_DEFAULTS["MiniTwin remote prefix"])
+
     # -- proposals -> runs -------------------------------------------------
 
     def poll_and_schedule(self, dry_run=False):
@@ -155,13 +241,44 @@ class TuningLoop:
 
     # -- finished runs -> context ------------------------------------------
 
+    def context_parts(self, run_ids):
+        """Everything a context of `run_ids` (run database ids) is made of:
+        ``(context_id, remote file paths, MIDAS run numbers, beam header)``.
+        The header is read from the first subrun's file on this machine."""
+        files, skipped, numbers = hist_files(self.db, run_ids, self.output_path)
+        for local, status in skipped:
+            self.message("Tuning: leaving out %s (file status %s)" % (local, status))
+        if not files:
+            raise RuntimeError("no finished nearline histogram files for run(s) %s"
+                               % ", ".join(str(n) for n in numbers))
+        remote = []
+        for f in files:
+            path = remote_path(f["local"], self.local_prefix, self.remote_prefix)
+            if path is None:
+                self.message("Tuning: %s is not under the local prefix %s; posting it unchanged"
+                             % (f["local"], self.local_prefix))
+                path = f["local"]
+            remote.append(path)
+        header = self.header_reader(files[0]["local"])
+        context_id = "_".join("run%05d" % n for n in numbers)
+        return context_id, remote, numbers, header
+
+    def build_context(self, run_ids, step=None):
+        """The context of `run_ids` as it would be posted; nothing is sent."""
+        context_id, files, numbers, header = self.context_parts(run_ids)
+        return self.mt.BuildContextFiles(context_id, files, numbers, header, step=step)
+
+    def post_runs(self, run_ids, step=None):
+        """Build the context of `run_ids` and post it through the retry queue."""
+        context_id, files, numbers, header = self.context_parts(run_ids)
+        return self.mt.AddContextFiles(context_id, files, numbers, header, step=step)
+
     def post_sequence(self, seq_id):
         """Post the context of a finished `mt_add` sequence, then mark the
         sequence DONE, or FAILED with a MIDAS error message if that raised."""
         try:
             run_ids = self.db.get_all_runs_in_sequence(seq_id)
-            files = self.db.find_files(run_ids, "root")
-            context = self.mt.AddContextFiles(files)
+            context = self.post_runs(run_ids)
         except Exception as exc:                       # noqa: BLE001 -- reported, sequence FAILED
             self.message("Tuning: context for sequence %d not posted: %s" % (seq_id, exc),
                          is_error=True)

@@ -12,6 +12,27 @@ from pioneer.nearline.beamtune_client import (
     CONTEXT_SCHEMA,
 )
 
+#: beam-header device types whose Demand the loop can set (the knobs)
+CONFIGURABLE_DEVICES = (1, 4, 5)
+
+#: measurement file role of a per-subrun nearline histogram file
+HIST_ROOT_ROLE = "hist_root"
+
+
+def knobs_from_header(header):
+    """``(knobs, readback)`` from a beam header, types 1/4/5 only.
+
+    ``header`` is a dict with the lists ``names``, ``demand``, ``measured``
+    and ``types`` (what ``tuning.read_beamline_header`` returns)."""
+    knobs, readback = {}, {}
+    for name, demand, measured, dev_type in zip(header["names"], header["demand"],
+                                                header["measured"], header["types"]):
+        if int(dev_type) in CONFIGURABLE_DEVICES:
+            knobs[str(name)] = float(demand)
+            readback[str(name)] = float(measured)
+    return knobs, readback
+
+
 miniTwin_histograms = [
     "histograms/PIPSMMuPixMonitor/xxp_central_w",
     "histograms/PIPSMMuPixMonitor/yyp_central_w",
@@ -97,8 +118,28 @@ class miniTwinInterface:
         hist.RebinY(int(rebin_factor_y))
         return [[hist.GetBinContent(x, y) for x in range(1, hist.GetNbinsX() + 1)] for y in range(1, hist.GetNbinsY() + 1)]
 
-    def AddContextFiles(self, files):
-        raise DeprecationWarning("Files must be merged first.")
+    def BuildContextFiles(self, context_id, files, run_ids, header, step=None):  # noqa: N802
+        """A context made of file paths, nothing read from the histograms.
+
+        ``files`` are the paths as the service sees them (role hist_root),
+        ``run_ids`` the MIDAS run numbers, ``header`` the beam header of the
+        first file (see ``knobs_from_header``), ``step`` the proposal the run
+        was scheduled with (``proposal_id``, ``step_id``, ``attempt``,
+        ``plan``) or None when that is not known.
+        """
+        knobs, readback = knobs_from_header(header)
+        return self._envelope(
+            str(context_id),
+            files=[{"path": str(f), "role": HIST_ROOT_ROLE} for f in files],
+            knobs=knobs, readback=readback, run_ids=run_ids, step=step)
+
+    def AddContextFiles(self, context_id, files, run_ids, header, step=None):  # noqa: N802
+        """``BuildContextFiles`` and post it through the retry queue.  A post
+        that fails stays queued and is retried; this only raises when the
+        context cannot be built."""
+        context = self.BuildContextFiles(context_id, files, run_ids, header, step=step)
+        self._enqueue(context)
+        return context
 
     def NextConfiguration(self):                       # noqa: N802 -- daemon's API
         """Poll for a newer proposal.  Returns ``[]`` for anything but success.
@@ -194,8 +235,11 @@ class miniTwinInterface:
         return self.column_map
 
     def _envelope(self, context_id, files=None, inline=None, knobs=None,
-                  objective=None, run_ids=None, readback=None, valid=True):
-        knobs = dict(knobs) if knobs else self._applied_knobs()
+                  objective=None, run_ids=None, readback=None, valid=True, step=None):
+        if not knobs:
+            raise ValueError("context %s has no knobs (no type 1/4/5 device in the beam header)"
+                             % context_id)
+        knobs = dict(knobs)
         measurement = {"kind": "psm_nearline", "valid": bool(valid),
                        "files": files or []}
         if inline:
@@ -203,21 +247,24 @@ class miniTwinInterface:
         if objective is not None:
             measurement["objective"] = objective
         provenance = {"run_ids": list(run_ids or []), "config_type": self.config_type}
-        if self._last_run:
-            # Hand the plan step back to the backend so it can tick it off
-            # without guessing from the knob vector.
-            for key in ("step_id", "attempt", "plan"):
-                if self._last_run.get(key) is not None:
-                    provenance[key] = self._last_run[key]
-        return {
-            "schema": CONTEXT_SCHEMA,
-            "context_id": context_id,
-            "responds_to": ({"proposal_id": self._last_id} if self._last_id else None),
+        step = step or {}
+        # Hand the plan step back to the backend so it can tick it off
+        # without guessing from the knob vector. Unknown means omitted: the
+        # service then matches the context by its setting.
+        for key in ("step_id", "attempt", "plan"):
+            if step.get(key) is not None:
+                provenance[key] = step[key]
+        provenance["source"] = "nearline-daemon"
+        envelope = {"schema": CONTEXT_SCHEMA, "context_id": context_id}
+        if step.get("proposal_id"):
+            envelope["responds_to"] = {"proposal_id": int(step["proposal_id"])}
+        envelope.update({
             "provenance": provenance,
             "setting": ({"units": "A", "knobs": knobs, "readback": dict(readback)}
                         if readback else {"units": "A", "knobs": knobs}),
             "measurement": measurement,
-        }
+        })
+        return envelope
 
     # -- delivery, with retry and a circuit breaker -------------------------
 

@@ -9,7 +9,9 @@ import types
 
 import pytest
 
-from tuning_fakes import FakeDb, FakeOdb
+from pathlib import Path
+
+from tuning_fakes import FakeDb, FakeHttp, FakeOdb
 
 from pioneer.nearline import tuning
 
@@ -37,13 +39,41 @@ def iter_config(**currents):
     return {"type": "iter", "currents": [dict(currents or {"ASM12:SOL:2": 90.44})]}
 
 
-def make_loop(db=None, mt=None, odb=None):
+#: a beam header as tuning.read_beamline_header returns it: two knobs, a
+#: type-2 device that is not one, and a read-only type-3 channel
+HEADER = {
+    "names": ["ASM12:SOL:2", "QTB12", "KSD11", "BEAM:CURRENT"],
+    "demand": [90.44, 56.12, 1.0, 0.0],
+    "measured": [89.40, 55.22, 1.0, 2.2],
+    "types": [1, 4, 2, 3],
+}
+
+
+class HeaderReader:
+    def __init__(self, header=HEADER):
+        self.header = header
+        self.paths = []
+
+    def __call__(self, path):
+        self.paths.append(path)
+        return self.header
+
+
+def make_loop(db=None, mt=None, odb=None, header_reader=None):
     db = db or FakeDb()
     odb = odb if odb is not None else FakeOdb({"/Nearline/config/MiniTwin updates": "pim1_epics"})
     messages = []
     loop = tuning.TuningLoop(db=db, mt=mt or FakeMt(), odb=odb,
-                             message=lambda m, is_error=False: messages.append((m, is_error)))
+                             message=lambda m, is_error=False: messages.append((m, is_error)),
+                             header_reader=header_reader or HeaderReader())
     return loop, db, odb, messages
+
+
+def real_mt(http=None):
+    from pioneer.nearline.miniTwinInterface import miniTwinInterface
+    mt = miniTwinInterface(config_type="pim1_epics", logger=lambda m: None)
+    mt.client = http or FakeHttp()
+    return mt
 
 
 # -- A1: one central run per proposal, no merge -------------------------------
@@ -129,6 +159,131 @@ def test_post_sequence_marks_failed_with_a_message():
     assert db.sequences[57]["status"] == "FAILED"
     errors = [m for m, is_error in messages if is_error]
     assert errors and "no header" in errors[0] and "57" in errors[0]
+
+
+# -- A2: a context made of file paths -----------------------------------------
+
+DATA = Path(__file__).resolve().parents[4] / "runplan-loop-poc" / "data"
+
+
+@pytest.mark.skipif(not (DATA / "run00588").is_dir(), reason="run00588 test files not present")
+def test_context_from_the_real_run588_files():
+    db = FakeDb()
+    run_id = db.add_run(588, subruns=3)
+    reader = HeaderReader()
+    odb = FakeOdb({"/Nearline/config/MiniTwin updates": "pim1_epics",
+                   "/Nearline/config/Output path": str(DATA),
+                   "/Nearline/config/MiniTwin local prefix": str(DATA) + "/"})
+    loop, _, _, _ = make_loop(db=db, odb=odb, header_reader=reader, mt=real_mt())
+    context = loop.build_context([run_id])
+
+    # the header comes from the first subrun's file on this machine
+    assert reader.paths == [str(DATA / "run00588" / "run00588_00000_hists.root")]
+    assert Path(reader.paths[0]).is_file()
+    for i in range(3):
+        assert (DATA / "run00588" / ("run00588_%05d_hists.root" % i)).is_file()
+
+    assert context["context_id"] == "run00588"
+    assert context["measurement"]["files"] == [
+        {"path": "/home/pioneer/nearline/histograms/run00588/run00588_%05d_hists.root" % i,
+         "role": "hist_root"} for i in range(3)]
+    assert context["measurement"]["kind"] == "psm_nearline"
+    assert context["measurement"]["valid"] is True
+    assert "inline" not in context["measurement"]
+
+
+def test_context_shape_matches_the_contract():
+    db = FakeDb()
+    run_id = db.add_run(604, subruns=2)
+    loop, _, _, _ = make_loop(db=db, mt=real_mt())
+    context = loop.build_context([run_id])
+    assert context["schema"] == "beamtune.context/v1"
+    assert context["context_id"] == "run00604"
+    # default prefixes: pinky's output tree -> piana's mirror
+    assert context["measurement"]["files"][0]["path"] == \
+        "/home/pioneer/nearline/histograms/run00604/run00604_00000_hists.root"
+    assert context["setting"] == {
+        "units": "A",
+        "knobs": {"ASM12:SOL:2": 90.44, "QTB12": 56.12},
+        "readback": {"ASM12:SOL:2": 89.40, "QTB12": 55.22},
+    }
+    assert context["provenance"] == {"run_ids": [604], "config_type": "pim1_epics",
+                                     "source": "nearline-daemon"}
+    # no step known: no responds_to at all
+    assert "responds_to" not in context
+
+
+def test_context_carries_the_step_when_given():
+    db = FakeDb()
+    run_id = db.add_run(604, subruns=1)
+    loop, _, _, _ = make_loop(db=db, mt=real_mt())
+    step = {"proposal_id": 5, "step_id": "ASM12_90.44", "attempt": 0,
+            "plan": "quick_run00588_ASM12", "seq_id": 57}
+    context = loop.build_context([run_id], step=step)
+    assert context["responds_to"] == {"proposal_id": 5}
+    assert context["provenance"]["step_id"] == "ASM12_90.44"
+    assert context["provenance"]["attempt"] == 0
+    assert context["provenance"]["plan"] == "quick_run00588_ASM12"
+
+
+def test_failed_subruns_are_left_out():
+    db = FakeDb()
+    run_id = db.add_run(604, subruns=2)
+    db.files[1]["status"] = "FAILED"
+    loop, _, _, messages = make_loop(db=db, mt=real_mt())
+    context = loop.build_context([run_id])
+    assert len(context["measurement"]["files"]) == 1
+    assert any("FAILED" in m for m, _ in messages)
+
+
+def test_no_files_is_an_error():
+    db = FakeDb()
+    run_id = db.add_run(604, subruns=0)
+    loop, _, _, _ = make_loop(db=db, mt=real_mt())
+    with pytest.raises(RuntimeError, match="no finished"):
+        loop.build_context([run_id])
+
+
+def test_a_header_without_knobs_is_an_error():
+    db = FakeDb()
+    run_id = db.add_run(604, subruns=1)
+    reader = HeaderReader({"names": ["X"], "demand": [1.0], "measured": [1.0], "types": [3]})
+    loop, _, _, _ = make_loop(db=db, mt=real_mt(), header_reader=reader)
+    with pytest.raises(ValueError, match="no knobs"):
+        loop.build_context([run_id])
+
+
+def test_path_outside_the_local_prefix_is_posted_unchanged():
+    assert tuning.remote_path("/data/run00604/x_hists.root", "/home/pinky/nearline/",
+                              "/home/pioneer/nearline/histograms/") is None
+    assert tuning.remote_path("/home/pinky/nearline/run00604/x_hists.root", "/home/pinky/nearline",
+                              "/remote") == "/remote/run00604/x_hists.root"
+
+
+def test_post_sequence_delivers_the_context():
+    http = FakeHttp()
+    db = FakeDb()
+    db.add_run(604, subruns=3, seq_id=57)
+    loop, _, _, _ = make_loop(db=db, mt=real_mt(http))
+    loop.post_sequence(57)
+    assert [c["context_id"] for c in http.contexts] == ["run00604"]
+    assert len(http.contexts[0]["measurement"]["files"]) == 3
+    assert db.sequences[57]["status"] == "DONE"
+
+
+def test_post_sequence_with_the_service_down_queues_the_context():
+    http = FakeHttp(fail=True)
+    db = FakeDb()
+    db.add_run(604, subruns=1, seq_id=57)
+    mt = real_mt(http)
+    loop, _, _, _ = make_loop(db=db, mt=mt)
+    loop.post_sequence(57)
+    assert mt.pending == 1
+    assert db.sequences[57]["status"] == "DONE"
+    http.fail = False
+    mt._muted_until = 0.0
+    mt._flush()
+    assert mt.pending == 0 and len(http.contexts) == 1
 
 
 # -- the daemon, with midas faked ----------------------------------------------
