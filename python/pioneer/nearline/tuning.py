@@ -189,6 +189,10 @@ class ScheduleError(RuntimeError):
     """A proposal could not be scheduled; already reported when raised."""
 
 
+class ContextRejected(RuntimeError):
+    """The service refused a context for good; already reported when raised."""
+
+
 def utc_now(clock=time.time):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(clock()))
 
@@ -356,6 +360,11 @@ class TuningLoop:
         self.output_override = None
         # every context the service takes becomes /Nearline/MiniTwin/Last context id
         self.mt.on_delivered = self.context_delivered
+        self.mt.on_rejected = self.context_rejected
+        #: context id -> {"seq_id", "step"} of contexts handed to the queue
+        self._inflight = {}
+        #: context id -> reason, for contexts refused while post_runs waited
+        self._rejected = {}
 
     def restore(self):
         """Take the last proposal id and the active step from the ODB, so a
@@ -409,10 +418,30 @@ class TuningLoop:
 
     def context_delivered(self, context):
         """The service took `context`: remember its id for the next reply check."""
+        self._inflight.pop(context.get("context_id"), None)
         try:
             self.odb.odb_set(ODB_STATE + "/Last context id", str(context.get("context_id") or ""))
         except Exception as exc:                       # noqa: BLE001 -- never into the queue
             self.message("Tuning: could not store the last context id: %s" % exc)
+
+    def context_rejected(self, context, exc):
+        """The service refused `context` for good (a 4xx about its body): it
+        is dropped from the queue, its sequence FAILED, its step reported
+        `failed` and left active, so it can be posted by hand once fixed."""
+        context_id = context.get("context_id")
+        info = self._inflight.pop(context_id, None) or {}
+        self._rejected[context_id] = str(exc)
+        seq_id, step = info.get("seq_id"), info.get("step")
+        self.message("Tuning: the service rejected context %s%s: %s" % (
+            context_id, " (sequence %s set FAILED)" % seq_id if seq_id else "", exc), is_error=True)
+        if step is not None:
+            self._report_final(step, "failed", "context %s rejected: %s" % (context_id, exc))
+        if seq_id:
+            try:
+                self.db.update_status("run_sequence", seq_id, "FAILED")
+            except Exception as db_exc:                # noqa: BLE001 -- inside the queue
+                self.message("Tuning: could not set sequence %s FAILED: %s" % (seq_id, db_exc),
+                             is_error=True)
 
     @property
     def last_context_id(self):
@@ -573,13 +602,20 @@ class TuningLoop:
         context_id, files, numbers, header = self.context_parts(run_ids)
         return self.mt.BuildContextFiles(context_id, files, numbers, header, step=step)
 
-    def post_runs(self, run_ids, step=None, require_delivery=False):
+    def post_runs(self, run_ids, step=None, seq_id=None, require_delivery=False):
         """Build the context of `run_ids` and post it through the retry queue.
         With `step` (the active one), report `posted` and clear the step.
+        Raises ContextRejected when the service refused it for good.
         With `require_delivery` (the CLI, which has no later retry) raise
         when the service did not take it, leaving the step as it was."""
         context_id, files, numbers, header = self.context_parts(run_ids)
-        context = self.mt.AddContextFiles(context_id, files, numbers, header, step=step)
+        context = self.mt.BuildContextFiles(context_id, files, numbers, header, step=step)
+        self._rejected.pop(context_id, None)
+        self._inflight[context_id] = {"seq_id": seq_id, "step": step}
+        self.mt.Enqueue(context)
+        if context_id in self._rejected:
+            raise ContextRejected("the service rejected context %s: %s"
+                                  % (context_id, self._rejected.pop(context_id)))
         if require_delivery and self.mt.pending:
             raise RuntimeError("the service did not take context %s" % context_id)
         if step is not None:
@@ -595,7 +631,10 @@ class TuningLoop:
         step = self.step_for_sequence(seq_id)
         try:
             run_ids = self.db.get_all_runs_in_sequence(seq_id)
-            context = self.post_runs(run_ids, step=step)
+            context = self.post_runs(run_ids, step=step, seq_id=seq_id)
+        except ContextRejected:
+            # context_rejected has sent the error, the report and set FAILED
+            return None
         except Exception as exc:                       # noqa: BLE001 -- reported, sequence FAILED
             self.message("Tuning: context for sequence %d not posted: %s" % (seq_id, exc),
                          is_error=True)

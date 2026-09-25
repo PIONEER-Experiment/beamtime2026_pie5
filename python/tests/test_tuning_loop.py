@@ -30,11 +30,20 @@ class FakeMt:
         configs, self.configs = self.configs, []
         return configs
 
-    def AddContextFiles(self, *args, **kwargs):        # noqa: N802
+    def BuildContextFiles(self, context_id, *args, **kwargs):  # noqa: N802
         if self.add_raises:
             raise self.add_raises
-        self.added.append((args, kwargs))
-        return {"context_id": "fake"}
+        return {"context_id": context_id}
+
+    def Enqueue(self, context):                        # noqa: N802
+        self.added.append(context)
+        if self.on_delivered:
+            self.on_delivered(context)
+        return True
+
+    pending = 0
+    on_delivered = None
+    on_rejected = None
 
 
 def iter_config(**currents):
@@ -451,7 +460,9 @@ def test_post_daq_failure_never_raises_and_trips_the_breaker():
     mt = real_mt(FakeHttp(fail=True))
     report = tuning.daq_report(5, "running")
     assert [mt.PostDaq(report) for _ in range(3)] == [False, False, False]
-    assert mt.muted
+    assert mt.daq_muted
+    # DAQ reports have their own breaker: contexts and proposals go on
+    assert not mt.muted
 
 
 def test_progress_through_the_stages():
@@ -890,3 +901,93 @@ def test_cli_post_remembers_the_context():
     assert tuning.main(["post", "--run", "604"], db=db, odb=odb, http=http,
                        header_reader=HeaderReader()) == 0
     assert odb.values["/Nearline/MiniTwin/Last context id"] == "run00604"
+
+
+# -- review blocker 1: a context the service refuses must not stall the queue --
+
+def finished_step(loop, db, run_number):
+    """Schedule the loop's proposal and finish its run with one subrun."""
+    seq_id = loop.poll_and_schedule()[0]["seq_id"]
+    (run_id,) = db.sequences[seq_id]["runs"]
+    db.runs[run_id].update(status="DONE", midas_run_number=run_number)
+    db.files.append({"run_id": run_id, "filebase": "run%05d_00000" % run_number,
+                     "fileext": "root", "status": "DONE"})
+    return seq_id
+
+
+def test_a_rejected_context_fails_its_sequence_and_the_next_one_is_delivered():
+    loop, db, odb, http, messages = loop_with_service([proposal(5)])
+    http.reject = {"run00604": 400}
+    seq_id = finished_step(loop, db, 604)
+    loop.post_sequence(seq_id)
+    assert db.sequences[seq_id]["status"] == "FAILED"
+    assert any(e and "rejected context run00604" in m for m, e in messages)
+    assert http.daq[-1]["stage"] == "failed" and "rejected" in http.daq[-1]["message"]
+    assert loop.mt.pending == 0
+    # a valid context after it goes straight through
+    db.add_run(605, subruns=1, seq_id=58)
+    loop.post_sequence(58)
+    assert [c["context_id"] for c in http.contexts] == ["run00605"]
+    assert db.sequences[58]["status"] == "DONE"
+
+
+def test_a_queued_context_rejected_later_does_not_hold_up_the_queue():
+    loop, db, odb, http, messages = loop_with_service([])
+    http.fail = True
+    db.add_run(604, subruns=1, seq_id=57)
+    db.add_run(605, subruns=1, seq_id=58)
+    loop.post_sequence(57)
+    loop.post_sequence(58)
+    assert loop.mt.pending == 2
+    http.fail = False
+    http.reject = {"run00604": 400}
+    loop.mt._muted_until = 0.0
+    loop.mt.Flush()
+    assert loop.mt.pending == 0
+    assert [c["context_id"] for c in http.contexts] == ["run00605"]
+    assert db.sequences[57]["status"] == "FAILED"
+    assert any(e and "run00604" in m for m, e in messages)
+
+
+def test_an_auth_error_is_retried_not_dropped():
+    loop, db, odb, http, messages = loop_with_service([])
+    http.reject = {"run00604": 401}
+    db.add_run(604, subruns=1, seq_id=57)
+    loop.post_sequence(57)
+    assert loop.mt.pending == 1
+    http.reject = {}
+    loop.mt._muted_until = 0.0
+    loop.mt.Flush()
+    assert [c["context_id"] for c in http.contexts] == ["run00604"]
+
+
+def test_daq_successes_do_not_reset_the_context_breaker():
+    mt = real_mt(FakeHttp())
+    mt.client.fail = True
+    mt._enqueue({"context_id": "run00604"})       # failure 1
+    mt._flush()                                     # failure 2
+    mt.client.fail = False
+    assert mt.PostDaq(tuning.daq_report(5, "running"))
+    mt.client.fail = True
+    mt._flush()                                     # failure 3: muted
+    assert mt.muted
+
+
+def test_client_raises_with_the_status_for_a_4xx_body(monkeypatch):
+    from pioneer.nearline import beamtune_client
+    client = beamtune_client.BeamTuneClient("http://127.0.0.1:1")
+    monkeypatch.setattr(client, "_call", lambda method, path, body=None:
+                        (422, {"error": {"type": "SchemaError", "message": "bad knob"}}))
+    with pytest.raises(beamtune_client.BeamTuneError) as err:
+        client.post_context({"context_id": "run00604"})
+    assert err.value.status == 422
+    assert beamtune_client.is_permanent_rejection(err.value)
+    assert not beamtune_client.is_permanent_rejection(beamtune_client.BeamTuneError("x", status=429))
+    assert not beamtune_client.is_permanent_rejection(beamtune_client.BeamTuneError("x"))
+
+
+def test_non_finite_header_values_are_refused():
+    from pioneer.nearline.miniTwinInterface import knobs_from_header
+    header = dict(HEADER, measured=[float("nan")] + HEADER["measured"][1:])
+    with pytest.raises(ValueError, match="non-finite"):
+        knobs_from_header(header)

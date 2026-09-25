@@ -162,13 +162,25 @@ class FakeHttp:
                 return dict(p)
         return {"ready": False}
 
+    #: context_id -> HTTP status the service answers that context with
+    reject = None
+
     def post_context(self, context):
         self._maybe_fail()
+        status = (self.reject or {}).get(context.get("context_id"))
+        if status:
+            from pioneer.nearline.beamtune_client import BeamTuneError
+            raise BeamTuneError("POST /v1/context -> %d: SchemaError" % status, status=status)
         self.contexts.append(context)
         return {"accepted": True}
 
+    daq_fail = False
+
     def post_daq(self, report):
         self._maybe_fail()
+        if self.daq_fail:
+            from pioneer.nearline.beamtune_client import BeamTuneError
+            raise BeamTuneError("POST /v1/daq failed")
         self.daq.append(report)
         return {"accepted": True}
 

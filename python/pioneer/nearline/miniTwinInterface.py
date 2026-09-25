@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import collections
+import math
 import time
 import os
 
@@ -10,6 +11,7 @@ from pioneer.nearline.beamtune_client import (
     BeamTuneClient,
     DEFAULT_URL,
     CONTEXT_SCHEMA,
+    is_permanent_rejection,
 )
 
 #: beam-header device types whose Demand the loop can set (the knobs)
@@ -23,13 +25,19 @@ def knobs_from_header(header):
     """``(knobs, readback)`` from a beam header, types 1/4/5 only.
 
     ``header`` is a dict with the lists ``names``, ``demand``, ``measured``
-    and ``types`` (what ``tuning.read_beamline_header`` returns)."""
+    and ``types`` (what ``tuning.read_beamline_header`` returns).  A NaN or
+    infinite value is refused: JSON cannot carry it and the service would
+    reject the context."""
     knobs, readback = {}, {}
     for name, demand, measured, dev_type in zip(header["names"], header["demand"],
                                                 header["measured"], header["types"]):
         if int(dev_type) in CONFIGURABLE_DEVICES:
-            knobs[str(name)] = float(demand)
-            readback[str(name)] = float(measured)
+            demand, measured = float(demand), float(measured)
+            if not (math.isfinite(demand) and math.isfinite(measured)):
+                raise ValueError("beam header channel %s has a non-finite value "
+                                 "(demand %r, measured %r)" % (name, demand, measured))
+            knobs[str(name)] = demand
+            readback[str(name)] = measured
     return knobs, readback
 
 
@@ -71,12 +79,19 @@ class miniTwinInterface:
         #: called with each context the service took; the tuning loop keeps
         #: the id of the last one in the ODB
         self.on_delivered = None
+        #: called with (context, error) for a context the service refused for
+        #: good (see beamtune_client.is_permanent_rejection); it is dropped
+        self.on_rejected = None
         self._columns_fetched = False
         self._pending = collections.deque(maxlen=int(max_pending))
         self._failures = 0
         self._breaker_failures = int(breaker_failures)
         self._breaker_cooldown_s = float(breaker_cooldown_s)
         self._muted_until = 0.0
+        # DAQ reports have a breaker of their own, so that their successes
+        # cannot hide failing contexts and proposals
+        self._daq_failures = 0
+        self._daq_muted_until = 0.0
         self._counter = 0
 
     # -- the four methods the daemon calls ---------------------------------
@@ -147,6 +162,15 @@ class miniTwinInterface:
         context = self.BuildContextFiles(context_id, files, run_ids, header, step=step)
         self._enqueue(context)
         return context
+
+    def Enqueue(self, context):                        # noqa: N802
+        """Post a built context through the retry queue.  True when the
+        queue is empty afterwards.  Never raises."""
+        try:
+            return self._enqueue(context)
+        except Exception as exc:                       # noqa: BLE001 -- never escape
+            self._log("Enqueue: %r" % (exc,))
+            return False
 
     def NextConfiguration(self):                       # noqa: N802 -- daemon's API
         """Poll for a newer proposal.  Returns ``[]`` for anything but success.
@@ -227,16 +251,21 @@ class miniTwinInterface:
 
     def PostDaq(self, report):                         # noqa: N802
         """Send one DAQ progress report.  Not queued (only the latest one
-        matters), behind the same circuit breaker as everything else.
+        matters), behind a circuit breaker of its own.
         Returns True when the service took it; never raises."""
         try:
-            if self._muted():
+            if time.time() < self._daq_muted_until:
                 return False
             self.client.post_daq(report)
-            self._succeed()
+            self._daq_failures = 0
+            self._daq_muted_until = 0.0
             return True
         except Exception as exc:                       # noqa: BLE001 -- never escape
-            self._fail("post_daq(%s): %r" % (report.get("stage"), exc))
+            self._daq_failures += 1
+            if self._daq_failures <= self._breaker_failures:
+                self._log("post_daq(%s): %r" % (report.get("stage"), exc))
+            if self._daq_failures >= self._breaker_failures:
+                self._daq_muted_until = time.time() + self._breaker_cooldown_s
             return False
 
     def Flush(self):                                   # noqa: N802
@@ -331,6 +360,18 @@ class miniTwinInterface:
                 result = self.client.post_context(context)
                 self._succeed()
             except Exception as exc:                   # noqa: BLE001 -- never escape
+                if is_permanent_rejection(exc):
+                    # the service is there and refuses this body: retrying
+                    # it forever would hold up every context behind it
+                    self._succeed()
+                    self._pending.popleft()
+                    self._log("context %s rejected, dropped: %s" % (context.get("context_id"), exc))
+                    if self.on_rejected is not None:
+                        try:
+                            self.on_rejected(context, exc)
+                        except Exception as cb_exc:    # noqa: BLE001 -- never escape
+                            self._log("on_rejected(%s): %r" % (context.get("context_id"), cb_exc))
+                    continue
                 self._fail("post_context(%s): %r" % (context.get("context_id"), exc))
                 return False
             self._pending.popleft()
@@ -378,3 +419,7 @@ class miniTwinInterface:
     @property
     def muted(self):
         return self._muted()
+
+    @property
+    def daq_muted(self):
+        return time.time() < self._daq_muted_until
