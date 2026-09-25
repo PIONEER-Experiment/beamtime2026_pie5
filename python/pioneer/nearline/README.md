@@ -554,6 +554,7 @@ closed for both. Options, after the command name:
 |---|---|
 | `--dry-run` | print the rows that would be scheduled, or the JSON that would be sent; nothing is written or sent |
 | `--url URL` | the service, instead of `/Nearline/config/MiniTwin URL` |
+| `--force` | `schedule` only: run even though `MiniTwin enable` is on |
 | `--since N` | `schedule` only: ask for a proposal newer than `N` instead of the last one seen. One less than a proposal id retakes that proposal |
 | `--output-path DIR` | the nearline output tree, instead of `/Nearline/config/Output path` |
 | `--no-odb` | do not connect to MIDAS: defaults only, nothing remembered. For a look on a machine without the experiment |
@@ -577,10 +578,10 @@ beam header the way the daemon will: through ROOT when the PIONEER
 dictionaries are loaded, else through uproot; with neither it fails with a
 message naming what is missing, and so would every post of the daemon.
 
-`schedule` ignores `MiniTwin enable`: it is how a step is taken while the
-daemon's loop is paused. With the loop running as well, both poll the same
-service; the proposal id in the ODB keeps them from scheduling one proposal
-twice.
+`schedule` refuses to run while `/Nearline/config/MiniTwin enable` is on,
+because the daemon polls the same service and could take the same proposal:
+set it to `n` first (it is how a step is taken while the daemon's loop is
+paused), or pass `--force`. `--dry-run` only reads and always runs.
 
 ## Via the daemon
 

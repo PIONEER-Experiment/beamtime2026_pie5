@@ -1165,3 +1165,18 @@ def test_no_proposal_is_taken_while_the_column_map_is_unavailable():
     assert len(loop.poll_and_schedule()) == 1
     assert db.written == [("pim1_epics", {"ASM12:SOL:2": 90.44, "QTB12:SOL:2": 56.12})]
     assert odb.values["/Nearline/MiniTwin/Last proposal id"] == 5
+
+
+# -- review should-fix 8: CLI schedule while the daemon loop is on -------------
+
+def test_cli_schedule_refuses_while_the_loop_is_enabled(capsys):
+    db, odb, http = cli_setup([proposal(5)])
+    odb.values["/Nearline/config/MiniTwin enable"] = True
+    assert tuning.main(["schedule"], db=db, odb=odb, http=http) == 2
+    assert "MiniTwin enable" in capsys.readouterr().out
+    assert db.runs == {} and http.since == []
+    # a dry run only reads
+    assert tuning.main(["schedule", "--dry-run"], db=db, odb=odb, http=http) == 0
+    assert db.runs == {}
+    assert tuning.main(["schedule", "--force"], db=db, odb=odb, http=http) == 0
+    assert len(db.runs) == 1

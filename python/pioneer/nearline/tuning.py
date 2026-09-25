@@ -937,6 +937,9 @@ def _parser():
     sched.add_argument("--since", type=int, default=None,
                        help="proposal id to ask past (default: /Nearline/MiniTwin/Last proposal id); "
                             "one less than a proposal id retakes that proposal")
+    sched.add_argument("--force", action="store_true",
+                       help="schedule even though MiniTwin enable is on (the daemon may take "
+                            "the same proposal)")
     post = sub.add_parser("post", parents=[common],
                           help="post run N's histogram files as a context")
     post.add_argument("--run", type=int, required=True, help="MIDAS run number")
@@ -1004,9 +1007,12 @@ def main(argv=None, db=None, odb=None, http=None, header_reader=None):
 def _cmd_schedule(args, loop, odb, url):
     if args.since is not None:
         loop.mt.last_proposal_id = args.since
-    if not args.dry_run and odb_value(odb, ODB_CONFIG + "/MiniTwin enable", False) and not args.no_odb:
-        print("note: MiniTwin enable is on, so a running daemon polls the service too; "
-              "the proposal id is shared through the ODB")
+    if not args.dry_run and odb_value(odb, ODB_CONFIG + "/MiniTwin enable", False):
+        if not args.force:
+            print("ERROR: /Nearline/config/MiniTwin enable is on, so the daemon is polling the "
+                  "service too and could take the same proposal. Set it to n first, or pass --force.")
+            return 2
+        print("note: --force with MiniTwin enable on: the daemon polls the service too")
     since = loop.mt.last_proposal_id
     try:
         scheduled = loop.poll_and_schedule(dry_run=args.dry_run)
