@@ -565,6 +565,18 @@ context and 2 otherwise; unlike the daemon it does not keep a context it could
 not deliver, so run it again once the service answers. `post` needs ROOT with
 the PIONEER dictionaries to read the beam header of the first subrun file.
 
+**Before enabling the loop**, run `post --dry-run` on a recent run in the
+daemon's exact environment (same user, same shell setup, same `PYTHONPATH`):
+
+```bash
+python -m pioneer.nearline.tuning post --run <recent run> --dry-run
+```
+
+It must print a context with 28 knobs and every subrun file. It reads the
+beam header the way the daemon will: through ROOT when the PIONEER
+dictionaries are loaded, else through uproot; with neither it fails with a
+message naming what is missing, and so would every post of the daemon.
+
 `schedule` ignores `MiniTwin enable`: it is how a step is taken while the
 daemon's loop is paused. With the loop running as well, both poll the same
 service; the proposal id in the ODB keeps them from scheduling one proposal

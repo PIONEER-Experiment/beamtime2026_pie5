@@ -1090,3 +1090,57 @@ def test_a_service_below_the_watermark_is_one_error():
     assert len(errors) == 1
     assert "#2" in errors[0] and "#5" in errors[0] and "/Nearline/MiniTwin/Last proposal id" in errors[0]
     assert odb.values["/Nearline/MiniTwin/Last proposal id"] == 5
+
+
+# -- review should-fix 6: reading the header without PIONEER dictionaries -----
+
+REAL_FILE = DATA / "run00588" / "run00588_00000_hists.root"
+
+
+@pytest.mark.skipif(not REAL_FILE.is_file(), reason="run00588 test files not present")
+def test_real_header_through_uproot():
+    pytest.importorskip("uproot")
+    from pioneer.nearline.miniTwinInterface import knobs_from_header
+    header = tuning.read_beamline_header_uproot(REAL_FILE)
+    knobs, readback = knobs_from_header(header)
+    assert len(knobs) == 28
+    assert "QTA11" in knobs and "ASM12" in knobs and "FS12-U" in knobs
+    assert knobs["QTB12"] == pytest.approx(56.1219, abs=1e-3)
+    assert set(knobs) == set(readback)
+    assert "KSD11" not in knobs            # type 2
+
+
+@pytest.mark.skipif(not REAL_FILE.is_file(), reason="run00588 test files not present")
+def test_header_falls_back_to_uproot_without_root(monkeypatch):
+    pytest.importorskip("uproot")
+    monkeypatch.setitem(sys.modules, "ROOT", None)
+    header = tuning.read_beamline_header(REAL_FILE)
+    assert len(header["names"]) == len(header["types"]) == 34
+
+
+def test_header_without_root_or_uproot_names_what_is_missing(monkeypatch):
+    monkeypatch.setitem(sys.modules, "ROOT", None)
+    monkeypatch.setitem(sys.modules, "uproot", None)
+    with pytest.raises(RuntimeError, match="PIONEER.*dictionaries.*uproot"):
+        tuning.read_beamline_header("/nonexistent/run00604_00000_hists.root")
+
+
+def test_header_from_an_emulated_root_object_uses_uproot(monkeypatch):
+    class Emulated:                         # what ROOT gives without dictionaries
+        pass
+
+    class FakeFile:
+        def IsZombie(self):
+            return False
+
+        def Get(self, name):
+            return Emulated()
+
+        def Close(self):
+            pass
+
+    root = types.ModuleType("ROOT")
+    root.TFile = types.SimpleNamespace(Open=lambda path: FakeFile())
+    monkeypatch.setitem(sys.modules, "ROOT", root)
+    monkeypatch.setattr(tuning, "read_beamline_header_uproot", lambda path: {"via": "uproot"})
+    assert tuning.read_beamline_header("x_hists.root") == {"via": "uproot"}

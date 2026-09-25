@@ -127,26 +127,56 @@ def odb_value(odb, path, default):
 def read_beamline_header(path):
     """The ``beamline`` header of a nearline histogram file, as plain lists.
 
-    Needs ROOT with the PIONEER dictionaries (``PIODBBeamEntry``); imported
-    here, not at module level, so everything else runs without it.
+    ROOT reads it when the PIONEER dictionaries (``PIODBBeamEntry``) are
+    loaded.  Without them ROOT only has an emulated object with no methods;
+    then, or when there is no ROOT at all, uproot reads the stored members
+    instead.  Neither is imported at module level.
     """
-    import ROOT
-
-    aFile = ROOT.TFile.Open(str(path))
-    if not aFile or aFile.IsZombie():
-        raise OSError("cannot open %s" % path)
     try:
-        hdr = aFile.Get("beamline")
-        if not hdr:
+        import ROOT
+    except ImportError:
+        ROOT = None
+    if ROOT is not None:
+        aFile = ROOT.TFile.Open(str(path))
+        if not aFile or aFile.IsZombie():
+            raise OSError("cannot open %s" % path)
+        try:
+            hdr = aFile.Get("beamline")
+            if not hdr:
+                raise KeyError("no 'beamline' header in %s" % path)
+            if hasattr(hdr, "GetNames"):
+                return {
+                    "names": [str(n) for n in hdr.GetNames()],
+                    "demand": [float(v) for v in hdr.GetDemand()],
+                    "measured": [float(v) for v in hdr.GetMeasured()],
+                    "types": [int(t) for t in hdr.GetTypes()],
+                }
+        finally:
+            aFile.Close()
+    return read_beamline_header_uproot(path)
+
+
+def read_beamline_header_uproot(path):
+    """``read_beamline_header`` through uproot: no dictionaries needed, the
+    members m_names/m_demand/m_measured/m_types are read as stored."""
+    try:
+        import uproot
+    except ImportError:
+        raise RuntimeError(
+            "cannot read the beamline header of %s: ROOT does not have the PIONEER "
+            "dictionaries for PIODBBeamEntry (source the build's setenv.sh so the "
+            "install's lib directory is on LD_LIBRARY_PATH) and uproot is not installed"
+            % path) from None
+    with uproot.open(str(path)) as aFile:
+        if "beamline" not in aFile:
             raise KeyError("no 'beamline' header in %s" % path)
+        members = aFile["beamline"].members
         return {
-            "names": [str(n) for n in hdr.GetNames()],
-            "demand": [float(v) for v in hdr.GetDemand()],
-            "measured": [float(v) for v in hdr.GetMeasured()],
-            "types": [int(t) for t in hdr.GetTypes()],
+            "names": [str(n) for n in members["m_names"]],
+            "demand": [float(v) for v in members["m_demand"]],
+            "measured": [float(v) for v in members["m_measured"]],
+            "types": [int(t) for t in members["m_types"]],
         }
-    finally:
-        aFile.Close()
 
 
 def hist_files(db, run_ids, output_path):
