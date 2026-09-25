@@ -74,6 +74,14 @@ FAILURE_STATUSES = {"FAILED", "BLOCKED", "ERROR", "CANCELLED"}
 ODB_RUN_DB_PK = "/Runinfo/Run DB PK"
 ODB_EVENTS_SENT = "/Equipment/WDWaveforms/Statistics/Events sent"
 
+#: where measurement.exposure takes its numbers from (sent with it)
+EXPOSURE_SOURCES = {
+    "seconds": "run database logs.slow_control: latest EOR minus earliest BOR log_time, "
+               "summed over the runs",
+    "wd_events": "ODB %s at the end of the step's run (%s/Active step/Events at EOR)"
+                 % (ODB_EVENTS_SENT, ODB_STATE),
+}
+
 #: the daemon's own /Nearline/config/Output path default
 DEFAULT_OUTPUT_PATH = "/home/pinky/nearline"
 
@@ -304,6 +312,28 @@ def hist_files(db, run_ids, output_path):
             continue
         found.append({"run_db_id": row["run_id"], "run_number": number, "local": local})
     return found, skipped, [numbers[r] for r in run_ids]
+
+
+def iso_utc(when):
+    """A datetime as ISO 8601 UTC with milliseconds (``...T10:05:12.000Z``);
+    None stays None, a naive datetime is taken to be UTC."""
+    if when is None:
+        return None
+    from datetime import timezone
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def empty_exposure(numbers):
+    """``measurement.exposure`` with nothing known."""
+    return {
+        "seconds": None,
+        "wd_events": None,
+        "per_run": [{"run": int(n), "seconds": None, "wd_events": None, "bor": None, "eor": None}
+                    for n in numbers],
+        "source": dict(EXPOSURE_SOURCES),
+    }
 
 
 def remote_path(local, local_prefix, remote_prefix):
@@ -929,11 +959,13 @@ class TuningLoop:
 
     # -- finished runs -> context ------------------------------------------
 
-    def context_parts(self, run_ids):
+    def context_parts(self, run_ids, step=None):
         """Everything a context of `run_ids` (run database ids) is made of:
         ``(context_id, remote file paths, MIDAS run numbers, beam header,
-        inline maps or None)``.  The header is read from the first subrun's
-        file on this machine, the maps summed over all of them."""
+        inline maps or None, exposure)``.  The header is read from the first
+        subrun's file on this machine, the maps summed over all of them;
+        `step` (the step the runs were taken for, or None) gives the
+        events of the exposure."""
         files, skipped, numbers = hist_files(self.db, run_ids, self.output_path)
         for local, status in skipped:
             self.message("Tuning: leaving out %s (file status %s)" % (local, status))
@@ -951,7 +983,65 @@ class TuningLoop:
         header = self.header_reader(files[0]["local"])
         context_id = "_".join("run%05d" % n for n in numbers)
         inline = self.inline_maps([f["local"] for f in files], context_id)
-        return context_id, remote, numbers, header, inline
+        return context_id, remote, numbers, header, inline, self.exposure(numbers, step)
+
+    def exposure(self, numbers, step=None):
+        """``measurement.exposure`` of MIDAS runs `numbers`, so the service
+        can normalise rates by run time when the SMA proton current is empty.
+
+        seconds: per run EOR - BOR from the run database (get_run_times),
+        the total only when every run has both.  wd_events: the step's
+        ``eor_events`` (record_eor_events), given only for a context of one
+        run -- one step is one run.  Anything that cannot be known is null;
+        a failure never stops the post (one MIDAS message), see
+        EXPOSURE_SOURCES for the sources."""
+        numbers = [int(n) for n in numbers]
+        exposure = empty_exposure(numbers)
+        per_run = exposure["per_run"]
+        try:
+            events = (step or {}).get("eor_events")
+            if events is not None and int(events) >= 0 and len(per_run) == 1:
+                per_run[0]["wd_events"] = exposure["wd_events"] = int(events)
+        except Exception as exc:                       # noqa: BLE001 -- never blocks the post
+            self.message("Tuning: events of run(s) %s not known (%s); exposure sent without them"
+                         % (", ".join(str(n) for n in numbers), exc))
+        try:
+            times = self.db.get_run_times(numbers) if numbers else {}
+            unknown = []
+            for entry in per_run:
+                bor, eor = (times.get(entry["run"]) or {}).get("bor"), \
+                    (times.get(entry["run"]) or {}).get("eor")
+                entry["bor"], entry["eor"] = iso_utc(bor), iso_utc(eor)
+                seconds = (eor - bor).total_seconds() if bor is not None and eor is not None else None
+                if seconds is None or seconds < 0:
+                    unknown.append(entry["run"])
+                    continue
+                entry["seconds"] = round(seconds, 3)
+            if unknown:
+                self.message("Tuning: run(s) %s have no begin and end of run in the run database; "
+                             "exposure seconds unknown" % ", ".join(str(n) for n in unknown))
+            elif per_run:
+                exposure["seconds"] = round(sum(e["seconds"] for e in per_run), 3)
+        except Exception as exc:                       # noqa: BLE001 -- never blocks the post
+            for entry in per_run:
+                entry.update(seconds=None, bor=None, eor=None)
+            exposure["seconds"] = None
+            self.message("Tuning: run times of run(s) %s not read (%s); exposure seconds unknown"
+                         % (", ".join(str(n) for n in numbers), exc))
+        return exposure
+
+    def exposure_of(self, run_ids, step=None):
+        """``exposure`` of run database ids `run_ids` (the merge path), or
+        None when their run numbers cannot be read.  Never raises."""
+        try:
+            numbers = [self.db.get_midas_run_number(r) for r in run_ids]
+            if any(n is None for n in numbers):
+                raise ValueError("run without a MIDAS run number")
+        except Exception as exc:                       # noqa: BLE001 -- never blocks the post
+            self.message("Tuning: exposure of run(s) (db id) %s not known: %s"
+                         % (", ".join(str(r) for r in run_ids), exc))
+            return None
+        return self.exposure(numbers, step)
 
     def inline_maps(self, local_paths, context_id):
         """The maps to send inline -- the measurement -- or None.  A context
@@ -971,9 +1061,9 @@ class TuningLoop:
 
     def build_context(self, run_ids, step=None):
         """The context of `run_ids` as it would be posted; nothing is sent."""
-        context_id, files, numbers, header, inline = self.context_parts(run_ids)
+        context_id, files, numbers, header, inline, exposure = self.context_parts(run_ids, step)
         return self.mt.BuildContextFiles(context_id, files, numbers, header, step=step,
-                                         inline=inline)
+                                         inline=inline, exposure=exposure)
 
     def post_runs(self, run_ids, step=None, seq_id=None, require_delivery=False):
         """Build the context of `run_ids` and post it through the retry queue.
@@ -982,9 +1072,9 @@ class TuningLoop:
         both stay open.  Raises ContextRejected when the service refused it
         for good.  With `require_delivery` (the CLI, which has no later
         retry) raise when the service did not take it, and drop it."""
-        context_id, files, numbers, header, inline = self.context_parts(run_ids)
+        context_id, files, numbers, header, inline, exposure = self.context_parts(run_ids, step)
         context = self.mt.BuildContextFiles(context_id, files, numbers, header, step=step,
-                                            inline=inline)
+                                            inline=inline, exposure=exposure)
         self._rejected.pop(context_id, None)
         self._inflight[context_id] = {"seq_id": seq_id, "step": step}
         self.mt.Enqueue(context)

@@ -192,12 +192,14 @@ class miniTwinInterface:
 
     # -- the four methods the daemon calls ---------------------------------
 
-    def AddContext(self, ctxt, step=None, header_reader=None):  # noqa: N802 -- daemon's API
+    def AddContext(self, ctxt, step=None, header_reader=None, exposure=None):  # noqa: N802
         """One completed sequence.  ``ctxt`` is a merged file path; the context
         id is its stem (``seq00057``) -- never a path, the service makes a
         directory of it.  ``step`` is the proposal the sequence was scheduled
         with, or None.  The beam header is read by ``header_reader``
-        (default ``tuning.read_beamline_header``: ROOT, else uproot)."""
+        (default ``tuning.read_beamline_header``: ROOT, else uproot).
+        ``exposure`` (see ``tuning.TuningLoop.exposure``) goes in as
+        ``measurement.exposure`` when given."""
         import ROOT        # lazy: the rest of this module works without ROOT
         from pathlib import Path
 
@@ -219,7 +221,7 @@ class miniTwinInterface:
             aFile.Close()
 
         context = self._envelope(Path(filename).stem, inline=inline, knobs=knobs,
-                                 readback=readback, step=step)
+                                 readback=readback, step=step, exposure=exposure)
         self._enqueue(context)
         return context
 
@@ -227,7 +229,7 @@ class miniTwinInterface:
         return serialise_hist(hist)
 
     def BuildContextFiles(self, context_id, files, run_ids, header, step=None,  # noqa: N802
-                          inline=None):
+                          inline=None, exposure=None):
         """A context made of file paths, nothing read from the histograms.
 
         ``files`` are the paths as the service sees them (role hist_root),
@@ -236,21 +238,24 @@ class miniTwinInterface:
         was scheduled with (``proposal_id``, ``step_id``, ``attempt``,
         ``plan``) or None when that is not known.  ``inline`` (see
         ``inline_maps``) goes in as ``measurement.inline`` next to the files;
-        the service reads it first.
+        the service reads it first.  ``exposure`` (run seconds and WaveDREAM
+        events, see ``tuning.TuningLoop.exposure``) goes in as
+        ``measurement.exposure`` when given.
         """
         knobs, readback = knobs_from_header(header)
         return self._envelope(
             str(context_id),
             files=[{"path": str(f), "role": HIST_ROOT_ROLE} for f in files],
-            knobs=knobs, readback=readback, run_ids=run_ids, step=step, inline=inline)
+            knobs=knobs, readback=readback, run_ids=run_ids, step=step, inline=inline,
+            exposure=exposure)
 
     def AddContextFiles(self, context_id, files, run_ids, header, step=None,  # noqa: N802
-                        inline=None):
+                        inline=None, exposure=None):
         """``BuildContextFiles`` and post it through the retry queue.  A post
         that fails stays queued and is retried; this only raises when the
         context cannot be built."""
         context = self.BuildContextFiles(context_id, files, run_ids, header, step=step,
-                                         inline=inline)
+                                         inline=inline, exposure=exposure)
         self._enqueue(context)
         return context
 
@@ -457,7 +462,8 @@ class miniTwinInterface:
         return self.column_map
 
     def _envelope(self, context_id, files=None, inline=None, knobs=None,
-                  objective=None, run_ids=None, readback=None, valid=True, step=None):
+                  objective=None, run_ids=None, readback=None, valid=True, step=None,
+                  exposure=None):
         if not knobs:
             raise ValueError("context %s has no knobs (no type 1/4/5 device in the beam header)"
                              % context_id)
@@ -468,6 +474,8 @@ class miniTwinInterface:
             measurement["inline"] = inline
         if objective is not None:
             measurement["objective"] = objective
+        if exposure is not None:
+            measurement["exposure"] = exposure
         provenance = {"run_ids": list(run_ids or []), "config_type": self.config_type}
         step = step or {}
         # Hand the plan step back to the backend so it can tick it off

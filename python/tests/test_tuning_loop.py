@@ -2199,3 +2199,117 @@ def test_events_at_eor_survive_a_restart_and_a_claim():
     # a record without the key (written before it existed) reads as unknown
     del odb.values["/Nearline/MiniTwin/Pending/%d/Events at EOR" % seq_id]
     assert tuning.load_pending(odb, seq_id)["eor_events"] is None
+
+
+def _utc(h, m, s):
+    from datetime import datetime, timezone
+    return datetime(2026, 9, 25, h, m, s, tzinfo=timezone.utc)
+
+
+def posted_step_context(run_times, events=1_000_123):
+    """Take proposal 5's run (MIDAS 604) to its end and post it:
+    ``(context, loop, db, odb, messages)``."""
+    loop, db, odb, http, run_id = running_step(events=events)
+    messages = []
+    loop._message = lambda m, is_error=False: messages.append((m, is_error))
+    assert loop.record_eor_events(run_id) == events
+    db.runs[run_id]["status"] = "DONE"
+    db.files.append({"run_id": run_id, "filebase": "run00604_00000", "fileext": "root",
+                     "status": "DONE"})
+    db.run_times = run_times
+    loop.post_sequence(loop.active["seq_id"])
+    (context,) = http.contexts
+    return context, loop, db, odb, messages
+
+
+def test_the_context_carries_the_exposure():
+    context, loop, db, odb, messages = posted_step_context(
+        {604: {"bor": _utc(10, 0, 0), "eor": _utc(10, 5, 12)}})
+    assert context["measurement"]["exposure"] == {
+        "seconds": 312.0,
+        "wd_events": 1_000_123,
+        "per_run": [{"run": 604, "seconds": 312.0, "wd_events": 1_000_123,
+                     "bor": "2026-09-25T10:00:00.000Z", "eor": "2026-09-25T10:05:12.000Z"}],
+        "source": tuning.EXPOSURE_SOURCES,
+    }
+    assert set(context["measurement"]["exposure"]["source"]) == {"seconds", "wd_events"}
+    # everything else about the context is as before
+    assert context["measurement"]["kind"] == "psm_nearline"
+    assert context["responds_to"] == {"proposal_id": 5}
+    assert not [m for m, e in messages if "exposure" in m]
+
+
+def test_a_run_without_bor_has_null_seconds():
+    context, loop, db, odb, messages = posted_step_context({604: {"bor": None, "eor": _utc(10, 5, 12)}})
+    exposure = context["measurement"]["exposure"]
+    assert exposure["seconds"] is None
+    assert exposure["per_run"] == [{"run": 604, "seconds": None, "wd_events": 1_000_123,
+                                    "bor": None, "eor": "2026-09-25T10:05:12.000Z"}]
+    assert exposure["wd_events"] == 1_000_123
+    assert [m for m, e in messages if "exposure seconds unknown" in m and not e]
+
+
+def test_a_db_error_in_the_exposure_still_posts_the_context():
+    context, loop, db, odb, messages = posted_step_context(RuntimeError("connection refused"))
+    exposure = context["measurement"]["exposure"]
+    assert exposure["seconds"] is None
+    assert exposure["per_run"][0]["bor"] is None and exposure["per_run"][0]["eor"] is None
+    # the events come from the ODB, not the run database: still there
+    assert exposure["wd_events"] == 1_000_123
+    assert db.sequences[loop_seq(db)]["status"] == "DONE"
+    (text,) = [m for m, e in messages if "exposure" in m]
+    assert "connection refused" in text
+    assert not [m for m, e in messages if "exposure" in m and e]
+
+
+def loop_seq(db):
+    (seq_id,) = [s for s, v in db.sequences.items() if v["on_complete"] == "mt_add"]
+    return seq_id
+
+
+def test_a_context_without_the_step_has_no_events():
+    db = FakeDb()
+    run_id = db.add_run(604, subruns=1)
+    db.run_times = {604: {"bor": _utc(10, 0, 0), "eor": _utc(10, 1, 0)}}
+    loop, _, _, _ = make_loop(db=db, mt=real_mt())
+    exposure = loop.build_context([run_id])["measurement"]["exposure"]
+    assert exposure["seconds"] == 60.0 and exposure["wd_events"] is None
+
+
+def test_several_runs_sum_their_seconds_and_give_no_total_events():
+    db = FakeDb()
+    a, b = db.add_run(604, subruns=1), db.add_run(605, subruns=1)
+    db.run_times = {604: {"bor": _utc(10, 0, 0), "eor": _utc(10, 1, 0)},
+                    605: {"bor": _utc(10, 2, 0), "eor": _utc(10, 2, 30)}}
+    loop, _, _, _ = make_loop(db=db, mt=real_mt())
+    step = {"proposal_id": 5, "step_id": "S", "attempt": 0, "plan": "P", "seq_id": 57,
+            "eor_events": 42}
+    exposure = loop.build_context([a, b], step=step)["measurement"]["exposure"]
+    assert exposure["seconds"] == 90.0
+    assert [r["seconds"] for r in exposure["per_run"]] == [60.0, 30.0]
+    assert exposure["wd_events"] is None
+    assert [r["wd_events"] for r in exposure["per_run"]] == [None, None]
+
+
+def test_the_merge_path_carries_the_exposure(monkeypatch):
+    header = types.SimpleNamespace(GetNames=lambda: HEADER["names"], GetDemand=lambda: HEADER["demand"],
+                                   GetMeasured=lambda: HEADER["measured"], GetTypes=lambda: HEADER["types"])
+    monkeypatch.setitem(sys.modules, "ROOT",
+                        fake_root({"/n/seq00057/seq00057.root": dict(mupix_maps(), beamline=header)}))
+    db = FakeDb()
+    run_ids = [db.add_run(604), db.add_run(605)]
+    db.run_times = {604: {"bor": _utc(10, 0, 0), "eor": _utc(10, 1, 0)}}
+    http = FakeHttp()
+    loop, _, _, _ = make_loop(db=db, mt=real_mt(http))
+    exposure = loop.exposure_of(run_ids)
+    loop.mt.AddContext(Path("/n/seq00057/seq00057.root"), exposure=exposure)
+    (context,) = http.contexts
+    got = context["measurement"]["exposure"]
+    assert [r["run"] for r in got["per_run"]] == [604, 605]
+    assert got["per_run"][0]["seconds"] == 60.0 and got["seconds"] is None
+
+
+def test_exposure_of_unknown_runs_is_none():
+    loop, db, _, messages = make_loop()
+    assert loop.exposure_of([12345]) is None
+    assert [m for m, e in messages if "exposure" in m]
