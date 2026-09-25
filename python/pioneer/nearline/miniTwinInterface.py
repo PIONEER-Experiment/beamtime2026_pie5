@@ -177,38 +177,36 @@ class miniTwinInterface:
 
     # -- the four methods the daemon calls ---------------------------------
 
-    def AddContext(self, ctxt):                        # noqa: N802 -- daemon's API
-        """One completed sequence.  ``ctxt`` is a merged file path."""
+    def AddContext(self, ctxt, step=None, header_reader=None):  # noqa: N802 -- daemon's API
+        """One completed sequence.  ``ctxt`` is a merged file path; the context
+        id is its stem (``seq00057``) -- never a path, the service makes a
+        directory of it.  ``step`` is the proposal the sequence was scheduled
+        with, or None.  The beam header is read by ``header_reader``
+        (default ``tuning.read_beamline_header``: ROOT, else uproot)."""
         import ROOT        # lazy: the rest of this module works without ROOT
+        from pathlib import Path
+
+        if header_reader is None:
+            from pioneer.nearline.tuning import read_beamline_header as header_reader
 
         filename = str(ctxt)
+        knobs, readback = knobs_from_header(header_reader(filename))
         aFile = ROOT.TFile.Open(filename)
         if not aFile or aFile.IsZombie():
             raise OSError("cannot open %s" % filename)
+        try:
+            hists = [aFile.Get(n) for n in miniTwin_histograms]
+            for name, hist in zip(miniTwin_histograms, hists):
+                if not hist:
+                    raise KeyError("%s has no %s" % (filename, name))
+            inline = inline_maps(hists)
+        finally:
+            aFile.Close()
 
-        beam_hdr = aFile.Get("beamline")
-
-        hists = [aFile.Get(n) for n in miniTwin_histograms]
-        for name, hist in zip(miniTwin_histograms, hists):
-            if not hist:
-                raise KeyError("%s has no %s" % (filename, name))
-        inline = inline_maps(hists)
-
-        configurable_devices = [1, 4, 5]
-
-        theMessage = {
-            "schema" : CONTEXT_SCHEMA,
-            "context_id" : filename,
-            "setting" : {
-                "knobs" : {str(k) : v for k,v,t in zip(beam_hdr.GetNames(), beam_hdr.GetDemand(), beam_hdr.GetTypes()) if t in configurable_devices},
-                "readback" : {str(k) : v for k,v,t in zip(beam_hdr.GetNames(), beam_hdr.GetMeasured(), beam_hdr.GetTypes()) if t in configurable_devices}
-            },
-            "measurement" : {
-                "inline" : inline
-            }
-        }
-
-        self._enqueue(theMessage)
+        context = self._envelope(Path(filename).stem, inline=inline, knobs=knobs,
+                                 readback=readback, step=step)
+        self._enqueue(context)
+        return context
 
     def serialise(self, hist):
         return serialise_hist(hist)

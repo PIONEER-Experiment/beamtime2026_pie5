@@ -1409,14 +1409,20 @@ def test_merge_path_add_context_takes_axes_from_the_file(monkeypatch):
     header = types.SimpleNamespace(GetNames=lambda: HEADER["names"], GetDemand=lambda: HEADER["demand"],
                                    GetMeasured=lambda: HEADER["measured"], GetTypes=lambda: HEADER["types"])
     objects = dict(mupix_maps(), beamline=header)
-    monkeypatch.setitem(sys.modules, "ROOT", fake_root({"/n/seq00057/seq00057.root": objects}))
+    root = fake_root({"/n/seq00057/seq00057.root": objects})
+    monkeypatch.setitem(sys.modules, "ROOT", root)
     http = FakeHttp()
     mt = real_mt(http)
-    mt.AddContext(Path("/n/seq00057/seq00057.root"))
+    step = {"proposal_id": 5, "step_id": "ASM12_90.44", "attempt": 0, "plan": "P", "seq_id": 57}
+    mt.AddContext(Path("/n/seq00057/seq00057.root"), step=step)
     (context,) = http.contexts
-    assert context["context_id"] == "/n/seq00057/seq00057.root"
-    assert isinstance(context["context_id"], str)
+    # never a path: the service makes a directory of the context id
+    assert context["context_id"] == "seq00057"
     assert context["measurement"]["inline"]["axes"]["px"] == list(PX_RANGE)
+    assert context["setting"]["knobs"] == {"ASM12": 90.44, "QTB12": 56.12}
+    assert context["responds_to"] == {"proposal_id": 5}
+    assert context["provenance"]["step_id"] == "ASM12_90.44"
+    assert root.opened and all(f.closed for f in root.opened)
 
 
 # -- combine_files: no current pulses means no normalisation --------------------

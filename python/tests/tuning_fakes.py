@@ -312,6 +312,7 @@ class FakeTH2:
 class FakeRootFile:
     def __init__(self, objects):
         self.objects = objects
+        self.closed = False
 
     def __bool__(self):
         return True
@@ -323,7 +324,7 @@ class FakeRootFile:
         return self.objects.get(name)
 
     def Close(self):
-        pass
+        self.closed = True
 
 
 def fake_root(files):
@@ -331,5 +332,11 @@ def fake_root(files):
     ({path: {object name: object}})."""
     import types
     root = types.ModuleType("ROOT")
-    root.TFile = types.SimpleNamespace(Open=lambda path, *mode: FakeRootFile(files.get(str(path), {})))
+    root.opened = []
+
+    def open_file(path, *mode):
+        f = FakeRootFile(files.get(str(path), {}))
+        root.opened.append(f)
+        return f
+    root.TFile = types.SimpleNamespace(Open=open_file)
     return root

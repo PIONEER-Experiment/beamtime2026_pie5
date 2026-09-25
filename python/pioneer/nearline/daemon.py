@@ -238,7 +238,8 @@ class NearlineDaemon:
             print("Finalising job")
             aJob.finalise()
             if "mt_add" in aJob.config['on_complete'].split() and self.minitwin_enabled:
-                self.mt_interface.AddContext(aJob.config['output_file'])
+                self.mt_interface.AddContext(aJob.config['output_file'],
+                                             step = self.tuning.step_for_sequence(aJob.config['id']))
 
         numOpen = self.sequence_queue.getOpenSlots()
         if numOpen > 0:
