@@ -291,7 +291,7 @@ def reply_check(in_reply_to, expected):
 
     Returns ``(check, reply)``: check is "none" when the proposal answers no
     context (null or absent: a kick, a resume, or a service without the
-    field), "ok" when ``in_reply_to.context_id`` is `expected`, else
+    field; or an object without a context_id), "ok" when ``in_reply_to.context_id`` is `expected`, else
     "mismatch"; reply is what the `scheduled` DAQ report carries.  This never
     stops a proposal from being scheduled: the service is the schedule truth.
     """
@@ -299,7 +299,10 @@ def reply_check(in_reply_to, expected):
     if not isinstance(in_reply_to, dict):
         return "none", {"expected": expected, "got": None, "outcome": None, "ok": True}
     got = in_reply_to.get("context_id")
-    check = "ok" if got == expected else "mismatch"
+    if got is None:
+        check = "none"
+    else:
+        check = "ok" if got == expected else "mismatch"
     return check, {"expected": expected, "got": got,
                    "outcome": in_reply_to.get("outcome"), "ok": check != "mismatch"}
 
@@ -420,6 +423,8 @@ class TuningLoop:
         self.active = None
         self._watermark_error = False
         self._watermark_warned = None
+        self._step_unsaved = False
+        self._reply_error = False
         self._column_map_warned = None
         #: seq id -> time it was claimed, for sequences waiting out the post delay
         self._waiting = {}
@@ -458,15 +463,35 @@ class TuningLoop:
         last_id, active = load_state(self.odb)
         if last_id > self.mt.last_proposal_id:
             self.mt.last_proposal_id = last_id
+        if self._step_unsaved:
+            # our step never made it to the ODB whole: write it again rather
+            # than take up what is there
+            self._save_step()
+            return
         if active != self.active:
             self.active = active
             self._last_key = None
 
     def set_active(self, step):
+        """The active step, in memory and in the ODB.  A failed ODB write is
+        one MIDAS error; the step is kept in memory and written again every
+        iteration until it goes through."""
         self.active = dict(step) if step else None
-        save_step(self.odb, self.active)
         self._last_key = None
         self._last_events = None
+        self._save_step()
+
+    def _save_step(self):
+        try:
+            save_step(self.odb, self.active)
+        except Exception as exc:                       # noqa: BLE001 -- keep the step in memory
+            if not self._step_unsaved:
+                self.message("Tuning: could not write the active step to %s/Active step: %s; "
+                             "kept in memory, retrying" % (ODB_STATE, exc), is_error=True)
+            self._step_unsaved = True
+            return False
+        self._step_unsaved = False
+        return True
 
     def refresh_enable(self):
         """Re-read /Nearline/config/MiniTwin enable, the pause switch.
@@ -633,7 +658,15 @@ class TuningLoop:
         if not configs:
             return []
         hints = self.mt.last_run_hints or {}
-        reply = self.check_reply(proposal_id, hints, dry_run=dry_run)
+        try:
+            reply = self.check_reply(proposal_id, hints, dry_run=dry_run)
+            self._reply_error = False
+        except Exception as exc:                       # noqa: BLE001 -- never blocks scheduling
+            if not self._reply_error:
+                self._reply_error = True
+                self.message("Tuning: reply check of proposal %d skipped: %s" % (proposal_id, exc),
+                             is_error=True)
+            reply = reply_check(None, None)[1]
         try:
             scheduled = schedule_configs(self.db, configs, self.update_table,
                                          self.target_config, dry_run=dry_run)

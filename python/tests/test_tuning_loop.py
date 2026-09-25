@@ -1520,3 +1520,58 @@ def test_a_full_queue_fails_the_dropped_sequence():
     assert loop.mt.pending == 2
     assert db.sequences[57]["status"] == "FAILED"
     assert any(e and "run00604" in m and "full" in m for m, e in messages)
+
+
+# -- second review S2 / N4 / N1 --------------------------------------------------
+
+def test_an_odb_failure_in_the_reply_check_does_not_lose_the_proposal():
+    class FlakyOdb(FakeOdb):
+        armed = False
+
+        def odb_get(self, path):
+            if self.armed and path.endswith("Last context id"):
+                raise RuntimeError("odb timeout")
+            return super().odb_get(path)
+
+    odb = FlakyOdb({"/Nearline/config/MiniTwin updates": "pim1_epics",
+                    "/Nearline/config/MiniTwin enable": True})
+    loop, db, odb, http, messages = loop_with_service(
+        [proposal(5, in_reply_to=in_reply_to("run00604"))], odb=odb)
+    odb.armed = True
+    assert len(loop.poll_and_schedule()) == 1
+    assert len(db.runs) == 1
+    assert scheduled_reply(http) == {"expected": None, "got": None, "outcome": None, "ok": True}
+    assert sum(1 for m, e in messages if e and "reply check" in m) == 1
+
+
+def test_a_failed_step_write_keeps_the_step_in_memory():
+    class FlakyOdb(FakeOdb):
+        armed = False
+
+        def odb_set(self, path, value):
+            if self.armed and "/Active step/" in path and path.endswith("Seq id"):
+                raise RuntimeError("odb timeout")
+            super().odb_set(path, value)
+
+    odb = FlakyOdb({"/Nearline/config/MiniTwin updates": "pim1_epics",
+                    "/Nearline/config/MiniTwin enable": True})
+    loop, db, odb, http, messages = loop_with_service([proposal(5)], odb=odb)
+    odb.armed = True
+    seq_id = loop.poll_and_schedule()[0]["seq_id"]
+    assert len(db.runs) == 1
+    assert loop.active["proposal_id"] == 5 and loop.active["seq_id"] == seq_id
+    # the half-written step is never taken up (Proposal id was written last)
+    assert odb.values["/Nearline/MiniTwin/Active step/Proposal id"] == 0
+    loop.refresh_enable()
+    assert loop.active["proposal_id"] == 5
+    assert sum(1 for m, e in messages if e and "Active step" in m) == 1
+    # the ODB recovers: written on the next iteration
+    odb.armed = False
+    loop.refresh_enable()
+    assert odb.values["/Nearline/MiniTwin/Active step/Proposal id"] == 5
+    assert odb.values["/Nearline/MiniTwin/Active step/Seq id"] == seq_id
+
+
+def test_a_reply_without_a_context_id_is_none():
+    check, reply = tuning.reply_check({"context_id": None, "outcome": "accepted"}, "run00604")
+    assert check == "none" and reply["ok"] is True
