@@ -54,6 +54,7 @@ class FakeDb:
         self.jobs = []          # state.postproc_job rows (job_type, status, midas_run_id)
         self.status_updates = []
         self.written = []       # (table, values) of add_new_configuration
+        self.run_times_calls = []  # (run numbers, timeout_s) of get_run_times
 
     # config tables
     def load_config(self, table, cfg_id):
@@ -118,11 +119,12 @@ class FakeDb:
     #: exception instance here is raised by get_run_times
     run_times = None
 
-    def get_run_times(self, midas_run_numbers):
-        if isinstance(self.run_times, Exception):
-            raise self.run_times
+    def get_run_times(self, midas_run_numbers, timeout_s=5.0):
         if isinstance(midas_run_numbers, int):
             midas_run_numbers = [midas_run_numbers]
+        self.run_times_calls.append((list(midas_run_numbers), timeout_s))
+        if isinstance(self.run_times, Exception):
+            raise self.run_times
         known = self.run_times or {}
         return {int(n): dict(known.get(int(n)) or {"bor": None, "eor": None})
                 for n in midas_run_numbers}

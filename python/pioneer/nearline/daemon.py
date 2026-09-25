@@ -122,6 +122,13 @@ class NearlineDaemon:
             callback = self.start_of_run_callback
         )
 
+        # after the frontends (sequence 500) have reset their statistics
+        self.client.register_transition_callback(
+            transition = midas.TR_START,
+            sequence = 600,
+            callback = self.record_run_start_callback
+        )
+
         self.client.register_transition_callback(
             transition = midas.TR_STOP,
             sequence = 900,
@@ -304,12 +311,26 @@ class NearlineDaemon:
         )
         return midas.status_codes['SUCCESS']
 
+    def record_run_start_callback(self, client, run_number):
+        # the tuning step's start time and WaveDREAM events, for
+        # measurement.exposure; never fails the transition
+        try:
+            run_db_pk = 0
+            if client.odb_exists("/Runinfo/Run DB PK"):
+                run_db_pk = client.odb_get("/Runinfo/Run DB PK")
+            tuning = getattr(self, "tuning", None)
+            if tuning is not None:
+                tuning.record_run_start(run_db_pk, run_number)
+        except Exception as e:
+            self.message(f"Tuning: start of run {run_number} not recorded: {e}")
+        return midas.status_codes['SUCCESS']
+
     def end_of_run_callback(self, client, run_number):
         run_db_pk = client.odb_get("/Runinfo/Run DB PK")
-        # the tuning step's WaveDREAM events, for measurement.exposure (never raises)
+        # the tuning step's stop time and WaveDREAM events (never raises)
         tuning = getattr(self, "tuning", None)
         if tuning is not None:
-            tuning.record_eor_events(run_db_pk)
+            tuning.record_run_stop(run_db_pk, run_number)
         logger_channels = self.client.odb_get("/Logger/Channels", just_key_list = True)
         for log_channel in logger_channels:
             self.finish_file(log_channel)

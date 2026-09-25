@@ -2134,10 +2134,17 @@ def test_get_run_times_against_the_scratch_database(fresh_db, seeded):
 
 
 EVENTS_SENT = "/Equipment/WDWaveforms/Statistics/Events sent"
-EOR_KEY = "/Nearline/MiniTwin/Active step/Events at EOR"
+START_TIME = "/Runinfo/Start time binary"
+STOP_TIME = "/Runinfo/Stop time binary"
+STEP_KEYS = "/Nearline/MiniTwin/Active step/"
+RECORD_DEFAULTS = {"Recorded run": 0, "Run start": 0.0, "Run stop": 0.0,
+                   "Events at BOR": -1, "Events at EOR": -1}
+RECORD_NAMES = ("run_number", "run_start", "run_stop", "events_start", "events_stop")
+#: a run start, Unix seconds (2026-09-25T10:00:00Z)
+T0 = 1_790_330_400
 
 
-def running_step(run_number=604, events=1_000_123):
+def running_step(run_number=604):
     """A loop whose proposal 5 was scheduled and whose run is being taken:
     ``(loop, db, odb, http, run_id)``."""
     loop, db, odb, http, _ = loop_with_service([proposal(5)])
@@ -2145,32 +2152,51 @@ def running_step(run_number=604, events=1_000_123):
     (run_id,) = db.sequences[seq_id]["runs"]
     db.runs[run_id].update(status="RUNNING", midas_run_number=run_number)
     odb.values["/Runinfo/Run DB PK"] = run_id
-    odb.values[EVENTS_SENT] = events
     return loop, db, odb, http, run_id
 
 
-def test_events_at_eor_key_is_created_and_kept():
+def start_run(loop, odb, run_id, run_number=604, start=T0, events=0):
+    """What MIDAS shows at the start transition after the frontends reset."""
+    odb.values.update({START_TIME: start, STOP_TIME: 0, EVENTS_SENT: events})
+    return loop.record_run_start(run_id, run_number)
+
+
+def stop_run(loop, odb, run_id, run_number=604, stop=T0 + 312, events=1_000_123):
+    odb.values.update({STOP_TIME: stop, EVENTS_SENT: events})
+    return loop.record_run_stop(run_id, run_number)
+
+
+def test_run_record_keys_are_created_and_kept():
     odb = FakeOdb()
     tuning.ensure_odb_keys(odb)
-    assert odb.values[EOR_KEY] == -1
-    odb.values[EOR_KEY] = 1234
+    for key, default in RECORD_DEFAULTS.items():
+        assert odb.values[STEP_KEYS + key] == default
+    odb.values[STEP_KEYS + "Events at EOR"] = 1234
     tuning.ensure_odb_keys(odb)
-    assert odb.values[EOR_KEY] == 1234
+    assert odb.values[STEP_KEYS + "Events at EOR"] == 1234
 
 
-def test_a_new_step_starts_with_unknown_events():
+def test_a_new_step_starts_with_nothing_recorded():
     loop, db, odb, http, run_id = running_step()
-    assert odb.values[EOR_KEY] == -1
-    assert loop.active["eor_events"] is None
+    for key, default in RECORD_DEFAULTS.items():
+        assert odb.values[STEP_KEYS + key] == default
+    assert all(loop.active[name] is None for name in RECORD_NAMES)
 
 
-def test_the_stop_transition_stores_the_steps_events(daemon_module):
-    loop, db, odb, http, run_id = running_step(events=1_000_123)
+def test_the_transitions_record_the_steps_run(daemon_module):
+    loop, db, odb, http, run_id = running_step()
     odb.values["/Logger/Channels/0/Settings/Current filename"] = "run00604.mid.lz4"
     d = bare_daemon(daemon_module, loop, db, odb)
+    odb.values.update({START_TIME: T0, STOP_TIME: 0, EVENTS_SENT: 12})
+    assert d.record_run_start_callback(odb, 604) == 1
+    odb.values.update({STOP_TIME: T0 + 312, EVENTS_SENT: 1_000_135})
     assert d.end_of_run_callback(odb, 604) == 1
-    assert odb.values[EOR_KEY] == 1_000_123
-    assert loop.active["eor_events"] == 1_000_123
+    assert {k: odb.values[STEP_KEYS + k] for k in RECORD_DEFAULTS} == {
+        "Recorded run": 604, "Run start": float(T0), "Run stop": float(T0 + 312),
+        "Events at BOR": 12, "Events at EOR": 1_000_135}
+    assert {n: loop.active[n] for n in RECORD_NAMES} == {
+        "run_number": 604, "run_start": float(T0), "run_stop": float(T0 + 312),
+        "events_start": 12, "events_stop": 1_000_135}
     assert db.runs[run_id]["status"] == "DONE"
     # the in-memory step and the ODB agree: nothing looks changed to sync_state
     loop._last_key = "kept"
@@ -2178,51 +2204,92 @@ def test_the_stop_transition_stores_the_steps_events(daemon_module):
     assert loop._last_key == "kept"
 
 
-def test_another_runs_stop_leaves_the_steps_events_alone(daemon_module):
+def test_a_new_start_forgets_the_previous_stop():
+    loop, db, odb, http, run_id = running_step()
+    start_run(loop, odb, run_id)
+    stop_run(loop, odb, run_id)
+    start_run(loop, odb, run_id, run_number=605, start=T0 + 400, events=3)
+    assert loop.active["run_number"] == 605 and loop.active["run_stop"] is None
+    assert loop.active["events_stop"] is None and odb.values[STEP_KEYS + "Events at EOR"] == -1
+
+
+def test_another_runs_transitions_leave_the_record_alone(daemon_module):
     loop, db, odb, http, run_id = running_step()
     other = db.add_run(700, status="RUNNING")
     odb.values["/Runinfo/Run DB PK"] = other
     d = bare_daemon(daemon_module, loop, db, odb)
+    odb.values.update({START_TIME: T0, EVENTS_SENT: 0})
+    d.record_run_start_callback(odb, 700)
     d.end_of_run_callback(odb, 700)
-    assert odb.values[EOR_KEY] == -1 and loop.active["eor_events"] is None
+    assert all(loop.active[name] is None for name in RECORD_NAMES)
+    assert odb.values[STEP_KEYS + "Recorded run"] == 0
 
 
-def test_the_stop_transition_never_raises_over_the_events(daemon_module):
+def test_the_transitions_never_fail_over_the_record(daemon_module):
     loop, db, odb, http, run_id = running_step()
 
     def boom(*args, **kwargs):
         raise RuntimeError("run database down")
     db.get_all_runs_in_sequence = boom
     d = bare_daemon(daemon_module, loop, db, odb)
+    assert d.record_run_start_callback(odb, 604) == 1
     assert d.end_of_run_callback(odb, 604) == 1
-    assert odb.values[EOR_KEY] == -1
     assert db.runs[run_id]["status"] == "DONE"
 
+    # nor over the ODB, nor with no tuning loop at all
+    loop2, db2, odb2, _, run_id2 = running_step()
 
-def test_missing_events_counter_is_a_message_not_an_error():
+    class BrokenOdb(FakeOdb):
+        def odb_exists(self, path):
+            raise RuntimeError("ODB gone")
+    d2 = bare_daemon(daemon_module, loop2, db2, BrokenOdb())
+    assert d2.record_run_start_callback(d2.client, 604) == 1
+    del d2.tuning
+    assert d2.record_run_start_callback(odb2, 604) == 1
+
+
+def test_a_missing_counter_is_recorded_as_unknown():
     loop, db, odb, http, run_id = running_step()
-    del odb.values[EVENTS_SENT]
-    messages = []
-    loop._message = lambda m, is_error=False: messages.append((m, is_error))
-    assert loop.record_eor_events(run_id) is None
-    assert odb.values[EOR_KEY] == -1
-    assert any("Events sent" in m and not e for m, e in messages)
+    odb.values.update({START_TIME: T0, STOP_TIME: 0})
+    loop.record_run_start(run_id, 604)
+    assert loop.active["run_start"] == float(T0) and loop.active["events_start"] is None
 
 
-def test_events_at_eor_survive_a_restart_and_a_claim():
-    loop, db, odb, http, run_id = running_step(events=987_654)
-    assert loop.record_eor_events(run_id) == 987_654
+def test_a_stop_without_a_recorded_start_takes_the_start_time_from_runinfo():
+    loop, db, odb, http, run_id = running_step()
+    odb.values[START_TIME] = T0            # the daemon was down at the start
+    stop_run(loop, odb, run_id)
+    assert loop.active["run_number"] == 604
+    assert loop.active["run_start"] == float(T0) and loop.active["run_stop"] == float(T0 + 312)
+    assert loop.active["events_start"] is None and loop.active["events_stop"] == 1_000_123
+
+
+def test_a_stale_stop_time_is_replaced_by_the_clock():
+    loop, db, odb, http, run_id = running_step()
+    loop.clock = lambda: T0 + 100.5
+    start_run(loop, odb, run_id)
+    stop_run(loop, odb, run_id, stop=T0 - 50)
+    assert loop.active["run_stop"] == T0 + 100.5
+
+
+def test_the_record_survives_a_restart_and_a_claim():
+    loop, db, odb, http, run_id = running_step()
+    start_run(loop, odb, run_id, events=7)
+    stop_run(loop, odb, run_id, events=987_661)
     seq_id = loop.active["seq_id"]
+    recorded = {n: loop.active[n] for n in RECORD_NAMES}
 
     # a new daemon on the same ODB
     loop2, _, _, _, _ = loop_with_service([], odb=odb, db=db)
-    assert loop2.active["eor_events"] == 987_654
-    # the claimed sequence keeps it, also through the Pending record
-    tuning.save_pending(odb, seq_id, loop2.step_for_sequence(seq_id))
-    assert tuning.load_pending(odb, seq_id)["eor_events"] == 987_654
-    # a record without the key (written before it existed) reads as unknown
-    del odb.values["/Nearline/MiniTwin/Pending/%d/Events at EOR" % seq_id]
-    assert tuning.load_pending(odb, seq_id)["eor_events"] is None
+    assert {n: loop2.active[n] for n in RECORD_NAMES} == recorded
+    # the claimed sequence keeps it, through the Pending record too
+    loop2.claim(seq_id)
+    pending = tuning.load_pending(odb, seq_id)
+    assert {n: pending[n] for n in RECORD_NAMES} == recorded
+    # a record written before these keys existed reads as unknown
+    for key in RECORD_DEFAULTS:
+        del odb.values["/Nearline/MiniTwin/Pending/%d/%s" % (seq_id, key)]
+    assert all(tuning.load_pending(odb, seq_id)[n] is None for n in RECORD_NAMES)
 
 
 def _utc(h, m, s):
@@ -2230,13 +2297,17 @@ def _utc(h, m, s):
     return datetime(2026, 9, 25, h, m, s, tzinfo=timezone.utc)
 
 
-def posted_step_context(run_times, events=1_000_123):
-    """Take proposal 5's run (MIDAS 604) to its end and post it:
+def posted_step_context(record=True, run_times=None, start=T0, stop=T0 + 312,
+                        events=(12, 1_000_135)):
+    """Take proposal 5's run (MIDAS 604) through its transitions (unless
+    `record` is False: the daemon was down) and post it:
     ``(context, loop, db, odb, messages)``."""
-    loop, db, odb, http, run_id = running_step(events=events)
+    loop, db, odb, http, run_id = running_step()
     messages = []
     loop._message = lambda m, is_error=False: messages.append((m, is_error))
-    assert loop.record_eor_events(run_id) == events
+    if record:
+        start_run(loop, odb, run_id, start=start, events=events[0])
+        stop_run(loop, odb, run_id, stop=stop, events=events[1])
     db.runs[run_id]["status"] = "DONE"
     db.files.append({"run_id": run_id, "filebase": "run00604_00000", "fileext": "root",
                      "status": "DONE"})
@@ -2246,44 +2317,95 @@ def posted_step_context(run_times, events=1_000_123):
     return context, loop, db, odb, messages
 
 
-def test_the_context_carries_the_exposure():
-    context, loop, db, odb, messages = posted_step_context(
-        {604: {"bor": _utc(10, 0, 0), "eor": _utc(10, 5, 12)}})
+def exposure_messages(messages):
+    return [m for m, e in messages if "exposure" in m]
+
+
+def test_the_context_carries_the_recorded_exposure():
+    context, loop, db, odb, messages = posted_step_context()
     assert context["measurement"]["exposure"] == {
         "seconds": 312.0,
         "wd_events": 1_000_123,
         "per_run": [{"run": 604, "seconds": 312.0, "wd_events": 1_000_123,
-                     "bor": "2026-09-25T10:00:00.000Z", "eor": "2026-09-25T10:05:12.000Z"}],
+                     "bor": "2026-09-25T10:00:00.000Z", "eor": "2026-09-25T10:05:12.000Z",
+                     "time_source": "odb"}],
         "source": tuning.EXPOSURE_SOURCES,
     }
     assert set(context["measurement"]["exposure"]["source"]) == {"seconds", "wd_events"}
+    # the run database is not asked
+    assert db.run_times_calls == []
     # everything else about the context is as before
     assert context["measurement"]["kind"] == "psm_nearline"
     assert context["responds_to"] == {"proposal_id": 5}
-    assert not [m for m, e in messages if "exposure" in m]
+    assert exposure_messages(messages) == []
+
+
+def test_events_going_down_give_null_events():
+    context, loop, db, odb, messages = posted_step_context(events=(500, 400))
+    exposure = context["measurement"]["exposure"]
+    assert exposure["wd_events"] is None and exposure["per_run"][0]["wd_events"] is None
+    assert exposure["seconds"] == 312.0
+    (text,) = exposure_messages(messages)
+    assert "went down" in text
+
+
+@pytest.mark.parametrize("stop", [T0, T0 - 5])
+def test_seconds_that_are_not_positive_are_null(stop):
+    # a stop time at or before the start is replaced by the clock; a clock
+    # that says the same is not a duration
+    loop, db, odb, http, run_id = running_step()
+    loop.clock = lambda: float(T0)
+    start_run(loop, odb, run_id)
+    stop_run(loop, odb, run_id, stop=stop)
+    exposure = loop.exposure([604], step=loop.active)
+    assert exposure["seconds"] is None and exposure["per_run"][0]["seconds"] is None
+    assert exposure["wd_events"] == 1_000_123
+
+
+def test_run_db_seconds_that_are_not_positive_are_null():
+    loop, db, _, messages = make_loop()
+    db.run_times = {604: {"bor": _utc(10, 0, 0), "eor": _utc(10, 0, 0)}}
+    exposure = loop.exposure([604])
+    assert exposure["seconds"] is None and exposure["per_run"][0]["time_source"] == "run_db"
+    assert "not after BOR" in exposure_messages(messages)[0]
+
+
+def test_a_run_the_daemon_did_not_record_falls_back_to_the_run_db():
+    context, loop, db, odb, messages = posted_step_context(
+        record=False, run_times={604: {"bor": _utc(10, 0, 0), "eor": _utc(10, 5, 12)}})
+    exposure = context["measurement"]["exposure"]
+    assert exposure["seconds"] == 312.0 and exposure["wd_events"] is None
+    assert exposure["per_run"][0]["time_source"] == "run_db"
+    assert db.run_times_calls == [([604], tuning.RUN_TIMES_TIMEOUT_S)]
+    # one info message, saying the daemon did not record the run
+    (text,) = exposure_messages(messages)
+    assert "not recorded by the daemon" in text
+    assert not [m for m, e in messages if e]
 
 
 def test_a_run_without_bor_has_null_seconds():
-    context, loop, db, odb, messages = posted_step_context({604: {"bor": None, "eor": _utc(10, 5, 12)}})
+    context, loop, db, odb, messages = posted_step_context(
+        record=False, run_times={604: {"bor": None, "eor": _utc(10, 5, 12)}})
     exposure = context["measurement"]["exposure"]
     assert exposure["seconds"] is None
-    assert exposure["per_run"] == [{"run": 604, "seconds": None, "wd_events": 1_000_123,
-                                    "bor": None, "eor": "2026-09-25T10:05:12.000Z"}]
-    assert exposure["wd_events"] == 1_000_123
-    assert [m for m, e in messages if "exposure seconds unknown" in m and not e]
+    assert exposure["per_run"] == [{"run": 604, "seconds": None, "wd_events": None, "bor": None,
+                                    "eor": "2026-09-25T10:05:12.000Z", "time_source": "run_db"}]
+    (text,) = exposure_messages(messages)
+    assert "no BOR row" in text
 
 
-def test_a_db_error_in_the_exposure_still_posts_the_context():
-    context, loop, db, odb, messages = posted_step_context(RuntimeError("connection refused"))
+def test_a_fallback_timeout_still_posts_the_context():
+    import psycopg
+    context, loop, db, odb, messages = posted_step_context(
+        record=False,
+        run_times=psycopg.errors.QueryCanceled("canceling statement due to statement timeout"))
     exposure = context["measurement"]["exposure"]
-    assert exposure["seconds"] is None
+    assert exposure["seconds"] is None and exposure["wd_events"] is None
     assert exposure["per_run"][0]["bor"] is None and exposure["per_run"][0]["eor"] is None
-    # the events come from the ODB, not the run database: still there
-    assert exposure["wd_events"] == 1_000_123
     assert db.sequences[loop_seq(db)]["status"] == "DONE"
-    (text,) = [m for m, e in messages if "exposure" in m]
-    assert "connection refused" in text
-    assert not [m for m, e in messages if "exposure" in m and e]
+    (text,) = exposure_messages(messages)
+    assert "statement timeout" in text
+    assert not [m for m, e in messages if e]
 
 
 def loop_seq(db):
@@ -2295,24 +2417,23 @@ def test_a_context_without_the_step_has_no_events():
     db = FakeDb()
     run_id = db.add_run(604, subruns=1)
     db.run_times = {604: {"bor": _utc(10, 0, 0), "eor": _utc(10, 1, 0)}}
-    loop, _, _, _ = make_loop(db=db, mt=real_mt())
+    loop, _, _, messages = make_loop(db=db, mt=real_mt())
     exposure = loop.build_context([run_id])["measurement"]["exposure"]
     assert exposure["seconds"] == 60.0 and exposure["wd_events"] is None
+    # no step, so nothing was expected to be recorded: no message
+    assert exposure_messages(messages) == []
 
 
-def test_several_runs_sum_their_seconds_and_give_no_total_events():
+def test_several_runs_sum_their_seconds():
     db = FakeDb()
     a, b = db.add_run(604, subruns=1), db.add_run(605, subruns=1)
     db.run_times = {604: {"bor": _utc(10, 0, 0), "eor": _utc(10, 1, 0)},
                     605: {"bor": _utc(10, 2, 0), "eor": _utc(10, 2, 30)}}
     loop, _, _, _ = make_loop(db=db, mt=real_mt())
-    step = {"proposal_id": 5, "step_id": "S", "attempt": 0, "plan": "P", "seq_id": 57,
-            "eor_events": 42}
-    exposure = loop.build_context([a, b], step=step)["measurement"]["exposure"]
+    exposure = loop.build_context([a, b])["measurement"]["exposure"]
     assert exposure["seconds"] == 90.0
     assert [r["seconds"] for r in exposure["per_run"]] == [60.0, 30.0]
     assert exposure["wd_events"] is None
-    assert [r["wd_events"] for r in exposure["per_run"]] == [None, None]
 
 
 def test_the_merge_path_carries_the_exposure(monkeypatch):

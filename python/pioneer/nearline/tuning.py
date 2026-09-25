@@ -43,11 +43,23 @@ CONFIG_DEFAULTS = {
 #: the step whose run is being taken, and the id of the last context the
 #: service took (checked against a new proposal's ``in_reply_to``).  Restored at start-up, so a restart
 #: never schedules the outstanding proposal again.  Proposal id 0 means no
-#: active step; an empty string, attempt -1 or events -1 means "not known".
-#: ``Active step/Events at EOR`` is the WaveDREAM events sent
-#: (ODB_EVENTS_SENT) at the end of the step's run, stored by the daemon's
-#: stop transition (record_eor_events) for measurement.exposure.
+#: active step; an empty string, attempt -1, or a RUN_RECORD key at its
+#: "not known" value means "not known".
 ODB_STATE = "/Nearline/MiniTwin"
+
+#: What the daemon records of the active step's run in its start and stop
+#: transitions (record_run_start, record_run_stop), for measurement.exposure:
+#: ``(step key, ODB key under Active step/ and Pending/<seq id>/, "not
+#: known")``.  Times are Unix seconds from /Runinfo/Start and Stop time
+#: binary, events the WaveDREAM ODB_EVENTS_SENT at each transition.  A
+#: time or run number <= 0 and events < 0 read as not known.
+RUN_RECORD = (
+    ("run_number", "Recorded run", 0),
+    ("run_start", "Run start", 0.0),
+    ("run_stop", "Run stop", 0.0),
+    ("events_start", "Events at BOR", -1),
+    ("events_stop", "Events at EOR", -1),
+)
 STATE_DEFAULTS = {
     "Last proposal id": 0,
     "Active step/Proposal id": 0,
@@ -55,7 +67,7 @@ STATE_DEFAULTS = {
     "Active step/Attempt": -1,
     "Active step/Plan": "",
     "Active step/Seq id": 0,
-    "Active step/Events at EOR": -1,
+    **{"Active step/" + key: unknown for _, key, unknown in RUN_RECORD},
     "Last context id": "",
 }
 
@@ -73,14 +85,23 @@ FAILURE_STATUSES = {"FAILED", "BLOCKED", "ERROR", "CANCELLED"}
 #: what the running experiment shows about the run in progress
 ODB_RUN_DB_PK = "/Runinfo/Run DB PK"
 ODB_EVENTS_SENT = "/Equipment/WDWaveforms/Statistics/Events sent"
+ODB_START_TIME = "/Runinfo/Start time binary"
+ODB_STOP_TIME = "/Runinfo/Stop time binary"
 
-#: where measurement.exposure takes its numbers from (sent with it)
+#: where measurement.exposure takes its numbers from (sent with it); each
+#: per_run entry says in ``time_source`` which of the two its times are from
 EXPOSURE_SOURCES = {
-    "seconds": "run database logs.slow_control: latest EOR minus earliest BOR log_time, "
-               "summed over the runs",
-    "wd_events": "ODB %s at the end of the step's run (%s/Active step/Events at EOR)"
-                 % (ODB_EVENTS_SENT, ODB_STATE),
+    "seconds": "stop minus start of each run, summed over the runs: %s and %s as the nearline "
+               "daemon recorded them in the run's transitions (time_source odb); for a run it "
+               "did not record, the latest EOR minus the earliest BOR log_time in the run "
+               "database's logs.slow_control (time_source run_db)"
+               % (ODB_START_TIME, ODB_STOP_TIME),
+    "wd_events": "%s at the run's stop transition minus at its start transition (after the "
+                 "frontends reset it), as the nearline daemon recorded them" % ODB_EVENTS_SENT,
 }
+
+#: seconds before the fallback run-time lookup in the run database is cancelled
+RUN_TIMES_TIMEOUT_S = 5.0
 
 #: the daemon's own /Nearline/config/Output path default
 DEFAULT_OUTPUT_PATH = "/home/pinky/nearline"
@@ -109,15 +130,14 @@ def load_state(odb):
     if proposal_id <= 0:
         return last_id, None
     attempt = int(get("Active step/Attempt"))
-    events = int(get("Active step/Events at EOR"))
     step = {
         "proposal_id": proposal_id,
         "step_id": str(get("Active step/Step id")) or None,
         "attempt": attempt if attempt >= 0 else None,
         "plan": str(get("Active step/Plan")) or None,
         "seq_id": int(get("Active step/Seq id") or 0) or None,
-        "eor_events": events if events >= 0 else None,
     }
+    step.update(_read_record(lambda key: get("Active step/" + key)))
     return last_id, step
 
 
@@ -136,15 +156,36 @@ def save_step(odb, step):
     odb.odb_set(ODB_STATE + "/Active step/Attempt", int(attempt) if attempt is not None else -1)
     odb.odb_set(ODB_STATE + "/Active step/Plan", str(step.get("plan") or ""))
     odb.odb_set(ODB_STATE + "/Active step/Seq id", int(step.get("seq_id") or 0))
-    odb.odb_set(ODB_STATE + "/Active step/Events at EOR", _events_or_unknown(step))
+    _write_record(odb, ODB_STATE + "/Active step/", step)
     if step.get("proposal_id"):
         odb.odb_set(ODB_STATE + "/Active step/Proposal id", int(step["proposal_id"]))
 
 
-def _events_or_unknown(step):
-    """A step's ``eor_events`` as the ODB keeps it: -1 when not known."""
-    events = step.get("eor_events")
-    return int(events) if events is not None and int(events) >= 0 else -1
+def _known(value, unknown):
+    """`value` as read from the ODB, or None when it means "not known"."""
+    if value is None:
+        return None
+    if isinstance(unknown, float):
+        value = float(value)
+        return value if value > 0 else None
+    value = int(value)
+    if unknown == 0:
+        return value if value > 0 else None
+    return value if value >= 0 else None
+
+
+def _read_record(get):
+    """The RUN_RECORD keys of a step, ``get(ODB key)`` giving each value."""
+    return {name: _known(get(key), unknown) for name, key, unknown in RUN_RECORD}
+
+
+def _write_record(odb, base, step, names=None):
+    """Write the RUN_RECORD keys of `step` (only `names`, if given) under `base`."""
+    for name, key, unknown in RUN_RECORD:
+        if names is not None and name not in names:
+            continue
+        value = _known(step.get(name), unknown)
+        odb.odb_set(base + key, type(unknown)(value) if value is not None else unknown)
 
 
 def _pending_base(seq_id):
@@ -161,7 +202,7 @@ def save_pending(odb, seq_id, step):
     odb.odb_set(base + "/Step id", str(step.get("step_id") or ""))
     odb.odb_set(base + "/Attempt", int(attempt) if attempt is not None else -1)
     odb.odb_set(base + "/Plan", str(step.get("plan") or ""))
-    odb.odb_set(base + "/Events at EOR", _events_or_unknown(step))
+    _write_record(odb, base + "/", step)
     odb.odb_set(base + "/Proposal id", int(step["proposal_id"]))
 
 
@@ -172,15 +213,17 @@ def load_pending(odb, seq_id):
     if proposal_id <= 0:
         return None
     attempt = int(odb_value(odb, base + "/Attempt", -1))
-    events = int(odb_value(odb, base + "/Events at EOR", -1))
-    return {
+    step = {
         "proposal_id": proposal_id,
         "step_id": str(odb_value(odb, base + "/Step id", "")) or None,
         "attempt": attempt if attempt >= 0 else None,
         "plan": str(odb_value(odb, base + "/Plan", "")) or None,
         "seq_id": int(seq_id),
-        "eor_events": events if events >= 0 else None,
     }
+    # a record written before these keys existed reads as not known
+    step.update(_read_record(lambda key: odb_value(
+        odb, base + "/" + key, dict((k, u) for _, k, u in RUN_RECORD)[key])))
+    return step
 
 
 def delete_pending(odb, seq_id):
@@ -330,7 +373,8 @@ def empty_exposure(numbers):
     return {
         "seconds": None,
         "wd_events": None,
-        "per_run": [{"run": int(n), "seconds": None, "wd_events": None, "bor": None, "eor": None}
+        "per_run": [{"run": int(n), "seconds": None, "wd_events": None, "bor": None, "eor": None,
+                     "time_source": None}
                     for n in numbers],
         "source": dict(EXPOSURE_SOURCES),
     }
@@ -628,7 +672,8 @@ class TuningLoop:
         self.active = dict(step) if step else None
         if self.active is not None:
             # the same keys load_state gives, so sync_state sees no change
-            self.active.setdefault("eor_events", None)
+            for name, _, _ in RUN_RECORD:
+                self.active.setdefault(name, None)
         self._last_key = None
         self._last_events = None
         self._save_step()
@@ -931,31 +976,68 @@ class TuningLoop:
             return dict(self.active)
         return None
 
-    def record_eor_events(self, run_id):
-        """At the stop transition of run `run_id` (run database id): when it
-        is the active step's run, store the WaveDREAM events sent
-        (ODB_EVENTS_SENT) as the step's ``eor_events``, in memory and in
-        /Nearline/MiniTwin/Active step/Events at EOR, for
-        measurement.exposure.  Returns the number stored, or None.  Called
-        inside a MIDAS transition callback: never raises."""
+    def record_run_start(self, run_id, run_number):
+        """The start transition of MIDAS run `run_number` (run database id
+        `run_id`), called after the frontends reset their statistics: when
+        it is the active step's run, record its start time and the WaveDREAM
+        events sent (RUN_RECORD), in memory and under Active step/, and
+        forget any stop recorded before.  Returns what was recorded, or
+        None.  Called inside a MIDAS transition callback: never raises."""
         try:
-            if not run_id or not self.active:
+            if not self._is_step_run(run_id):
                 return None
-            if self.step_for_run(int(run_id)) is None:
-                return None
-            sent = odb_value(self.odb, ODB_EVENTS_SENT, None)
-            if sent is None:
-                self.message("Tuning: %s is missing: the events of step %s are not known"
-                             % (ODB_EVENTS_SENT, self.active.get("step_id")))
-                return None
-            events = int(sent)
-            self.odb.odb_set(ODB_STATE + "/Active step/Events at EOR", events)
-            self.active["eor_events"] = events
-            return events
+            start = self._odb_time(ODB_START_TIME)
+            values = {"run_number": int(run_number),
+                      "run_start": start if start is not None else float(self.clock()),
+                      "run_stop": None, "events_start": self._events_sent(), "events_stop": None}
+            self._record(values)
+            return values
         except Exception as exc:                       # noqa: BLE001 -- inside a transition
-            self.message("Tuning: events at the end of run (db id %s) not recorded: %s"
-                         % (run_id, exc))
+            self.message("Tuning: start of run %s not recorded: %s" % (run_number, exc))
             return None
+
+    def record_run_stop(self, run_id, run_number):
+        """The stop transition of run `run_number` (run database id
+        `run_id`): when it is the active step's run, record its stop time and
+        the WaveDREAM events sent.  A run whose start was not recorded (the
+        daemon was not running then) takes its start time from
+        /Runinfo/Start time binary, which still holds it, and leaves its
+        start events unknown.  Returns the record, or None.  Called inside a
+        MIDAS transition callback: never raises."""
+        try:
+            if not self._is_step_run(run_id):
+                return None
+            values = {}
+            if self.active.get("run_number") != int(run_number):
+                values = {"run_number": int(run_number),
+                          "run_start": self._odb_time(ODB_START_TIME), "events_start": None}
+            start = values.get("run_start", self.active.get("run_start"))
+            stop = self._odb_time(ODB_STOP_TIME)
+            if stop is None or (start is not None and stop < start):
+                stop = float(self.clock())
+            values.update(run_stop=stop, events_stop=self._events_sent())
+            self._record(values)
+            return {name: self.active.get(name) for name, _, _ in RUN_RECORD}
+        except Exception as exc:                       # noqa: BLE001 -- inside a transition
+            self.message("Tuning: stop of run %s not recorded: %s" % (run_number, exc))
+            return None
+
+    def _is_step_run(self, run_id):
+        return bool(run_id) and bool(self.active) and self.step_for_run(int(run_id)) is not None
+
+    def _odb_time(self, path):
+        value = odb_value(self.odb, path, None)
+        return float(value) if value is not None and float(value) > 0 else None
+
+    def _events_sent(self):
+        value = odb_value(self.odb, ODB_EVENTS_SENT, None)
+        return int(value) if value is not None else None
+
+    def _record(self, values):
+        """Write RUN_RECORD `values` of the active step to the ODB, then keep
+        them in memory."""
+        _write_record(self.odb, ODB_STATE + "/Active step/", values, names=set(values))
+        self.active.update(values)
 
     # -- finished runs -> context ------------------------------------------
 
@@ -989,46 +1071,100 @@ class TuningLoop:
         """``measurement.exposure`` of MIDAS runs `numbers`, so the service
         can normalise rates by run time when the SMA proton current is empty.
 
-        seconds: per run EOR - BOR from the run database (get_run_times),
-        the total only when every run has both.  wd_events: the step's
-        ``eor_events`` (record_eor_events), given only for a context of one
-        run -- one step is one run.  Anything that cannot be known is null;
-        a failure never stops the post (one MIDAS message), see
-        EXPOSURE_SOURCES for the sources."""
-        numbers = [int(n) for n in numbers]
-        exposure = empty_exposure(numbers)
-        per_run = exposure["per_run"]
+        A run the daemon recorded for `step` (record_run_start/_stop) gets
+        seconds = stop - start and wd_events = events at stop - events at
+        start from that record.  A run it did not record gets its times
+        from the run database (get_run_times, cancelled after
+        RUN_TIMES_TIMEOUT_S) and no events.  A value that is not known, not
+        positive seconds or a negative event count, is null, and so is a
+        total over runs with a null.  Whatever is missing is said in one
+        MIDAS message; this never raises, a context is never held up by it.
+        See EXPOSURE_SOURCES."""
+        exposure, notes = empty_exposure([]), []
         try:
-            events = (step or {}).get("eor_events")
-            if events is not None and int(events) >= 0 and len(per_run) == 1:
-                per_run[0]["wd_events"] = exposure["wd_events"] = int(events)
-        except Exception as exc:                       # noqa: BLE001 -- never blocks the post
-            self.message("Tuning: events of run(s) %s not known (%s); exposure sent without them"
-                         % (", ".join(str(n) for n in numbers), exc))
-        try:
-            times = self.db.get_run_times(numbers) if numbers else {}
-            unknown = []
+            numbers = [int(n) for n in numbers]
+            exposure = empty_exposure(numbers)
+            per_run = exposure["per_run"]
+            record = step if (step or {}).get("run_number") else None
+            fallback = []
             for entry in per_run:
-                bor, eor = (times.get(entry["run"]) or {}).get("bor"), \
-                    (times.get(entry["run"]) or {}).get("eor")
-                entry["bor"], entry["eor"] = iso_utc(bor), iso_utc(eor)
-                seconds = (eor - bor).total_seconds() if bor is not None and eor is not None else None
-                if seconds is None or seconds < 0:
-                    unknown.append(entry["run"])
-                    continue
-                entry["seconds"] = round(seconds, 3)
-            if unknown:
-                self.message("Tuning: run(s) %s have no begin and end of run in the run database; "
-                             "exposure seconds unknown" % ", ".join(str(n) for n in unknown))
-            elif per_run:
-                exposure["seconds"] = round(sum(e["seconds"] for e in per_run), 3)
+                if record is not None and record["run_number"] == entry["run"]:
+                    self._exposure_from_record(entry, record, notes)
+                elif step is not None and len(per_run) == 1:
+                    notes.append("run %d was not recorded by the daemon at its start and stop "
+                                 "(was the daemon down then?): events unknown"
+                                 % entry["run"])
+                if entry["seconds"] is None and entry["bor"] is None:
+                    fallback.append(entry)
+            if fallback:
+                self._exposure_from_run_db(fallback, notes)
+            for key in ("seconds", "wd_events"):
+                values = [e[key] for e in per_run]
+                if values and all(v is not None for v in values):
+                    exposure[key] = round(sum(values), 3) if key == "seconds" else sum(values)
         except Exception as exc:                       # noqa: BLE001 -- never blocks the post
-            for entry in per_run:
-                entry.update(seconds=None, bor=None, eor=None)
-            exposure["seconds"] = None
-            self.message("Tuning: run times of run(s) %s not read (%s); exposure seconds unknown"
-                         % (", ".join(str(n) for n in numbers), exc))
+            try:
+                exposure = empty_exposure(numbers)
+            except Exception:                          # noqa: BLE001 -- numbers not numbers
+                exposure = empty_exposure([])
+            notes.append("not computed: %s" % exc)
+        if notes:
+            self.message("Tuning: exposure of run(s) %s: %s" % (
+                ", ".join(str(e["run"]) for e in exposure["per_run"]) or "?", "; ".join(notes)))
         return exposure
+
+    @staticmethod
+    def _exposure_from_record(entry, record, notes):
+        """Fill one per_run `entry` from the daemon's record of the run."""
+        from datetime import datetime, timezone
+
+        start, stop = record.get("run_start"), record.get("run_stop")
+        entry["time_source"] = "odb"
+        entry["bor"] = iso_utc(datetime.fromtimestamp(start, timezone.utc)) if start else None
+        entry["eor"] = iso_utc(datetime.fromtimestamp(stop, timezone.utc)) if stop else None
+        if start is None or stop is None:
+            notes.append("run %d: %s not recorded" % (
+                entry["run"], "start and stop" if start is None and stop is None
+                else "start" if start is None else "stop"))
+        elif stop - start <= 0:
+            notes.append("run %d: stop %s is not after start %s" % (entry["run"], entry["eor"],
+                                                                     entry["bor"]))
+        else:
+            entry["seconds"] = round(stop - start, 3)
+        first, last = record.get("events_start"), record.get("events_stop")
+        if first is None or last is None:
+            notes.append("run %d: WaveDREAM events at %s not recorded" % (
+                entry["run"], "start and stop" if first is None and last is None
+                else "start" if first is None else "stop"))
+        elif last - first < 0:
+            notes.append("run %d: WaveDREAM events went down from %d to %d" % (entry["run"],
+                                                                               first, last))
+        else:
+            entry["wd_events"] = int(last - first)
+
+    def _exposure_from_run_db(self, entries, notes):
+        """Times of per_run `entries` from the run database's BOR/EOR rows."""
+        numbers = [e["run"] for e in entries]
+        try:
+            times = self.db.get_run_times(numbers, timeout_s=RUN_TIMES_TIMEOUT_S)
+        except Exception as exc:                       # noqa: BLE001 -- a timeout, the db down
+            notes.append("run times of run(s) %s not read from the run database (%s)"
+                         % (", ".join(str(n) for n in numbers), str(exc).strip() or type(exc).__name__))
+            return
+        for entry in entries:
+            bor = (times.get(entry["run"]) or {}).get("bor")
+            eor = (times.get(entry["run"]) or {}).get("eor")
+            entry.update(bor=iso_utc(bor), eor=iso_utc(eor), time_source="run_db")
+            if bor is None or eor is None:
+                notes.append("run %d has no %s row in the run database" % (
+                    entry["run"], "BOR or EOR" if bor is None and eor is None
+                    else "BOR" if bor is None else "EOR"))
+                continue
+            seconds = (eor - bor).total_seconds()
+            if seconds <= 0:
+                notes.append("run %d: EOR is not after BOR in the run database" % entry["run"])
+                continue
+            entry["seconds"] = round(seconds, 3)
 
     def exposure_of(self, run_ids, step=None):
         """``exposure`` of run database ids `run_ids` (the merge path), or
