@@ -14,10 +14,9 @@ from pioneer.nearline.beamtune_client import (
 )
 
 miniTwin_histograms = [
-    "histograms/musip/current",
-    "histograms/PIPSMMuPixMonitor/xxp",
-    "histograms/PIPSMMuPixMonitor/yyp",
-    "histograms/PIPSMMuPixMonitor/track_xy"
+    "histograms/PIPSMMuPixMonitor/xxp_central_w",
+    "histograms/PIPSMMuPixMonitor/yyp_central_w",
+    "histograms/PIPSMMuPixMonitor/track_xy_expanded_w"
 ]
 class miniTwinInterface:
     """
@@ -62,11 +61,7 @@ class miniTwinInterface:
 
         beam_hdr = aFile.Get("beamline")
 
-        histo_names = [
-
-        ]
-
-        histos = [self.serialise(aFile.Get(n)) for n in histo_names]
+        histos = [self.serialise(aFile.Get(n)) for n in miniTwin_histograms]
 
         configurable_devices = [1, 4, 5]
 

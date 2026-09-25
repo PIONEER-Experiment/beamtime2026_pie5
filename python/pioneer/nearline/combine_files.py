@@ -9,6 +9,11 @@ header_paths = [
     "beamline"
 ]
 
+histo_paths = [
+    "histograms/musip/current", # take the current, required for normalisation
+    *miniTwin_histograms # all histograms the miniTwin is asking for
+]
+
 def load_json_config(config_file : Path) -> dict:
     """
     Load the merge configuration form the json file.
@@ -33,7 +38,7 @@ def merge_sub_runs(input_files : list[str]):
 
     # Load everything of interest:
     histos = dict()
-    for path in miniTwin_histograms:
+    for path in histo_paths:
         obj = first_file.Get(path)
         if not obj:
             raise ValueError(f"File {input_files[0]} does not contain {path}")
