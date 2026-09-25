@@ -64,6 +64,13 @@ class miniTwinInterface:
         #: section 6): how that setting is to be taken.  None when the backend
         #: sent no hints -- the daemon then keeps its default run sequence.
         self._last_run = None
+        #: ``in_reply_to`` of the proposal last taken: which context the
+        #: service had fed its backend before computing it, and the outcome.
+        #: None when the service sent none (a kick, or an older service).
+        self._last_reply = None
+        #: called with each context the service took; the tuning loop keeps
+        #: the id of the last one in the ODB
+        self.on_delivered = None
         self._columns_fetched = False
         self._pending = collections.deque(maxlen=int(max_pending))
         self._failures = 0
@@ -164,6 +171,8 @@ class miniTwinInterface:
         if proposal_id <= self._last_id:
             return []
         self._last_id = proposal_id
+        reply = payload.get("in_reply_to")
+        self._last_reply = dict(reply) if isinstance(reply, dict) else None
 
         currents = payload.get("currents") or {}
         if payload.get("done"):
@@ -201,6 +210,11 @@ class miniTwinInterface:
             return None
         return {"rows": rows, "config_type": self.config_type,
                 "run": (dict(self._last_run) if self._last_run else None)}
+
+    @property
+    def last_reply(self):
+        """``in_reply_to`` of the proposal last taken, or None."""
+        return dict(self._last_reply) if self._last_reply else None
 
     @property
     def last_proposal_id(self):
@@ -320,6 +334,11 @@ class miniTwinInterface:
                 self._fail("post_context(%s): %r" % (context.get("context_id"), exc))
                 return False
             self._pending.popleft()
+            if self.on_delivered is not None:
+                try:
+                    self.on_delivered(context)
+                except Exception as exc:               # noqa: BLE001 -- never escape
+                    self._log("on_delivered(%s): %r" % (context.get("context_id"), exc))
             if result.get("duplicate"):
                 self._log("context %s was already known" % context.get("context_id"))
             for warning in result.get("warnings") or []:

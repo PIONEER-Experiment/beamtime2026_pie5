@@ -773,3 +773,120 @@ def test_cli_post_without_midas(capsys):
     assert rc == 0
     assert reader.paths == [str(DATA / "run00588" / "run00588_00000_hists.root")]
     assert '"context_id": "run00588"' in capsys.readouterr().out
+
+
+# -- proposal in_reply_to ------------------------------------------------------
+
+from tuning_fakes import in_reply_to  # noqa: E402
+
+
+def test_last_context_id_key_is_created_and_kept():
+    odb = FakeOdb()
+    tuning.ensure_odb_keys(odb)
+    assert odb.values["/Nearline/MiniTwin/Last context id"] == ""
+    odb.values["/Nearline/MiniTwin/Last context id"] = "run00604"
+    tuning.ensure_odb_keys(odb)
+    assert odb.values["/Nearline/MiniTwin/Last context id"] == "run00604"
+
+
+def test_a_delivered_context_is_remembered():
+    loop, db, odb, http, _ = loop_with_service([])
+    db.add_run(604, subruns=1, seq_id=57)
+    loop.post_sequence(57)
+    assert odb.values["/Nearline/MiniTwin/Last context id"] == "run00604"
+
+
+def test_an_undelivered_context_is_remembered_only_once_delivered():
+    loop, db, odb, http, _ = loop_with_service([])
+    http.fail = True
+    db.add_run(604, subruns=1, seq_id=57)
+    loop.post_sequence(57)
+    assert odb.values["/Nearline/MiniTwin/Last context id"] == ""
+    http.fail = False
+    loop.mt._muted_until = 0.0
+    loop.mt.Flush()
+    assert odb.values["/Nearline/MiniTwin/Last context id"] == "run00604"
+
+
+def scheduled_reply(http):
+    (report,) = [r for r in http.daq if r["stage"] == "scheduled"]
+    return report["reply"]
+
+
+def test_old_service_without_in_reply_to():
+    loop, db, odb, http, messages = loop_with_service([proposal(5)])
+    odb.values["/Nearline/MiniTwin/Last context id"] = "run00604"
+    loop.poll_and_schedule()
+    assert len(db.runs) == 1
+    assert scheduled_reply(http) == {"expected": "run00604", "got": None, "outcome": None, "ok": True}
+
+
+def test_null_in_reply_to_is_none():
+    loop, db, odb, http, messages = loop_with_service([proposal(5, in_reply_to=None)])
+    loop.poll_and_schedule()
+    assert scheduled_reply(http) == {"expected": None, "got": None, "outcome": None, "ok": True}
+    assert not [m for m in messages if "warning" in m[0].lower() or m[1]]
+
+
+def test_matching_reply_is_ok():
+    loop, db, odb, http, messages = loop_with_service(
+        [proposal(6, in_reply_to=in_reply_to("run00604"))])
+    odb.values["/Nearline/MiniTwin/Last context id"] = "run00604"
+    loop.poll_and_schedule()
+    assert scheduled_reply(http) == {"expected": "run00604", "got": "run00604",
+                                     "outcome": "done", "ok": True}
+    assert any("answers context run00604" in m for m, _ in messages)
+
+
+def test_mismatch_warns_and_still_schedules():
+    loop, db, odb, http, messages = loop_with_service(
+        [proposal(6, in_reply_to=in_reply_to("run00603"))])
+    odb.values["/Nearline/MiniTwin/Last context id"] = "run00604"
+    loop.poll_and_schedule()
+    assert len(db.runs) == 1
+    assert scheduled_reply(http) == {"expected": "run00604", "got": "run00603",
+                                     "outcome": "done", "ok": False}
+    warnings = [m for m, is_error in messages if "warning" in m.lower() and not is_error]
+    assert warnings and "run00603" in warnings[0] and "run00604" in warnings[0]
+
+
+def test_retake_is_an_info_message():
+    loop, db, odb, http, messages = loop_with_service(
+        [proposal(6, attempt=1, in_reply_to=in_reply_to("run00604", outcome="retake"))])
+    odb.values["/Nearline/MiniTwin/Last context id"] = "run00604"
+    loop.poll_and_schedule()
+    assert ("Tuning: step ASM12_90.44 is retaken, attempt 1", False) in messages
+
+
+def test_failed_is_an_error_message():
+    loop, db, odb, http, messages = loop_with_service(
+        [proposal(6, step_id="ASM12_95.20",
+                  in_reply_to=in_reply_to("run00604", outcome="failed", attempt=2))])
+    odb.values["/Nearline/MiniTwin/Last context id"] = "run00604"
+    loop.poll_and_schedule()
+    assert ("Tuning: step ASM12_90.44 given up after 3 attempts", True) in messages
+    assert len(db.runs) == 1
+
+
+def test_off_plan_is_a_warning():
+    loop, db, odb, http, messages = loop_with_service(
+        [proposal(6, in_reply_to=in_reply_to("run00604", outcome="off_plan", step_id=None))])
+    odb.values["/Nearline/MiniTwin/Last context id"] = "run00604"
+    loop.poll_and_schedule()
+    assert any("warning" in m.lower() and "off_plan" in m and not e for m, e in messages)
+
+
+def test_cli_schedule_dry_run_prints_the_reply(capsys):
+    db, odb, http = cli_setup([proposal(6, in_reply_to=in_reply_to("run00603"))])
+    odb.values["/Nearline/MiniTwin/Last context id"] = "run00604"
+    assert tuning.main(["schedule", "--dry-run"], db=db, odb=odb, http=http) == 0
+    out = capsys.readouterr().out
+    assert '"reply"' in out and '"got": "run00603"' in out and '"ok": false' in out
+
+
+def test_cli_post_remembers_the_context():
+    db, odb, http = cli_setup([proposal(5)])
+    schedule_and_finish(db, odb, http)
+    assert tuning.main(["post", "--run", "604"], db=db, odb=odb, http=http,
+                       header_reader=HeaderReader()) == 0
+    assert odb.values["/Nearline/MiniTwin/Last context id"] == "run00604"

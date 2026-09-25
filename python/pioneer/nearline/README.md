@@ -638,6 +638,17 @@ daemon calls it and the command line above runs the same functions.
    `nearline` (subruns done / total), `posted`, `failed` with the reason, and
    `paused`. A failure to report is logged and never stops the daemon.
 
+**Reply check:** the id of every context the service takes is kept in
+`/Nearline/MiniTwin/Last context id`. A new proposal carries `in_reply_to`,
+the context the service fed its backend before computing it, and what became
+of it (`outcome`). The daemon compares the two: `ok` when they agree, `none`
+when the proposal answers no context (a kick, or a service without the field),
+`mismatch` otherwise, with a MIDAS warning naming both. Outcome `retake` gives
+an info message, `failed` (the step was given up) an error, `off_plan` a
+warning. The result goes into the `scheduled` report as `reply`
+(`expected`, `got`, `outcome`, `ok`) and into `schedule --dry-run`. It never
+stops a proposal from being scheduled: the service decides what runs next.
+
 **Pause:** set `/Nearline/config/MiniTwin enable` to `n`. It is read every
 iteration: the daemon stops asking for proposals and reports `paused` once. A
 run already scheduled is still taken and its context still posted. Set it back
@@ -662,6 +673,7 @@ retake it with `schedule --since <id - 1>`.
 | `/Nearline/MiniTwin/Active step/Proposal id` | `0` | proposal of the run in flight; `0` = none |
 | `/Nearline/MiniTwin/Active step/Step id`, `Attempt`, `Plan` | `""`, `-1`, `""` | the proposal's plan step; empty / `-1` = not known |
 | `/Nearline/MiniTwin/Active step/Seq id` | `0` | the run-database sequence of the run in flight |
+| `/Nearline/MiniTwin/Last context id` | `""` | context id of the last context the service took |
 
 The keys this loop added are created with their defaults when the daemon
 starts and are never overwritten.

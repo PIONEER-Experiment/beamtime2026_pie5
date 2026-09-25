@@ -33,8 +33,9 @@ CONFIG_DEFAULTS = {
     "MiniTwin remote prefix": "/home/pioneer/nearline/histograms/",
 }
 
-#: The loop's memory, under /Nearline/MiniTwin: the newest proposal id seen
-#: and the step whose run is being taken.  Restored at start-up, so a restart
+#: The loop's memory, under /Nearline/MiniTwin: the newest proposal id seen,
+#: the step whose run is being taken, and the id of the last context the
+#: service took (checked against a new proposal's ``in_reply_to``).  Restored at start-up, so a restart
 #: never schedules the outstanding proposal again.  Proposal id 0 means no
 #: active step; an empty string or attempt -1 means "not known".
 ODB_STATE = "/Nearline/MiniTwin"
@@ -45,6 +46,7 @@ STATE_DEFAULTS = {
     "Active step/Attempt": -1,
     "Active step/Plan": "",
     "Active step/Seq id": 0,
+    "Last context id": "",
 }
 
 #: DAQ progress reports (POST /v1/daq): looked at no more often than this,
@@ -192,9 +194,10 @@ def utc_now(clock=time.time):
 
 
 def daq_report(proposal_id, stage, step=None, seq_id=None, runs=None, events=None,
-               subruns=None, message=None, sent_utc=None):
-    """One DAQ progress report as POST /v1/daq takes it."""
-    return {
+               subruns=None, message=None, sent_utc=None, reply=None):
+    """One DAQ progress report as POST /v1/daq takes it.  ``reply`` (see
+    ``reply_check``) is optional and only sent with the `scheduled` report."""
+    report = {
         "schema": DAQ_SCHEMA,
         "proposal_id": int(proposal_id),
         "step_id": (step or {}).get("step_id"),
@@ -206,6 +209,27 @@ def daq_report(proposal_id, stage, step=None, seq_id=None, runs=None, events=Non
         "message": message,
         "sent_utc": sent_utc or utc_now(),
     }
+    if reply is not None:
+        report["reply"] = dict(reply)
+    return report
+
+
+def reply_check(in_reply_to, expected):
+    """Compare a proposal's ``in_reply_to`` with the last context we posted.
+
+    Returns ``(check, reply)``: check is "none" when the proposal answers no
+    context (null or absent: a kick, a resume, or a service without the
+    field), "ok" when ``in_reply_to.context_id`` is `expected`, else
+    "mismatch"; reply is what the `scheduled` DAQ report carries.  This never
+    stops a proposal from being scheduled: the service is the schedule truth.
+    """
+    expected = expected or None
+    if not isinstance(in_reply_to, dict):
+        return "none", {"expected": expected, "got": None, "outcome": None, "ok": True}
+    got = in_reply_to.get("context_id")
+    check = "ok" if got == expected else "mismatch"
+    return check, {"expected": expected, "got": got,
+                   "outcome": in_reply_to.get("outcome"), "ok": check != "mismatch"}
 
 
 def progress_stage(progress):
@@ -330,6 +354,8 @@ class TuningLoop:
         self._last_monitor_error = None
         #: nearline output tree to use instead of /Nearline/config/Output path
         self.output_override = None
+        # every context the service takes becomes /Nearline/MiniTwin/Last context id
+        self.mt.on_delivered = self.context_delivered
 
     def restore(self):
         """Take the last proposal id and the active step from the ODB, so a
@@ -381,6 +407,48 @@ class TuningLoop:
                 self._report_resumed()
         return enabled
 
+    def context_delivered(self, context):
+        """The service took `context`: remember its id for the next reply check."""
+        try:
+            self.odb.odb_set(ODB_STATE + "/Last context id", str(context.get("context_id") or ""))
+        except Exception as exc:                       # noqa: BLE001 -- never into the queue
+            self.message("Tuning: could not store the last context id: %s" % exc)
+
+    @property
+    def last_context_id(self):
+        return str(odb_value(self.odb, ODB_STATE + "/Last context id", "") or "") or None
+
+    def check_reply(self, proposal_id, hints, dry_run=False):
+        """Check the new proposal's ``in_reply_to`` and say what it means.
+        Returns the `reply` object for the `scheduled` report."""
+        in_reply_to = getattr(self.mt, "last_reply", None)
+        check, reply = reply_check(in_reply_to, self.last_context_id)
+        if dry_run:
+            return reply
+        in_reply_to = in_reply_to or {}
+        step = in_reply_to.get("step_id") or "(no step)"
+        outcome = in_reply_to.get("outcome")
+        if check == "mismatch":
+            self.message("Tuning warning: proposal %d answers context %s, but the last context "
+                         "posted was %s" % (proposal_id, reply["got"], reply["expected"]))
+        elif check == "ok":
+            self.message("Tuning: proposal %d answers context %s (%s)"
+                         % (proposal_id, reply["got"], outcome))
+        if outcome == "retake":
+            attempt = hints.get("attempt") if hints.get("step_id") == in_reply_to.get("step_id") \
+                else None
+            self.message("Tuning: step %s is retaken, attempt %s"
+                         % (step, attempt if attempt is not None else "?"))
+        elif outcome == "failed":
+            attempt = in_reply_to.get("attempt")
+            self.message("Tuning: step %s given up after %s attempts"
+                         % (step, int(attempt) + 1 if isinstance(attempt, int) else "?"),
+                         is_error=True)
+        elif outcome == "off_plan":
+            self.message("Tuning warning: context %s was not credited to any plan step (off_plan)%s"
+                         % (reply["got"], ": %s" % in_reply_to["note"] if in_reply_to.get("note") else ""))
+        return reply
+
     def message(self, msg, is_error=False):
         try:
             self._message(msg, is_error=is_error)
@@ -431,6 +499,7 @@ class TuningLoop:
         if not configs:
             return []
         hints = self.mt.last_run_hints or {}
+        reply = self.check_reply(proposal_id, hints, dry_run=dry_run)
         try:
             scheduled = schedule_configs(self.db, configs, self.update_table,
                                          self.target_config, dry_run=dry_run)
@@ -442,6 +511,8 @@ class TuningLoop:
                                        message="not scheduled: %s" % exc,
                                        sent_utc=utc_now(self.clock)))
             raise ScheduleError("proposal %d not scheduled: %s" % (proposal_id, exc)) from exc
+        for entry in scheduled:
+            entry["reply"] = reply
         if dry_run:
             return scheduled
         for entry in scheduled:
@@ -456,7 +527,7 @@ class TuningLoop:
                 self.message("Tuning: proposal %d%s scheduled as run %s in sequence %s" % (
                     proposal_id, " (step %s)" % hints["step_id"] if hints.get("step_id") else "",
                     ", ".join(str(r) for r in entry["run_ids"]), entry["seq_id"]))
-                self.report_progress()
+                self.report_progress(reply=reply)
         return scheduled
 
     def step_for_sequence(self, seq_id):
@@ -537,7 +608,7 @@ class TuningLoop:
 
     # -- DAQ progress reports ----------------------------------------------
 
-    def collect_progress(self, step):
+    def collect_progress(self, step, reply=None):
         """The DAQ report of `step` from the run database and the ODB."""
         seq_id = step.get("seq_id")
         progress = self.db.get_sequence_progress(seq_id) if seq_id else None
@@ -563,7 +634,7 @@ class TuningLoop:
             runs=[{"run_db_id": r["run_db_id"], "run_number": r["run_number"],
                    "status": r["status"]} for r in runs],
             events=events, subruns=subruns, message=message,
-            sent_utc=utc_now(self.clock))
+            sent_utc=utc_now(self.clock), reply=reply)
 
     def monitor(self):
         """Called every mainloop iteration: at most every MONITOR_INTERVAL_S,
@@ -581,12 +652,12 @@ class TuningLoop:
             self._progress_error(exc)
             return False
 
-    def report_progress(self, only_if_changed=False):
+    def report_progress(self, only_if_changed=False, reply=None):
         """Collect and post the active step's progress.  Never raises."""
         try:
             if self.active is None:
                 return False
-            report = self.collect_progress(self.active)
+            report = self.collect_progress(self.active, reply=reply)
             if only_if_changed and not self._changed(report):
                 return False
         except Exception as exc:                       # noqa: BLE001
