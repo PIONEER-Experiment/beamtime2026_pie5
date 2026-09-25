@@ -242,7 +242,9 @@ range with their payload and a flat `Split from row N [a, b): ...` comment.
 An overlapped interval that already holds constants also needs `--replace`
 (its constants are dropped in the overlap, and the tool names the chips that
 become uncorrected there); there is no union, a chip has one curve.
-`--skip-vid VID` leaves a chip out. `add` also takes a psm-analysis
+`--skip-vid VID` leaves a chip out. `--empty` in place of the fit JSON adds an
+interval without constants (n_chips 0, the correction is a copy there), for
+runs with no valid constants such as DAC tuning runs. `add` also takes a psm-analysis
 `walk_fit.py` JSON, with `--form` picking one of its forms (`inv`/`inverse`,
 `pow`/`power`, `exp`, `lin_inv`; default `lin_inv`). It refuses to write a
 table the layer would reject. As for the mask, `--write` edits the

@@ -250,6 +250,49 @@ def test_split_over_an_empty_interval_needs_no_replace(conditions, tmp_path):
     assert len(_chips_at(conditions, 5000)) == 2
 
 
+def test_empty_interval_inside_constants(conditions, tmp_path, capsys):
+    """--empty: no constants over tuning runs carved out of an interval that holds them."""
+    assert _add(conditions, _fit(tmp_path), "--run-start", 459, "--split",
+                "--comment", "a", "--write") == 0
+    capsys.readouterr()
+    assert _add(conditions, "--empty", "--run-start", 460, "--run-end", 467, "--split",
+                "--comment", "tuning runs", "--write") == 1
+    assert "--replace" in capsys.readouterr().err, "it drops constants, so it needs --replace"
+    assert _add(conditions, "--empty", "--run-start", 460, "--run-end", 467, "--split",
+                "--replace", "--comment", "tuning runs", "--created-by", "tester", "--write") == 0
+    out = capsys.readouterr().out
+    assert "input      none: --empty" in out and "none: the correction is a copy" in out
+    assert "chip(s) 10011, 10021 are then uncorrected there" in out
+    table = _doc(conditions)["mupix_timewalk"]
+    new = max(table["iov"], key=lambda r: r["row_id"])
+    assert (new["run_start"], new["run_end"], new["is_active"]) == (460, 467, True)
+    assert new["created_by"] == "tester"
+    assert new["comment"] == ("tuning runs No constants (--empty): every hit passes "
+                              "through uncorrected.")
+    assert table["values_by_iov"][str(new["row_id"])] == [{"key": "n_chips", "value": 0}]
+    active = sorted((r["run_start"], r["run_end"]) for r in table["iov"] if r["is_active"])
+    assert active == [(0, 459), (459, 460), (460, 467), (467, None)]
+    for run, n in ((458, 0), (459, 2), (460, 0), (466, 0), (467, 2), (100000, 2)):
+        assert len(_chips_at(conditions, run)) == n, run
+    assert tw.validate(_doc(conditions)) == []
+
+
+def test_empty_takes_no_fit_json(conditions, tmp_path, capsys):
+    fit = _fit(tmp_path)
+    for argv in (("--empty", fit), ("--empty", "--skip-vid", 10011), ("--empty", "--form", "exp")):
+        assert _add(conditions, *argv, "--run-start", 5, "--split", "--comment", "c") == 1
+        assert "--empty adds an interval without constants" in capsys.readouterr().err
+    assert _add(conditions, "--run-start", 5, "--split", "--comment", "c") == 1
+    assert "or --empty" in capsys.readouterr().err
+    assert _doc(conditions) == _container()
+    # over an empty interval --split alone is enough, as for constants
+    assert _add(conditions, "--empty", "--run-start", 5, "--split", "--comment", "c",
+                "--write") == 0
+    active = sorted((r["run_start"], r["run_end"]) for r in _doc(conditions)["mupix_timewalk"]["iov"]
+                    if r["is_active"])
+    assert active == [(0, 5), (5, None)]
+
+
 def test_remnant_comments_stay_flat(conditions, tmp_path):
     fit = _fit(tmp_path)
     for start in (459, 500, 480, 470):

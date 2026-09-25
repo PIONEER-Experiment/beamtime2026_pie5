@@ -75,6 +75,8 @@ Builds the payload from a fit JSON (this tool's, or psm-analysis
 ``walk_fit.py``'s with ``--form``) and adds an interval, like
 ``mupix_mask add``: a dry run by default that prints the intervals before and
 after, the chips and a unified diff of the file; ``--write`` applies it.
+``--empty`` instead of a fit JSON adds an interval without constants
+(n_chips 0), for runs that have no valid constants.
 A new interval overlapping an active one of the same tag is refused;
 ``--split`` carves it out (each overlapped interval is deactivated and its
 parts outside the new range come back with their own payload and the comment
@@ -1171,23 +1173,34 @@ def _load_doc(conditions):
 
 
 def cmd_add(args) -> int:
+    if args.empty and (args.input or args.form or args.skip_vid):
+        raise TimewalkError("--empty adds an interval without constants; it takes no fit JSON, "
+                            "--form or --skip-vid")
+    if not args.empty and not args.input:
+        raise TimewalkError("give a fit JSON, or --empty for an interval without constants")
     path, doc = _load_doc(args.conditions)
-    fit_path = Path(args.input)
-    try:
-        fit = json.loads(fit_path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        raise TimewalkError(f"{fit_path}: {exc}") from None
     fit_warnings: list[str] = []
-    chips, left_out, source = chips_from_fit(fit, args.form, set(args.skip_vid or ()),
-                                             fit_warnings)
-    if not chips:
-        raise TimewalkError(f"{fit_path}: no chip with usable constants"
-                            + ("".join(f"\n  {n}" for n in left_out)))
+    if args.empty:
+        chips, left_out, source = [], [], "none: --empty, no chip is corrected"
+        input_text = source
+        comment = f"{args.comment} No constants (--empty): every hit passes through uncorrected."
+    else:
+        fit_path = Path(args.input)
+        try:
+            fit = json.loads(fit_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TimewalkError(f"{fit_path}: {exc}") from None
+        chips, left_out, source = chips_from_fit(fit, args.form, set(args.skip_vid or ()),
+                                                 fit_warnings)
+        if not chips:
+            raise TimewalkError(f"{fit_path}: no chip with usable constants"
+                                + ("".join(f"\n  {n}" for n in left_out)))
+        input_text = f"{fit_path} ({source})"
+        comment = (f"{args.comment} Source: {fit_path.name} ({source}"
+                   + (f", {len(fit['files'])} histogram file(s)" if fit.get("files") else "")
+                   + f"); {len(chips)} chip(s).")
     run_end = args.last_run + 1 if args.last_run is not None else args.run_end
     tag = args.tag or select_tag(doc[TABLE], None, TABLE)
-    comment = (f"{args.comment} Source: {fit_path.name} ({source}"
-               + (f", {len(fit['files'])} histogram file(s)" if fit.get("files") else "")
-               + f"); {len(chips)} chip(s).")
     new_table, notes = plan_add(doc[TABLE], chips, args.run_start, run_end, tag, comment,
                                 args.created_by, args.split, args.tag_description, args.replace)
     new_doc = dict(doc)
@@ -1199,7 +1212,7 @@ def cmd_add(args) -> int:
     before, after = dump(doc), dump(new_doc)
     print(f"container  {path}")
     print(f"table      {TABLE}, tag '{tag}'")
-    print(f"input      {fit_path} ({source})")
+    print(f"input      {input_text}")
     if left_out:
         print("left out (these chips pass through uncorrected):")
         for n in left_out:
@@ -1215,7 +1228,7 @@ def cmd_add(args) -> int:
     print(describe(new_table, "n_chips", "chips"))
     print()
     print(f"constants of the new interval ({len(chips)} chip(s)):")
-    print(chip_table(chips))
+    print(chip_table(chips) if chips else "  none: the correction is a copy over this interval")
     if not args.no_diff:
         print()
         sys.stdout.writelines(difflib.unified_diff(
@@ -1297,8 +1310,13 @@ def main(argv: list[str] | None = None) -> int:
                         "dt histogram's ToT projection, or the monitor's when every file has it")
     p.add_argument("--plots", metavar="DIR", help="write one PNG per chip into DIR")
 
-    p = subs.add_parser("add", help="add an interval with the constants of a fit JSON")
-    p.add_argument("input", help="fit JSON (of 'fit', or psm-analysis walk_fit.py with --form)")
+    p = subs.add_parser("add", help="add an interval with the constants of a fit JSON, or an "
+                                    "empty one (--empty)")
+    p.add_argument("input", nargs="?",
+                   help="fit JSON (of 'fit', or psm-analysis walk_fit.py with --form)")
+    p.add_argument("--empty", action="store_true",
+                   help="an interval without constants (n_chips 0), instead of a fit JSON: "
+                        "the correction is a copy there (e.g. runs with no valid constants)")
     p.add_argument("--run-start", type=int, required=True, help="first run of the interval")
     end = p.add_mutually_exclusive_group()
     end.add_argument("--last-run", type=int, help="last run of the interval, INCLUSIVE")
