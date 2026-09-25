@@ -50,13 +50,14 @@ def iter_config(**currents):
     return {"type": "iter", "currents": [dict(currents or {"ASM12:SOL:2": 90.44})]}
 
 
-#: a beam header as tuning.read_beamline_header returns it: two knobs, a
-#: type-2 device that is not one, and a read-only type-3 channel
+#: a beam header as tuning.read_beamline_header returns it, with real channel
+#: names: two knobs (QTB12 given type 4 to cover that type), the type-2 KSD11
+#: that is not one, and the read-only type-6 MHC3
 HEADER = {
-    "names": ["ASM12:SOL:2", "QTB12", "KSD11", "BEAM:CURRENT"],
+    "names": ["ASM12", "QTB12", "KSD11", "MHC3"],
     "demand": [90.44, 56.12, 1.0, 0.0],
-    "measured": [89.40, 55.22, 1.0, 2.2],
-    "types": [1, 4, 2, 3],
+    "measured": [89.40, 55.22, 1.0, 2142.3],
+    "types": [1, 4, 2, 6],
 }
 
 
@@ -215,8 +216,8 @@ def test_context_shape_matches_the_contract():
         "/home/pioneer/nearline/histograms/run00604/run00604_00000_hists.root"
     assert context["setting"] == {
         "units": "A",
-        "knobs": {"ASM12:SOL:2": 90.44, "QTB12": 56.12},
-        "readback": {"ASM12:SOL:2": 89.40, "QTB12": 55.22},
+        "knobs": {"ASM12": 90.44, "QTB12": 56.12},
+        "readback": {"ASM12": 89.40, "QTB12": 55.22},
     }
     assert context["provenance"] == {"run_ids": [604], "config_type": "pim1_epics",
                                      "source": "nearline-daemon"}
@@ -734,6 +735,7 @@ def schedule_and_finish(db, odb, http):
     (run_id,) = db.sequences[seq_id]["runs"]
     db.runs[run_id].update(status="DONE", midas_run_number=604)
     db.files.append({"run_id": run_id, "filebase": "run00604_00000", "fileext": "root", "status": "DONE"})
+    db.sequences[seq_id]["status"] = "RUNSDONE"       # what the run database trigger does
     return seq_id
 
 
@@ -1212,3 +1214,52 @@ def test_cli_post_ignores_the_post_delay():
     assert tuning.main(["post", "--run", "604"], db=db, odb=odb, http=http,
                        header_reader=HeaderReader()) == 0
     assert len(http.contexts) == 1
+
+
+# -- review nits ----------------------------------------------------------------
+
+def test_save_step_writes_proposal_id_last():
+    class Recording(FakeOdb):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def odb_set(self, path, value):
+            self.calls.append((path.rsplit("/", 1)[1], value))
+            super().odb_set(path, value)
+
+    odb = Recording()
+    tuning.save_step(odb, {"proposal_id": 5, "step_id": "S", "attempt": 0, "plan": "P", "seq_id": 57})
+    assert odb.calls[0] == ("Proposal id", 0)
+    assert odb.calls[-1] == ("Proposal id", 5)
+    odb.calls.clear()
+    tuning.save_step(odb, None)
+    assert [c for c in odb.calls if c[0] == "Proposal id"] == [("Proposal id", 0)]
+
+
+def test_cli_post_leaves_a_running_sequence_alone(capsys):
+    db, odb, http = cli_setup([proposal(5)])
+    seq_id = schedule_and_finish(db, odb, http)
+    db.sequences[seq_id]["status"] = "RUNNING"
+    assert tuning.main(["post", "--run", "604"], db=db, odb=odb, http=http,
+                       header_reader=HeaderReader()) == 0
+    assert db.sequences[seq_id]["status"] == "RUNNING"
+    assert "left as it is" in capsys.readouterr().out
+
+
+def test_scheduled_message_names_the_target_position():
+    loop, db, odb, http, messages = loop_with_service([proposal(5)])
+    loop.poll_and_schedule()
+    assert any("target_position 1 at (0.0, 0.0)" in m for m, _ in messages)
+    assert not any("not the stage centre" in m for m, _ in messages)
+    assert http.daq[-1]["message"] == "target_position 1 at (0.0, 0.0)"
+
+
+def test_a_target_off_centre_is_a_warning_not_a_refusal():
+    odb = FakeOdb({"/Nearline/config/MiniTwin updates": "pim1_epics",
+                   "/Nearline/config/MiniTwin enable": True,
+                   "/Nearline/config/MiniTwin target config": 3})
+    loop, db, odb, http, messages = loop_with_service([proposal(5)], odb=odb)
+    loop.poll_and_schedule()
+    assert len(db.runs) == 1
+    assert any("warning" in m.lower() and "(17.0, 17.0)" in m and not e for m, e in messages)

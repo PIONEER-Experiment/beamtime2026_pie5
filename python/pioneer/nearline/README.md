@@ -687,6 +687,15 @@ directory), its proposals are ignored and the daemon says so once, as a MIDAS
 error naming both numbers; set `/Nearline/MiniTwin/Last proposal id` to the
 service's number by hand to take them.
 
+**A failed run or nearline job:** the run database sets the sequence
+`FAILED`, the daemon reports `failed`, and the step stays active; nothing is
+posted. Reprocess the failed subrun (re-queue its nearline job, or run
+`process.py` on it). Once every nearline job of the run is `DONE` the run
+database moves the sequence on to `RUNSDONE` and the daemon posts it with its
+step as usual; if it stays `FAILED`, post it by hand with
+`python -m pioneer.nearline.tuning post --run <N>`, which sends the step and
+closes the sequence.
+
 | ODB key | default | what it is |
 |---|---|---|
 | `/Nearline/config/MiniTwin URL` | `http://127.0.0.1:8420` | the service (read once at start-up) |

@@ -108,14 +108,18 @@ def save_last_id(odb, last_id):
 
 
 def save_step(odb, step):
-    """Write the active step; None clears it."""
+    """Write the active step; None clears it.  Proposal id (what marks a
+    step as active) is cleared first and written last, so a step half
+    written when something fails in between is never taken up."""
     step = step or {}
     attempt = step.get("attempt")
-    odb.odb_set(ODB_STATE + "/Active step/Proposal id", int(step.get("proposal_id") or 0))
+    odb.odb_set(ODB_STATE + "/Active step/Proposal id", 0)
     odb.odb_set(ODB_STATE + "/Active step/Step id", str(step.get("step_id") or ""))
     odb.odb_set(ODB_STATE + "/Active step/Attempt", int(attempt) if attempt is not None else -1)
     odb.odb_set(ODB_STATE + "/Active step/Plan", str(step.get("plan") or ""))
     odb.odb_set(ODB_STATE + "/Active step/Seq id", int(step.get("seq_id") or 0))
+    if step.get("proposal_id"):
+        odb.odb_set(ODB_STATE + "/Active step/Proposal id", int(step["proposal_id"]))
 
 
 def odb_value(odb, path, default):
@@ -610,10 +614,16 @@ class TuningLoop:
                     "plan": hints.get("plan"),
                     "seq_id": entry["seq_id"],
                 })
-                self.message("Tuning: proposal %d%s scheduled as run %s in sequence %s" % (
+                target = entry["target_position"]
+                where = "target_position %s at (%s, %s)" % (
+                    target.get("id"), target.get("xpos"), target.get("ypos"))
+                self.message("Tuning: proposal %d%s scheduled as run %s in sequence %s, %s" % (
                     proposal_id, " (step %s)" % hints["step_id"] if hints.get("step_id") else "",
-                    ", ".join(str(r) for r in entry["run_ids"]), entry["seq_id"]))
-                self.report_progress(reply=reply)
+                    ", ".join(str(r) for r in entry["run_ids"]), entry["seq_id"], where))
+                if (target.get("xpos"), target.get("ypos")) not in ((0, 0), (None, None)):
+                    self.message("Tuning warning: %s is not the stage centre (0, 0); check "
+                                 "%s/MiniTwin target config" % (where, ODB_CONFIG))
+                self.report_progress(reply=reply, note=where)
         return scheduled
 
     def _store_watermark(self, proposal_id):
@@ -834,12 +844,15 @@ class TuningLoop:
             self._progress_error(exc)
             return False
 
-    def report_progress(self, only_if_changed=False, reply=None):
-        """Collect and post the active step's progress.  Never raises."""
+    def report_progress(self, only_if_changed=False, reply=None, note=None):
+        """Collect and post the active step's progress; `note` is the message
+        when the state gives none.  Never raises."""
         try:
             if self.active is None:
                 return False
             report = self.collect_progress(self.active, reply=reply)
+            if note and not report.get("message"):
+                report["message"] = note
             if only_if_changed and not self._changed(report):
                 return False
         except Exception as exc:                       # noqa: BLE001
@@ -1069,16 +1082,24 @@ def _cmd_post(args, loop, db):
     step = loop.step_for_run(run_id)
     if step is None:
         print("run %d is not the active step's run: posting without responds_to/step_id" % args.run)
+    # With the step, its sequence is set DONE on delivery, so the daemon does
+    # not post it again -- but only from a state the run database does not
+    # move on from by itself; a sequence still RUNNING would be bounced back
+    # by its trigger and then posted by the daemon a second time, without
+    # the step.
+    seq_id = step.get("seq_id") if step else None
+    if seq_id:
+        entry = db.get_sequence_entry(seq_id)
+        if entry is None or entry.get("status") not in ("RUNSDONE", "CLAIMED", "FAILED"):
+            print("sequence %s is %s: left as it is" % (seq_id, (entry or {}).get("status")))
+            seq_id = None
     try:
         if args.dry_run:
             context = loop.build_context([run_id], step=step)
             print("dry run: would send (nothing sent)")
             _print_json(context)
             return 0
-        # with the step, its sequence is set DONE on delivery, so the daemon
-        # does not post it again
-        context = loop.post_runs([run_id], step=step, require_delivery=True,
-                                 seq_id=step.get("seq_id") if step else None)
+        context = loop.post_runs([run_id], step=step, require_delivery=True, seq_id=seq_id)
     except Exception as exc:                           # noqa: BLE001 -- a shifter reads this
         print("ERROR: run %d not posted: %s" % (args.run, exc))
         return 2

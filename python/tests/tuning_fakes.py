@@ -209,7 +209,7 @@ _ABSENT = object()
 def proposal(pid, currents=None, step_id="ASM12_90.44", attempt=0, plan="quick_run00588_ASM12",
              in_reply_to=_ABSENT):
     p = {"ready": True, "proposal_id": pid, "done": False,
-         "currents": currents or {"ASM12:SOL:2": 90.44, "QTB12": 56.12},
+         "currents": currents or {"ASM12": 90.44, "QTB12": 56.12},
          "run": {"step_id": step_id, "attempt": attempt, "plan": plan}}
     if in_reply_to is not _ABSENT:
         p["in_reply_to"] = in_reply_to
