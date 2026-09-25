@@ -1899,3 +1899,61 @@ def test_a_retake_after_a_nominal_bracket_says_so():
     loop.poll_and_schedule()
     assert ("Tuning: step ASM12_90.44 will be retaken after a nominal bracket (attempt 1)", False) \
         in messages
+
+
+# -- run length from the proposal's run.stop ---------------------------------------
+
+def proposal_with_stop(pid, stop):
+    p = proposal(pid)
+    p["run"]["stop"] = stop
+    return p
+
+
+def test_run_stop_events_sets_the_requested_events():
+    loop, db, odb, http, messages = loop_with_service(
+        [proposal_with_stop(5, {"kind": "events", "value": 1000})])
+    assert odb.values["/Nearline/config/MiniTwin max events"] == 10000000
+    loop.poll_and_schedule()
+    (run,) = db.runs.values()
+    assert run["requested_events"] == 1000
+    assert any("1000 events requested" in m for m, _ in messages)
+
+
+@pytest.mark.parametrize("stop", [None, {"kind": "seconds", "value": 600},
+                                  {"kind": "events", "value": 0},
+                                  {"kind": "events", "value": -5},
+                                  {"kind": "events", "value": "1000"},
+                                  {"kind": "events", "value": True},
+                                  {"kind": "events", "value": 12.5},
+                                  "1000"])
+def test_other_run_stops_keep_the_default(stop):
+    p = proposal(5)
+    if stop is not None:
+        p["run"]["stop"] = stop
+    loop, db, odb, http, messages = loop_with_service([p])
+    loop.poll_and_schedule()
+    (run,) = db.runs.values()
+    assert run["requested_events"] == 1000000
+    why = [m for m, e in messages if "requesting 1000000 events" in m]
+    assert len(why) == 1 and not any(e for m, e in messages if "requesting" in m)
+
+
+def test_run_stop_above_the_cap_is_an_error_and_capped():
+    odb = FakeOdb({"/Nearline/config/MiniTwin updates": "pim1_epics",
+                   "/Nearline/config/MiniTwin enable": True,
+                   "/Nearline/config/MiniTwin max events": 5000})
+    loop, db, odb, http, messages = loop_with_service(
+        [proposal_with_stop(5, {"kind": "events", "value": 20000})], odb=odb)
+    loop.poll_and_schedule()
+    (run,) = db.runs.values()
+    assert run["requested_events"] == 5000
+    assert any(e and "20000" in m and "5000" in m for m, e in messages)
+
+
+def test_cli_schedule_dry_run_shows_the_requested_events(capsys):
+    db, odb, http = cli_setup([proposal_with_stop(5, {"kind": "events", "value": 1000})])
+    assert tuning.main(["schedule", "--dry-run"], db=db, odb=odb, http=http) == 0
+    out = capsys.readouterr().out
+    assert '"num_ev": 1000' in out and db.runs == {}
+    assert tuning.main(["schedule"], db=db, odb=odb, http=http) == 0
+    assert list(db.runs.values())[0]["requested_events"] == 1000

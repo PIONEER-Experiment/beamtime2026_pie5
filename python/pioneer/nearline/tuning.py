@@ -34,6 +34,8 @@ CONFIG_DEFAULTS = {
     # seconds a finished sequence waits before its context is posted, so
     # the service's mirror (rsync every 30 s) has the last subrun's files
     "MiniTwin post delay": 60,
+    # upper limit on the events a proposal may request for its run
+    "MiniTwin max events": 10000000,
 }
 
 #: The loop's memory, under /Nearline/MiniTwin: the newest proposal id seen,
@@ -70,7 +72,8 @@ ODB_EVENTS_SENT = "/Equipment/WDWaveforms/Statistics/Events sent"
 #: the daemon's own /Nearline/config/Output path default
 DEFAULT_OUTPUT_PATH = "/home/pinky/nearline"
 
-#: requested WaveDREAM events per run
+#: requested WaveDREAM events per run (ITER_EVENTS unless the proposal's
+#: run.stop asks for a number of events, see requested_events)
 ITER_EVENTS = 1e6
 FINAL_EVENTS = 1e7
 
@@ -392,7 +395,30 @@ def progress_stage(progress):
     return "running", None
 
 
-def schedule_configs(db, configs, table, target_config, dry_run=False):
+def requested_events(run, cap):
+    """Events to request for a proposal's run, from its run annex:
+    ``run.stop = {"kind": "events", "value": N}`` with N a positive integer
+    gives N (at most `cap`); anything else gives ITER_EVENTS.  Returns
+    ``(events, why, is_error)``: `why` says why the annex was not used as it
+    is, None when it was."""
+    cap = max(1, int(cap))
+    stop = (run or {}).get("stop") if isinstance(run, dict) else None
+    if not isinstance(stop, dict):
+        return int(ITER_EVENTS), "the proposal gives no run.stop", False
+    kind, value = stop.get("kind"), stop.get("value")
+    if kind != "events":
+        return int(ITER_EVENTS), "run.stop is %r, not events" % (kind,), False
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return int(ITER_EVENTS), "run.stop value %r is not a positive integer" % (value,), False
+    if value > cap:
+        return cap, ("run.stop asks for %d events, above MiniTwin max events %d; requesting %d"
+                     % (value, cap, cap)), True
+    return value, None, False
+
+
+def schedule_configs(db, configs, table, target_config, dry_run=False, iter_events=ITER_EVENTS):
     """Write the runs for `configs` (what `NextConfiguration()` returns).
 
     'iter': every row of `table` times the one `target_position` config
@@ -416,7 +442,7 @@ def schedule_configs(db, configs, table, target_config, dry_run=False):
                 "config_type": table,
                 "rows": list(aConfig['currents']),
                 "target_position": dict(centre),
-                "num_ev": ITER_EVENTS,
+                "num_ev": int(iter_events),
                 "on_complete": "mt_add",
                 "seq_id": None,
                 "run_ids": [],
@@ -428,7 +454,7 @@ def schedule_configs(db, configs, table, target_config, dry_run=False):
                 centre_seq.set_config_list("target_position", [centre])
                 centre_seq.set_on_complete("mt_add")
                 mrs.set_subsequence(centre_seq)
-                mrs.num_ev = ITER_EVENTS
+                mrs.num_ev = int(iter_events)
                 entry["run_ids"] = mrs.schedule()
                 entry["seq_id"] = centre_seq.seq_id
             scheduled.append(entry)
@@ -757,8 +783,18 @@ class TuningLoop:
                              is_error=True)
             reply = reply_check(None, None)[1]
         try:
+            cap = odb_value(self.odb, ODB_CONFIG + "/MiniTwin max events",
+                            CONFIG_DEFAULTS["MiniTwin max events"])
+        except Exception:                              # noqa: BLE001
+            cap = CONFIG_DEFAULTS["MiniTwin max events"]
+        events, why, is_error = requested_events(hints, cap)
+        if why:
+            self.message("Tuning: proposal %d: %s; requesting %d events" % (proposal_id, why, events)
+                         if not is_error else "Tuning: proposal %d: %s" % (proposal_id, why),
+                         is_error=is_error and not dry_run)
+        try:
             scheduled = schedule_configs(self.db, configs, self.update_table,
-                                         self.target_config, dry_run=dry_run)
+                                         self.target_config, dry_run=dry_run, iter_events=events)
         except Exception as exc:
             if not dry_run:
                 self.message("Tuning: proposal %d could not be scheduled: %s" % (proposal_id, exc),
@@ -783,9 +819,11 @@ class TuningLoop:
                 target = entry["target_position"]
                 where = "target_position %s at (%s, %s)" % (
                     target.get("id"), target.get("xpos"), target.get("ypos"))
-                self.message("Tuning: proposal %d%s scheduled as run %s in sequence %s, %s" % (
+                self.message("Tuning: proposal %d%s scheduled as run %s in sequence %s, %s, "
+                             "%d events requested" % (
                     proposal_id, " (step %s)" % hints["step_id"] if hints.get("step_id") else "",
-                    ", ".join(str(r) for r in entry["run_ids"]), entry["seq_id"], where))
+                    ", ".join(str(r) for r in entry["run_ids"]), entry["seq_id"], where,
+                    entry["num_ev"]))
                 if (target.get("xpos"), target.get("ypos")) not in ((0, 0), (None, None)):
                     self.message("Tuning warning: %s is not the stage centre (0, 0); check "
                                  "%s/MiniTwin target config" % (where, ODB_CONFIG))

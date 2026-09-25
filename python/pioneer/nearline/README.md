@@ -632,8 +632,10 @@ daemon calls it and the command line above runs the same functions.
    enable` is on, the daemon asks the service for a proposal newer than the
    last one seen. A new one is written as its row of the `MiniTwin updates`
    table times one `target_position` config (`MiniTwin target config`, the
-   stage centre by default), 10^6 events, in a sequence with `on_complete =
-   mt_add`. No five-point scan, no merge. Each knob of the proposal goes into the
+   stage centre by default), in a sequence with `on_complete = mt_add`. The
+   run requests the events the proposal's `run.stop` asks for
+   (`{"kind": "events", "value": N}`, at most `MiniTwin max events`), else
+   10^6, with a message saying why. No five-point scan, no merge. Each knob of the proposal goes into the
    row under its run-database column, from the service's `knobs.columns`
    (`GET /v1/config`); while that map cannot be fetched, is empty, or lacks a
    knob of the proposal, the proposal is not taken (one MIDAS error, asked
@@ -731,6 +733,7 @@ recognises a repeated context by its id.
 | `/Nearline/config/MiniTwin target config` | `1` | `config.target_position` id of the one run per proposal (id 1 = seq 1, the centre (0, 0)) |
 | `/Nearline/config/MiniTwin local prefix` | `/home/pinky/nearline/` | start of a file path as the daemon writes it |
 | `/Nearline/config/MiniTwin remote prefix` | `/home/pioneer/nearline/histograms/` | what replaces it in a posted path |
+| `/Nearline/config/MiniTwin max events` | `10000000` | most events a proposal's `run.stop` may request; more is an error and capped |
 | `/Nearline/config/MiniTwin post delay` | `60` | seconds between claiming a finished sequence and posting it (`post` by hand does not wait) |
 | `/Nearline/MiniTwin/Last proposal id` | `0` | newest proposal id seen |
 | `/Nearline/MiniTwin/Active step/Proposal id` | `0` | proposal of the run in flight; `0` = none |
