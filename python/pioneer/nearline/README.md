@@ -642,6 +642,11 @@ daemon calls it and the command line above runs the same functions.
    paths: every subrun's `run<N>/<filebase>_hists.root`,
    with `MiniTwin local prefix` replaced by `MiniTwin remote prefix` (the
    service reads piana's mirror of the output tree), role `hist_root`; the
+   three MuPix maps (`miniTwinInterface.miniTwin_histograms`: x-x', y-y',
+   x-y) summed over those subruns with ROOT, rebinned to 64 x 64 and sent
+   inline with the axes read from the histograms (the service reads inline
+   maps first, the files as a fallback; when the maps cannot be read the
+   context goes out with its files only and a warning); the
    knobs (Demand) and readback (Measured) of the type 1/4/5 channels in the
    first subrun's `beamline` header; the step (`responds_to`, `step_id`,
    `attempt`, `plan`) when the sequence is the one the active step was
@@ -787,13 +792,13 @@ factor of 1000 off from every other consumer — the nearline site's cubes,
 fixed, so the two `xxp` histograms in this job now mean the same thing and only
 differ in their selection and binning.
 
-## The merge step depends on `PSM_CURRENT_CHANNEL`
+## The merge step normalises by `PSM_CURRENT_CHANNEL`
 
 `combine_files.py` sums the histograms of a run's sub-runs and divides every one
-of them by `Integral()` of `histograms/musip/current`, raising when that
-histogram is missing or its integral is not positive. So **`PSM_DECODE = False`,
-`PSM_CURRENT_CHANNEL = None`, or a run with no current pulses means no sub-run
-merge** — and it surfaces at merge time, hours later, not while the run is taken.
+of them by `Integral()` of `histograms/musip/current`. When that histogram is
+missing or empty (`PSM_DECODE = False`, `PSM_CURRENT_CHANNEL = None`, or a run
+with no current pulses) it prints one warning and leaves the sums as counts
+(factor 1), so merged runs are then not comparable per current pulse.
 
 **Two known defects, not fixed here.** `MergeJob.build_job_description_file()`
 feeds `combine_files` the RNTuple file `<filebase>.root` while the histograms

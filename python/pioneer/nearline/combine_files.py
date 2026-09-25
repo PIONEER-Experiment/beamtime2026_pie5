@@ -1,6 +1,5 @@
 import json
 import argparse
-import ROOT
 from pathlib import Path
 
 from pioneer.nearline.miniTwinInterface import miniTwin_histograms
@@ -9,8 +8,11 @@ header_paths = [
     "beamline"
 ]
 
+# the current pulses the histograms are normalised by; optional, see below
+current_path = "histograms/musip/current"
+
 histo_paths = [
-    "histograms/musip/current", # take the current, required for normalisation
+    current_path,
     *miniTwin_histograms # all histograms the miniTwin is asking for
 ]
 
@@ -28,6 +30,8 @@ def merge_sub_runs(input_files : list[str]):
     Combine histograms from the same run that got split into subruns.
     """
 
+    import ROOT     # here, not at module level, so the module imports without ROOT
+
     if not input_files:
         raise ValueError("Received invalid list of subruns")
 
@@ -40,6 +44,8 @@ def merge_sub_runs(input_files : list[str]):
     histos = dict()
     for path in histo_paths:
         obj = first_file.Get(path)
+        if not obj and path == current_path:
+            continue    # no current histogram: not normalised, see below
         if not obj:
             raise ValueError(f"File {input_files[0]} does not contain {path}")
         histos[path] = obj.Clone()
@@ -75,17 +81,23 @@ def merge_sub_runs(input_files : list[str]):
         next_file.Close()
 
 
-    # Normalise all histograms
-    ref_count = histos['histograms/musip/current'].Integral()
+    # Normalise all histograms by the number of current pulses. Without any
+    # (no histogram, or no entries) they are left as counts, with one warning.
+    current = histos.get(current_path)
+    ref_count = current.Integral() if current is not None else 0.0
     if ref_count <= 0:
-        raise ValueError("Invalid count of reference current pulses encountered")
-    for h in histos.values():
-        h.Scale ( 1. / ref_count)
+        print(f"warning: {current_path} is missing or empty in {input_files[0]}; "
+              "histograms are summed but not normalised (factor 1)")
+    else:
+        for h in histos.values():
+            h.Scale ( 1. / ref_count)
 
     return headers, histos
 
 
 def main():
+    import ROOT
+
     parser = argparse.ArgumentParser(description="Combine nearline ROOT files.")
     parser.add_argument("config", type=Path, help="JSON merge configuration file")
     args = parser.parse_args()

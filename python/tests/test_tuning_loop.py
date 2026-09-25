@@ -71,13 +71,14 @@ class HeaderReader:
         return self.header
 
 
-def make_loop(db=None, mt=None, odb=None, header_reader=None):
+def make_loop(db=None, mt=None, odb=None, header_reader=None, maps_reader=None):
     db = db or FakeDb()
     odb = odb if odb is not None else FakeOdb({"/Nearline/config/MiniTwin updates": "pim1_epics"})
     messages = []
     loop = tuning.TuningLoop(db=db, mt=mt or FakeMt(), odb=odb,
                              message=lambda m, is_error=False: messages.append((m, is_error)),
-                             header_reader=header_reader or HeaderReader())
+                             header_reader=header_reader or HeaderReader(),
+                             maps_reader=maps_reader or (lambda paths: None))
     return loop, db, odb, messages
 
 
@@ -1263,3 +1264,198 @@ def test_a_target_off_centre_is_a_warning_not_a_refusal():
     loop.poll_and_schedule()
     assert len(db.runs) == 1
     assert any("warning" in m.lower() and "(17.0, 17.0)" in m and not e for m, e in messages)
+
+
+# -- inline MuPix maps (planner item) -------------------------------------------
+
+from tuning_fakes import FakeTH2, fake_root  # noqa: E402
+
+XXP, YYP, XY = ("histograms/PIPSMMuPixMonitor/xxp", "histograms/PIPSMMuPixMonitor/yyp",
+                "histograms/PIPSMMuPixMonitor/track_xy")
+X_RANGE, PX_RANGE = (-37.48, 3.48), (-1365.0, 1365.0)
+Y_RANGE, PY_RANGE = (-20.48, 20.48), (-1333.0, 1333.0)
+
+
+def mupix_maps(counts=1000.0, at_x=-10.0):
+    return {
+        XXP: FakeTH2.blob(128, 128, X_RANGE, PX_RANGE, (at_x, 100.0), counts),
+        YYP: FakeTH2.blob(128, 128, Y_RANGE, PY_RANGE, (5.0, -200.0), counts),
+        XY: FakeTH2.blob(128, 128, X_RANGE, Y_RANGE, (at_x, 5.0), counts),
+    }
+
+
+@pytest.mark.parametrize("bins", [64, 128, 320])
+def test_serialise_rebins_multiples_of_64(bins):
+    from pioneer.nearline.miniTwinInterface import serialise_hist
+    hist = FakeTH2.blob(bins, bins, (-1, 1), (-1, 1), (0.1, 0.1))
+    out = serialise_hist(hist)
+    assert len(out) == 64 and all(len(row) == 64 for row in out)
+    assert sum(map(sum, out)) == 1000.0
+
+
+def test_serialise_refuses_260_bins():
+    from pioneer.nearline.miniTwinInterface import serialise_hist
+    with pytest.raises(ValueError, match="not a multiple of 64"):
+        serialise_hist(FakeTH2.blob(260, 77, (-41.6, 41.6), (-102.7, 102.7), (0, 0)))
+
+
+def test_axes_come_from_the_histograms():
+    from pioneer.nearline.miniTwinInterface import inline_maps
+    maps = mupix_maps()
+    inline = inline_maps([maps[XXP], maps[YYP], maps[XY]])
+    assert inline["axes"] == {"x": list(X_RANGE), "px": list(PX_RANGE),
+                              "y": list(Y_RANGE), "py": list(PY_RANGE)}
+    assert [len(m) for m in inline["maps"]] == [64, 64, 64]
+
+
+def test_an_x_y_map_on_other_axes_is_refused():
+    from pioneer.nearline.miniTwinInterface import inline_maps
+    maps = mupix_maps()
+    maps[XY] = FakeTH2.blob(128, 128, (-3.48, 37.48), Y_RANGE, (5.0, 5.0))
+    with pytest.raises(ValueError, match="x-y map"):
+        inline_maps([maps[XXP], maps[YYP], maps[XY]])
+
+
+def _mean_along_rows(plane, lo, hi):
+    """psm_maps.map_moments: the row variable's mean is from plane.sum(axis=1)."""
+    import numpy as np
+    plane = np.asarray(plane)
+    n = plane.shape[0]
+    edges = np.linspace(lo, hi, n + 1)
+    centres = 0.5 * (edges[:-1] + edges[1:])
+    weights = plane.sum(axis=1)
+    return float((weights * centres).sum() / weights.sum())
+
+
+def test_orientation_matches_psm_maps():
+    """A beam offset in x only: rows must be x, as psm_maps reads them."""
+    import numpy as np
+    from pioneer.nearline.miniTwinInterface import inline_maps
+    xxp = FakeTH2.blob(128, 128, (-40.0, 40.0), (-1000.0, 1000.0), (20.3, 0.1))
+    yyp = FakeTH2.blob(128, 128, (-40.0, 40.0), (-1000.0, 1000.0), (0.3, 0.1))
+    xy = FakeTH2.blob(128, 128, (-40.0, 40.0), (-40.0, 40.0), (20.3, 0.3))
+    inline = inline_maps([xxp, yyp, xy])
+    axes = inline["axes"]
+    assert _mean_along_rows(inline["maps"][0], *axes["x"]) == pytest.approx(20.3, abs=0.7)
+    assert _mean_along_rows(np.asarray(inline["maps"][0]).T, *axes["px"]) == pytest.approx(0.0, abs=20)
+    assert _mean_along_rows(inline["maps"][2], *axes["x"]) == pytest.approx(20.3, abs=0.7)
+    # and through beam-tuning-client's own map_moments, when it is next door
+    btc = Path(__file__).resolve().parents[3] / "beam-tuning-client-runplan-loop"
+    if (btc / "beamtune" / "adapters" / "psm_maps.py").is_file():
+        sys.path.insert(0, str(btc))
+        try:
+            from beamtune.adapters.psm_maps import map_moments
+        except Exception:                              # noqa: BLE001 -- optional cross-check
+            map_moments = None
+        finally:
+            sys.path.remove(str(btc))
+        if map_moments is not None:
+            moments = map_moments(inline["maps"], {k: tuple(v) for k, v in axes.items()})
+            assert moments["mean_x"] == pytest.approx(20.3, abs=0.7)
+            assert abs(moments["mean_px"]) < 20
+            assert moments["mean_y"] == pytest.approx(0.3, abs=0.7)
+
+
+def test_read_inline_maps_sums_the_subruns(monkeypatch):
+    files = {"a_hists.root": mupix_maps(100.0), "b_hists.root": mupix_maps(50.0)}
+    monkeypatch.setitem(sys.modules, "ROOT", fake_root(files))
+    inline = tuning.read_inline_maps(["a_hists.root", "b_hists.root"])
+    assert sum(map(sum, inline["maps"][0])) == 150.0
+    assert inline["axes"]["x"] == list(X_RANGE)
+
+
+def test_read_inline_maps_refuses_differently_binned_subruns(monkeypatch):
+    other = mupix_maps()
+    other[XXP] = FakeTH2.blob(128, 128, (-3.48, 37.48), PX_RANGE, (5.0, 0.0))
+    monkeypatch.setitem(sys.modules, "ROOT", fake_root({"a": mupix_maps(), "b": other}))
+    with pytest.raises(ValueError, match="binned differently"):
+        tuning.read_inline_maps(["a", "b"])
+
+
+def test_posted_context_carries_the_maps_inline_and_the_files(monkeypatch):
+    db = FakeDb()
+    db.add_run(604, subruns=2, seq_id=57)
+    local = ["/home/pinky/nearline/run00604/run00604_%05d_hists.root" % i for i in range(2)]
+    monkeypatch.setitem(sys.modules, "ROOT", fake_root({local[0]: mupix_maps(10.0),
+                                                        local[1]: mupix_maps(20.0)}))
+    http = FakeHttp()
+    loop, _, _, _ = make_loop(db=db, mt=real_mt(http), maps_reader=tuning.read_inline_maps)
+    loop.post_sequence(57)
+    (context,) = http.contexts
+    measurement = context["measurement"]
+    assert len(measurement["files"]) == 2
+    assert sum(map(sum, measurement["inline"]["maps"][1])) == 30.0
+    assert measurement["inline"]["axes"]["py"] == list(PY_RANGE)
+    assert db.sequences[57]["status"] == "DONE"
+
+
+def test_unreadable_maps_still_post_the_files():
+    db = FakeDb()
+    db.add_run(604, subruns=1, seq_id=57)
+    http = FakeHttp()
+
+    def broken(paths):
+        raise OSError("no ROOT here")
+    loop, _, _, messages = make_loop(db=db, mt=real_mt(http), maps_reader=broken)
+    loop.post_sequence(57)
+    (context,) = http.contexts
+    assert "inline" not in context["measurement"]
+    assert len(context["measurement"]["files"]) == 1
+    assert db.sequences[57]["status"] == "DONE"
+    assert any("warning" in m.lower() and "no ROOT here" in m and not e for m, e in messages)
+
+
+def test_merge_path_add_context_takes_axes_from_the_file(monkeypatch):
+    header = types.SimpleNamespace(GetNames=lambda: HEADER["names"], GetDemand=lambda: HEADER["demand"],
+                                   GetMeasured=lambda: HEADER["measured"], GetTypes=lambda: HEADER["types"])
+    objects = dict(mupix_maps(), beamline=header)
+    monkeypatch.setitem(sys.modules, "ROOT", fake_root({"/n/seq00057/seq00057.root": objects}))
+    http = FakeHttp()
+    mt = real_mt(http)
+    mt.AddContext(Path("/n/seq00057/seq00057.root"))
+    (context,) = http.contexts
+    assert context["context_id"] == "/n/seq00057/seq00057.root"
+    assert isinstance(context["context_id"], str)
+    assert context["measurement"]["inline"]["axes"]["px"] == list(PX_RANGE)
+
+
+# -- combine_files: no current pulses means no normalisation --------------------
+
+class FakeHeader:
+    def __bool__(self):
+        return True
+
+    def Clone(self):
+        return self
+
+    def MergeHeader(self, other):
+        return True
+
+
+def _combine_inputs(current_counts):
+    files = {}
+    for name in ("a", "b"):
+        objects = dict(mupix_maps(10.0), beamline=FakeHeader())
+        if current_counts is not None:
+            objects["histograms/musip/current"] = FakeTH2([[current_counts]], (0, 1), (0, 1))
+        files[name] = objects
+    return files
+
+
+@pytest.mark.parametrize("current_counts", [None, 0.0])
+def test_combine_without_current_pulses_is_not_normalised(monkeypatch, capsys, current_counts):
+    monkeypatch.setitem(sys.modules, "ROOT", fake_root(_combine_inputs(current_counts)))
+    from pioneer.nearline import combine_files
+    headers, histos = combine_files.merge_sub_runs(["a", "b"])
+    assert histos[XXP].Integral() == 20.0
+    assert histos[XXP].scaled is None
+    out = capsys.readouterr().out
+    assert out.count("warning") == 1 and "not normalised" in out
+
+
+def test_combine_normalises_by_the_current_pulses(monkeypatch):
+    monkeypatch.setitem(sys.modules, "ROOT", fake_root(_combine_inputs(5.0)))
+    from pioneer.nearline import combine_files
+    headers, histos = combine_files.merge_sub_runs(["a", "b"])
+    assert histos[XXP].scaled == pytest.approx(0.1)
+    assert histos[XXP].Integral() == pytest.approx(2.0)

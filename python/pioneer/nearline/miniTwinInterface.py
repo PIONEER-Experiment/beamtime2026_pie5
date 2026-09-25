@@ -41,11 +41,71 @@ def knobs_from_header(header):
     return knobs, readback
 
 
+#: The maps sent to the service, in its order: x-x', y-y', x-y.  For now the
+#: unweighted 128x128 MuPix monitor maps; they have to be switched again (to
+#: the maps on the minitwin's window) before the minitwin runs on them.
+#: combine_files merges the same list.
 miniTwin_histograms = [
-    "histograms/PIPSMMuPixMonitor/xxp_central_w",
-    "histograms/PIPSMMuPixMonitor/yyp_central_w",
-    "histograms/PIPSMMuPixMonitor/track_xy_expanded_w"
+    "histograms/PIPSMMuPixMonitor/xxp",
+    "histograms/PIPSMMuPixMonitor/yyp",
+    "histograms/PIPSMMuPixMonitor/track_xy",
 ]
+
+#: bins per axis of an inline map
+MAP_BINS = 64
+
+
+def serialise_hist(hist, bins=MAP_BINS):
+    """A TH2 as ``bins`` x ``bins`` nested lists, rebinned in place.
+
+    Orientation as beam-tuning-client's psm_maps: ``out[i][j]`` is x bin i,
+    y bin j -- rows are the histogram's x axis (x, or y for y-y'), columns
+    its y axis (x', y', or y for x-y).  Each axis must have a multiple of
+    ``bins`` bins; it is summed down by nbins // bins.
+    """
+    if not hist.InheritsFrom("TH2"):
+        raise NotImplementedError("not yet implemented for " + hist.IsA().GetName())
+    nx, ny = hist.GetNbinsX(), hist.GetNbinsY()
+    if nx % bins or ny % bins:
+        raise ValueError("histogram %s has %d x %d bins, which is not a multiple of %d"
+                         % (hist.GetName(), nx, ny, bins))
+    if nx != bins:
+        hist.RebinX(nx // bins)
+    if ny != bins:
+        hist.RebinY(ny // bins)
+    return [[float(hist.GetBinContent(ix, iy)) for iy in range(1, hist.GetNbinsY() + 1)]
+            for ix in range(1, hist.GetNbinsX() + 1)]
+
+
+def hist_ranges(hist):
+    """``((xlo, xhi), (ylo, yhi))`` of a TH2's axes."""
+    xa, ya = hist.GetXaxis(), hist.GetYaxis()
+    return ((float(xa.GetXmin()), float(xa.GetXmax())),
+            (float(ya.GetXmin()), float(ya.GetXmax())))
+
+
+def _same_range(a, b, tol=1e-6):
+    scale = max(1.0, abs(a[0]), abs(a[1]))
+    return abs(a[0] - b[0]) <= tol * scale and abs(a[1] - b[1]) <= tol * scale
+
+
+def inline_maps(hists):
+    """``measurement.inline`` from the three maps (x-x', y-y', x-y, the order
+    of miniTwin_histograms): ``{"maps": [...], "axes": {x, px, y, py}}``,
+    the axes read from the histograms themselves.  Raises ValueError when
+    x-y does not span the same x and y as x-x' and y-y'.  Rebins in place."""
+    xxp, yyp, xy = hists
+    (x, px), (y, py) = hist_ranges(xxp), hist_ranges(yyp)
+    xy_x, xy_y = hist_ranges(xy)
+    if not (_same_range(xy_x, x) and _same_range(xy_y, y)):
+        raise ValueError("x-y map spans x %s, y %s but x-x' and y-y' span x %s, y %s"
+                         % (list(xy_x), list(xy_y), list(x), list(y)))
+    return {
+        "maps": [serialise_hist(h) for h in hists],
+        "axes": {"x": list(x), "px": list(px), "y": list(y), "py": list(py)},
+    }
+
+
 class miniTwinInterface:
     """
     ``NextConfiguration()`` returns ``[{column: value}]`` -- one row for the
@@ -107,64 +167,61 @@ class miniTwinInterface:
 
         filename = str(ctxt)
         aFile = ROOT.TFile.Open(filename)
+        if not aFile or aFile.IsZombie():
+            raise OSError("cannot open %s" % filename)
 
         beam_hdr = aFile.Get("beamline")
 
-        histos = [self.serialise(aFile.Get(n)) for n in miniTwin_histograms]
+        hists = [aFile.Get(n) for n in miniTwin_histograms]
+        for name, hist in zip(miniTwin_histograms, hists):
+            if not hist:
+                raise KeyError("%s has no %s" % (filename, name))
+        inline = inline_maps(hists)
 
         configurable_devices = [1, 4, 5]
 
         theMessage = {
             "schema" : CONTEXT_SCHEMA,
-            "context_id" : ctxt,
+            "context_id" : filename,
             "setting" : {
                 "knobs" : {str(k) : v for k,v,t in zip(beam_hdr.GetNames(), beam_hdr.GetDemand(), beam_hdr.GetTypes()) if t in configurable_devices},
                 "readback" : {str(k) : v for k,v,t in zip(beam_hdr.GetNames(), beam_hdr.GetMeasured(), beam_hdr.GetTypes()) if t in configurable_devices}
             },
             "measurement" : {
-                "inline" : {
-                    "maps" : histos,
-                    "axes": {"x": [-37.0, 37.0], "y": [-37.0, 37.0],
-                            "px": [-950.0, 950.0], "py": [-950.0, 950.0]},
-                    }
+                "inline" : inline
             }
         }
 
         self._enqueue(theMessage)
 
     def serialise(self, hist):
-        if not hist.InheritsFrom("TH2"):
-            raise NotImplementedError("not yet implemented for " + hist.IsA().GetName())
+        return serialise_hist(hist)
 
-        rebin_factor_x = 64. / hist.GetNbinsX()
-        rebin_factor_y = 64. / hist.GetNbinsY()
-        if (int(rebin_factor_x) != rebin_factor_x or int(rebin_factor_y) != rebin_factor_y):
-            raise ValueError("histogram %s has %d x %d bins, which is not a multiple of 64" % (hist.GetName(), hist.GetNbinsX(), hist.GetNbinsY()))
-
-        hist.RebinX(int(rebin_factor_x))
-        hist.RebinY(int(rebin_factor_y))
-        return [[hist.GetBinContent(x, y) for x in range(1, hist.GetNbinsX() + 1)] for y in range(1, hist.GetNbinsY() + 1)]
-
-    def BuildContextFiles(self, context_id, files, run_ids, header, step=None):  # noqa: N802
+    def BuildContextFiles(self, context_id, files, run_ids, header, step=None,  # noqa: N802
+                          inline=None):
         """A context made of file paths, nothing read from the histograms.
 
         ``files`` are the paths as the service sees them (role hist_root),
         ``run_ids`` the MIDAS run numbers, ``header`` the beam header of the
         first file (see ``knobs_from_header``), ``step`` the proposal the run
         was scheduled with (``proposal_id``, ``step_id``, ``attempt``,
-        ``plan``) or None when that is not known.
+        ``plan``) or None when that is not known.  ``inline`` (see
+        ``inline_maps``) goes in as ``measurement.inline`` next to the files;
+        the service reads it first.
         """
         knobs, readback = knobs_from_header(header)
         return self._envelope(
             str(context_id),
             files=[{"path": str(f), "role": HIST_ROOT_ROLE} for f in files],
-            knobs=knobs, readback=readback, run_ids=run_ids, step=step)
+            knobs=knobs, readback=readback, run_ids=run_ids, step=step, inline=inline)
 
-    def AddContextFiles(self, context_id, files, run_ids, header, step=None):  # noqa: N802
+    def AddContextFiles(self, context_id, files, run_ids, header, step=None,  # noqa: N802
+                        inline=None):
         """``BuildContextFiles`` and post it through the retry queue.  A post
         that fails stays queued and is retried; this only raises when the
         context cannot be built."""
-        context = self.BuildContextFiles(context_id, files, run_ids, header, step=step)
+        context = self.BuildContextFiles(context_id, files, run_ids, header, step=step,
+                                         inline=inline)
         self._enqueue(context)
         return context
 

@@ -220,3 +220,116 @@ def in_reply_to(context_id, outcome="done", step_id="ASM12_90.44", attempt=0,
                 answered_proposal_id=5, note=""):
     return {"context_id": context_id, "answered_proposal_id": answered_proposal_id,
             "step_id": step_id, "attempt": attempt, "outcome": outcome, "note": note}
+
+
+class FakeAxis:
+    def __init__(self, lo, hi, n):
+        self.lo, self.hi, self.n = lo, hi, n
+
+    def GetXmin(self):
+        return self.lo
+
+    def GetXmax(self):
+        return self.hi
+
+    def GetNbins(self):
+        return self.n
+
+
+class FakeTH2:
+    """A TH2D stand-in on a numpy array, values[ix, iy] = content of bin
+    (ix + 1, iy + 1): the calls serialise_hist, inline_maps, read_inline_maps
+    and combine_files make."""
+
+    def __init__(self, values, xrange, yrange, name="h"):
+        import numpy as np
+        self.values = np.array(values, dtype=float)
+        self.xrange, self.yrange, self.name = tuple(xrange), tuple(yrange), name
+        self.scaled = None
+
+    @classmethod
+    def blob(cls, nx, ny, xrange, yrange, at, counts=1000.0, name="h"):
+        """All `counts` in the bin containing the point `at` = (x, y)."""
+        import numpy as np
+        values = np.zeros((nx, ny))
+        ix = int((at[0] - xrange[0]) / (xrange[1] - xrange[0]) * nx)
+        iy = int((at[1] - yrange[0]) / (yrange[1] - yrange[0]) * ny)
+        values[ix, iy] = counts
+        return cls(values, xrange, yrange, name)
+
+    def __bool__(self):
+        return True
+
+    def InheritsFrom(self, name):
+        return name in ("TH1", "TH2")
+
+    def IsA(self):
+        return type("Cls", (), {"GetName": lambda _self: "TH2D"})()
+
+    def GetName(self):
+        return self.name
+
+    def GetNbinsX(self):
+        return self.values.shape[0]
+
+    def GetNbinsY(self):
+        return self.values.shape[1]
+
+    def GetXaxis(self):
+        return FakeAxis(*self.xrange, self.values.shape[0])
+
+    def GetYaxis(self):
+        return FakeAxis(*self.yrange, self.values.shape[1])
+
+    def GetBinContent(self, ix, iy):
+        return self.values[ix - 1, iy - 1]
+
+    def RebinX(self, k):
+        nx, ny = self.values.shape
+        self.values = self.values.reshape(nx // k, k, ny).sum(axis=1)
+
+    def RebinY(self, k):
+        nx, ny = self.values.shape
+        self.values = self.values.reshape(nx, ny // k, k).sum(axis=2)
+
+    def Clone(self, name=None):
+        return FakeTH2(self.values.copy(), self.xrange, self.yrange, name or self.name)
+
+    def SetDirectory(self, d):
+        pass
+
+    def Add(self, other):
+        self.values = self.values + other.values
+
+    def Integral(self):
+        return float(self.values.sum())
+
+    def Scale(self, factor):
+        self.scaled = factor
+        self.values = self.values * factor
+
+
+class FakeRootFile:
+    def __init__(self, objects):
+        self.objects = objects
+
+    def __bool__(self):
+        return True
+
+    def IsZombie(self):
+        return False
+
+    def Get(self, name):
+        return self.objects.get(name)
+
+    def Close(self):
+        pass
+
+
+def fake_root(files):
+    """A module standing in for ROOT whose TFile.Open(path) serves `files`
+    ({path: {object name: object}})."""
+    import types
+    root = types.ModuleType("ROOT")
+    root.TFile = types.SimpleNamespace(Open=lambda path, *mode: FakeRootFile(files.get(str(path), {})))
+    return root

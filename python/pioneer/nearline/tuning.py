@@ -186,6 +186,37 @@ def read_beamline_header_uproot(path):
         }
 
 
+def read_inline_maps(paths, names=None):
+    """``measurement.inline`` (maps + axes, see miniTwinInterface.inline_maps)
+    from the MuPix maps summed over the subrun files `paths` (local paths).
+    Needs ROOT, imported here; every file must bin each map the same way."""
+    import ROOT
+    from pioneer.nearline.miniTwinInterface import inline_maps, miniTwin_histograms, hist_ranges
+
+    names = list(names or miniTwin_histograms)
+    total = [None] * len(names)
+    for path in paths:
+        aFile = ROOT.TFile.Open(str(path))
+        if not aFile or aFile.IsZombie():
+            raise OSError("cannot open %s" % path)
+        try:
+            for i, name in enumerate(names):
+                hist = aFile.Get(name)
+                if not hist:
+                    raise KeyError("%s has no %s" % (path, name))
+                if total[i] is None:
+                    total[i] = hist.Clone("tuning_sum_%d" % i)
+                    total[i].SetDirectory(0)
+                    continue
+                if (hist.GetNbinsX(), hist.GetNbinsY()) != (total[i].GetNbinsX(), total[i].GetNbinsY()) \
+                        or hist_ranges(hist) != hist_ranges(total[i]):
+                    raise ValueError("%s: %s is binned differently from %s" % (path, name, paths[0]))
+                total[i].Add(hist)
+        finally:
+            aFile.Close()
+    return inline_maps(total)
+
+
 def hist_files(db, run_ids, output_path):
     """Per-subrun histogram files of `run_ids` (run database ids).
 
@@ -375,7 +406,7 @@ class TuningLoop:
     """
 
     def __init__(self, db, mt, odb, message=None, header_reader=read_beamline_header,
-                 clock=time.time):
+                 clock=time.time, maps_reader=read_inline_maps):
         self.db = db
         self.mt = mt
         self.odb = odb
@@ -383,6 +414,8 @@ class TuningLoop:
         self._message = message or (lambda msg, is_error=False: print(msg))
         #: path -> beam header dict; tests replace it, the default needs ROOT
         self.header_reader = header_reader
+        #: local subrun paths -> measurement.inline (or None); the default needs ROOT
+        self.maps_reader = maps_reader
         #: the step whose run is being taken (see STATE_DEFAULTS), or None
         self.active = None
         self._watermark_error = False
@@ -678,8 +711,9 @@ class TuningLoop:
 
     def context_parts(self, run_ids):
         """Everything a context of `run_ids` (run database ids) is made of:
-        ``(context_id, remote file paths, MIDAS run numbers, beam header)``.
-        The header is read from the first subrun's file on this machine."""
+        ``(context_id, remote file paths, MIDAS run numbers, beam header,
+        inline maps or None)``.  The header is read from the first subrun's
+        file on this machine, the maps summed over all of them."""
         files, skipped, numbers = hist_files(self.db, run_ids, self.output_path)
         for local, status in skipped:
             self.message("Tuning: leaving out %s (file status %s)" % (local, status))
@@ -696,12 +730,24 @@ class TuningLoop:
             remote.append(path)
         header = self.header_reader(files[0]["local"])
         context_id = "_".join("run%05d" % n for n in numbers)
-        return context_id, remote, numbers, header
+        inline = self.inline_maps([f["local"] for f in files], context_id)
+        return context_id, remote, numbers, header, inline
+
+    def inline_maps(self, local_paths, context_id):
+        """The maps to send inline, or None -- a context is never lost over
+        them: when they cannot be read it goes out with its files only."""
+        try:
+            return self.maps_reader(local_paths)
+        except Exception as exc:                       # noqa: BLE001 -- display artefact only
+            self.message("Tuning warning: maps of %s not sent inline (files only): %s"
+                         % (context_id, exc))
+            return None
 
     def build_context(self, run_ids, step=None):
         """The context of `run_ids` as it would be posted; nothing is sent."""
-        context_id, files, numbers, header = self.context_parts(run_ids)
-        return self.mt.BuildContextFiles(context_id, files, numbers, header, step=step)
+        context_id, files, numbers, header, inline = self.context_parts(run_ids)
+        return self.mt.BuildContextFiles(context_id, files, numbers, header, step=step,
+                                         inline=inline)
 
     def post_runs(self, run_ids, step=None, seq_id=None, require_delivery=False):
         """Build the context of `run_ids` and post it through the retry queue.
@@ -710,8 +756,9 @@ class TuningLoop:
         both stay open.  Raises ContextRejected when the service refused it
         for good.  With `require_delivery` (the CLI, which has no later
         retry) raise when the service did not take it, and drop it."""
-        context_id, files, numbers, header = self.context_parts(run_ids)
-        context = self.mt.BuildContextFiles(context_id, files, numbers, header, step=step)
+        context_id, files, numbers, header, inline = self.context_parts(run_ids)
+        context = self.mt.BuildContextFiles(context_id, files, numbers, header, step=step,
+                                            inline=inline)
         self._rejected.pop(context_id, None)
         self._inflight[context_id] = {"seq_id": seq_id, "step": step}
         self.mt.Enqueue(context)
@@ -1008,7 +1055,7 @@ def _print_json(obj):
     print(json.dumps(obj, indent=2, default=str))
 
 
-def main(argv=None, db=None, odb=None, http=None, header_reader=None):
+def main(argv=None, db=None, odb=None, http=None, header_reader=None, maps_reader=None):
     """The command line.  `db`, `odb`, `http` and `header_reader` replace the
     real run database, MIDAS client, service client and ROOT header reader
     (the tests use them)."""
@@ -1037,7 +1084,8 @@ def main(argv=None, db=None, odb=None, http=None, header_reader=None):
             print(("ERROR: " if is_error else "") + text)
 
         loop = TuningLoop(db, mt, odb, message=message,
-                          header_reader=header_reader or read_beamline_header)
+                          header_reader=header_reader or read_beamline_header,
+                          maps_reader=maps_reader or read_inline_maps)
         # a one-off override, not written to the ODB
         loop.output_override = args.output_path
         loop.restore()
