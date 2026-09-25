@@ -697,6 +697,21 @@ warning. The result goes into the `scheduled` report as `reply`
 (`expected`, `got`, `outcome`, `ok`) and into `schedule --dry-run`. It never
 stops a proposal from being scheduled: the service decides what runs next.
 
+**Exposure:** every context carries `measurement.exposure`, so the service can
+normalise rates by run time when the SMA proton current is empty:
+`{"seconds", "wd_events", "per_run": [{"run", "seconds", "wd_events", "bor",
+"eor"}], "source": {"seconds", "wd_events"}}`. A run's `bor`/`eor` (ISO UTC)
+are the earliest BOR and latest EOR rows of `logs.slow_control` in the run
+database, the ones the run database page shows, and its `seconds` is their
+difference; the total `seconds` is the sum over the context's runs, null when
+any run lacks either row. `wd_events` is
+`/Equipment/WDWaveforms/Statistics/Events sent` as the daemon reads it in its
+stop transition, stored for the active step's run in `/Nearline/MiniTwin/Active
+step/Events at EOR`; it is given for a context of one run only, and not taken
+from the run database, whose `requested_events` is the request, not the count.
+What cannot be known is null, with one MIDAS message; the context is posted
+regardless.
+
 **Pause:** set `/Nearline/config/MiniTwin enable` to `n`. It is read every
 iteration: the daemon stops asking for proposals and reports `paused` once. A
 run already scheduled is still taken and its context still posted. Set it back
@@ -742,8 +757,9 @@ recognises a repeated context by its id.
 | `/Nearline/MiniTwin/Active step/Proposal id` | `0` | proposal of the run in flight; `0` = none |
 | `/Nearline/MiniTwin/Active step/Step id`, `Attempt`, `Plan` | `""`, `-1`, `""` | the proposal's plan step; empty / `-1` = not known |
 | `/Nearline/MiniTwin/Active step/Seq id` | `0` | the run-database sequence of the run in flight |
+| `/Nearline/MiniTwin/Active step/Events at EOR` | `-1` | WaveDREAM events sent at the end of the step's run, for `measurement.exposure`; `-1` = not known (reset with every new step) |
 | `/Nearline/MiniTwin/Last context id` | `""` | context id of the last context the service took |
-| `/Nearline/MiniTwin/Pending/<seq id>/Proposal id`, `Step id`, `Attempt`, `Plan` | — | the step a claimed sequence belongs to, until its context is delivered |
+| `/Nearline/MiniTwin/Pending/<seq id>/Proposal id`, `Step id`, `Attempt`, `Plan`, `Events at EOR` | — | the step a claimed sequence belongs to, until its context is delivered |
 
 The keys this loop added are created with their defaults when the daemon
 starts and are never overwritten.
