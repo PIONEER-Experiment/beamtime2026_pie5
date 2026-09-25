@@ -2337,3 +2337,46 @@ def test_exposure_of_unknown_runs_is_none():
     loop, db, _, messages = make_loop()
     assert loop.exposure_of([12345]) is None
     assert [m for m, e in messages if "exposure" in m]
+
+
+# -- the scratch-database guards in conftest.py (no database touched) ---------
+
+@pytest.mark.parametrize("dsn", [
+    "dbname=pioneer_rundb_test",
+    "host=localhost dbname=pioneer_rundb_test",
+    "host=127.0.0.1 port=5432 dbname=pioneer_rundb_test",
+    "host=::1 dbname=pioneer_rundb_test",
+    "host=/var/run/postgresql dbname=pioneer_rundb_test",
+    "postgresql://u:p@localhost/pioneer_rundb_test",
+])
+def test_scratch_dsn_on_the_local_default_port_is_refused(dsn):
+    from conftest import local_default_port_refusal
+    assert "live run database" in local_default_port_refusal(dsn, environ={})
+    assert local_default_port_refusal(dsn, environ={"PIONEER_RUNDB_TEST_I_KNOW": "1"}) is None
+    assert "live run database" in local_default_port_refusal(
+        dsn, environ={"PIONEER_RUNDB_TEST_I_KNOW": "yes"})
+
+
+@pytest.mark.parametrize("dsn", [
+    "host=localhost port=55432 dbname=pioneer_rundb_test",
+    "host=scratch-pg port=5432 dbname=pioneer_rundb_test",
+])
+def test_scratch_dsn_elsewhere_is_allowed(dsn):
+    from conftest import local_default_port_refusal
+    assert local_default_port_refusal(dsn, environ={}) is None
+
+
+def test_a_server_with_the_live_database_is_refused():
+    from conftest import live_database_refusal
+
+    class Conn:
+        def __init__(self, names):
+            self.names = names
+
+        def execute(self, sql, params):
+            assert "pg_database" in sql
+            found = params[0] in self.names
+            return types.SimpleNamespace(fetchone=lambda: (1,) if found else None)
+
+    assert "'pioneer'" in live_database_refusal(Conn({"postgres", "pioneer"}))
+    assert live_database_refusal(Conn({"postgres", "pioneer_rundb_test"})) is None

@@ -9,6 +9,12 @@ refused rather than obeyed.
 
 Without that variable every database test skips, which is what happens when
 the test suite is run on a machine with no scratch Postgres.
+
+Two more guards before anything is dropped, because on the development
+laptop localhost:5432 is an ssh tunnel to the live run database: a server
+that has a database called `pioneer` (the live one's name) is refused, and
+so is the default port 5432 on this machine unless
+`PIONEER_RUNDB_TEST_I_KNOW=1` says the server there is a scratch one.
 """
 
 import os
@@ -29,6 +35,44 @@ if str(PACKAGE_DIR) not in sys.path:
 
 # The only database name these tests will touch.
 TEST_DB_NAME = "pioneer_rundb_test"
+
+# The live run database's name (pioneer.rundb.config.DB_NAME): a server that
+# has it is never a scratch server.
+LIVE_DB_NAME = "pioneer"
+
+# Set to 1 to allow a scratch server on the default port of this machine.
+I_KNOW_VAR = "PIONEER_RUNDB_TEST_I_KNOW"
+
+_LOCAL_HOSTS = {"", "localhost", "127.0.0.1", "::1"}
+
+
+def local_default_port_refusal(dsn, environ=None):
+    """Why `dsn` may not be used, or None: it points at port 5432 on this
+    machine (no host, a Unix socket, localhost, 127.0.0.1 or ::1; no port
+    means 5432) and $PIONEER_RUNDB_TEST_I_KNOW is not 1."""
+    import psycopg
+
+    environ = os.environ if environ is None else environ
+    params = psycopg.conninfo.conninfo_to_dict(dsn)
+    host = str(params.get("host") or params.get("hostaddr") or "")
+    port = str(params.get("port") or "5432")
+    local = host in _LOCAL_HOSTS or host.startswith("/")
+    if local and port == "5432" and environ.get(I_KNOW_VAR) != "1":
+        return ("$PIONEER_RUNDB_TEST_DSN points at port 5432 on this machine, which may be the "
+                "tunnel to the live run database; use another port for the scratch server, or "
+                "set %s=1 if you are sure it is a scratch one" % I_KNOW_VAR)
+    return None
+
+
+def live_database_refusal(conn):
+    """Why the server `conn` is connected to may not be used, or None: it
+    has a database named LIVE_DB_NAME."""
+    row = conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (LIVE_DB_NAME,)).fetchone()
+    if row is not None:
+        return ("the server $PIONEER_RUNDB_TEST_DSN names has a database called %r, like the "
+                "live run database; these tests drop and rebuild databases and refuse to run "
+                "there" % LIVE_DB_NAME)
+    return None
 
 SCHEMA_FILE = PACKAGE_DIR / "pioneer" / "rundb" / "db_config.sql"
 
@@ -76,7 +120,13 @@ def fresh_db(scratch_dsn):
     params = psycopg.conninfo.conninfo_to_dict(scratch_dsn)
     admin_dsn = psycopg.conninfo.make_conninfo(scratch_dsn, dbname="postgres")
 
+    refusal = local_default_port_refusal(scratch_dsn)
+    if refusal:
+        pytest.fail(refusal)
     with psycopg.connect(admin_dsn, autocommit=True) as conn:
+        refusal = live_database_refusal(conn)
+        if refusal:
+            pytest.fail(refusal)
         conn.execute(f'DROP DATABASE IF EXISTS "{TEST_DB_NAME}" WITH (FORCE)')
         conn.execute(f'CREATE DATABASE "{TEST_DB_NAME}"')
 
