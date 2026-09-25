@@ -417,12 +417,27 @@ class TuningLoop:
         return enabled
 
     def context_delivered(self, context):
-        """The service took `context`: remember its id for the next reply check."""
-        self._inflight.pop(context.get("context_id"), None)
+        """The service took `context` (accepted or already known).  Only now
+        is its sequence DONE and its step closed: a context still in the
+        queue keeps both open, so a restart posts it again (resume_claimed).
+        Its id is kept for the next reply check."""
+        context_id = context.get("context_id")
+        info = self._inflight.pop(context_id, None) or {}
         try:
-            self.odb.odb_set(ODB_STATE + "/Last context id", str(context.get("context_id") or ""))
+            self.odb.odb_set(ODB_STATE + "/Last context id", str(context_id or ""))
         except Exception as exc:                       # noqa: BLE001 -- never into the queue
             self.message("Tuning: could not store the last context id: %s" % exc)
+        seq_id, step = info.get("seq_id"), info.get("step")
+        if seq_id:
+            try:
+                self.db.update_status("run_sequence", seq_id, "DONE")
+            except Exception as exc:                   # noqa: BLE001 -- never into the queue
+                self.message("Tuning: context %s delivered, but sequence %s could not be set DONE: %s"
+                             % (context_id, seq_id, exc), is_error=True)
+        if step is not None:
+            self._report_final(step, "posted", "context %s delivered" % context_id)
+            if self.active and self.active.get("proposal_id") == step.get("proposal_id"):
+                self.set_active(None)
 
     def context_rejected(self, context, exc):
         """The service refused `context` for good (a 4xx about its body): it
@@ -604,10 +619,11 @@ class TuningLoop:
 
     def post_runs(self, run_ids, step=None, seq_id=None, require_delivery=False):
         """Build the context of `run_ids` and post it through the retry queue.
-        With `step` (the active one), report `posted` and clear the step.
-        Raises ContextRejected when the service refused it for good.
-        With `require_delivery` (the CLI, which has no later retry) raise
-        when the service did not take it, leaving the step as it was."""
+        Once the service took it, `seq_id` is set DONE and `step` (the active
+        one) reported `posted` and closed (context_delivered); until then
+        both stay open.  Raises ContextRejected when the service refused it
+        for good.  With `require_delivery` (the CLI, which has no later
+        retry) raise when the service did not take it, and drop it."""
         context_id, files, numbers, header = self.context_parts(run_ids)
         context = self.mt.BuildContextFiles(context_id, files, numbers, header, step=step)
         self._rejected.pop(context_id, None)
@@ -616,18 +632,21 @@ class TuningLoop:
         if context_id in self._rejected:
             raise ContextRejected("the service rejected context %s: %s"
                                   % (context_id, self._rejected.pop(context_id)))
-        if require_delivery and self.mt.pending:
+        queued = context_id in self._inflight
+        if queued and require_delivery:
+            self._inflight.pop(context_id, None)
+            self.mt.Drop(context_id)
             raise RuntimeError("the service did not take context %s" % context_id)
-        if step is not None:
-            queued = self.mt.pending > 0
-            self._report_final(step, "posted", "context %s %s" % (
-                context_id, "queued, service not reachable yet" if queued else "delivered"))
-            self.set_active(None)
+        if queued:
+            self.message("Tuning: context %s queued, the service did not take it yet; "
+                         "sequence %s stays CLAIMED until it does" % (context_id, seq_id))
         return context
 
     def post_sequence(self, seq_id):
-        """Post the context of a finished `mt_add` sequence, then mark the
-        sequence DONE, or FAILED with a MIDAS error message if that raised."""
+        """Post the context of a finished `mt_add` sequence.  The sequence
+        becomes DONE when the service took it, FAILED with a MIDAS error
+        message when it could not be built or was refused, and stays CLAIMED
+        while it waits in the queue."""
         step = self.step_for_sequence(seq_id)
         try:
             run_ids = self.db.get_all_runs_in_sequence(seq_id)
@@ -642,8 +661,28 @@ class TuningLoop:
                 self._report_final(step, "failed", "context not posted: %s" % exc)
             self.db.update_status("run_sequence", seq_id, "FAILED")
             return None
-        self.db.update_status("run_sequence", seq_id, "DONE")
         return context
+
+    def resume_claimed(self):
+        """At daemon start-up: post again every `mt_add` sequence left
+        CLAIMED -- its context was still queued (the queue lives in memory)
+        or never built when the daemon stopped.  The service recognises a
+        context it already has by its id, so a repeat is harmless.  Returns
+        the sequence ids; never raises."""
+        try:
+            claimed = [s for s in self.db.find_sequences("CLAIMED", limit=100)
+                       if "mt_add" in (s.get("on_complete") or "").split()
+                       and "merge" not in (s.get("on_complete") or "").split()]
+        except Exception as exc:                       # noqa: BLE001 -- start-up must go on
+            self.message("Tuning: could not look for CLAIMED sequences: %s" % exc, is_error=True)
+            return []
+        for seq in claimed:
+            self.message("Tuning: sequence %d was left CLAIMED; posting it again" % seq["id"])
+            try:
+                self.post_sequence(seq["id"])
+            except Exception as exc:                   # noqa: BLE001
+                self.message("Tuning: sequence %d not posted: %s" % (seq["id"], exc), is_error=True)
+        return [seq["id"] for seq in claimed]
 
     # -- DAQ progress reports ----------------------------------------------
 
@@ -926,13 +965,13 @@ def _cmd_post(args, loop, db):
             print("dry run: would send (nothing sent)")
             _print_json(context)
             return 0
-        context = loop.post_runs([run_id], step=step, require_delivery=True)
+        # with the step, its sequence is set DONE on delivery, so the daemon
+        # does not post it again
+        context = loop.post_runs([run_id], step=step, require_delivery=True,
+                                 seq_id=step.get("seq_id") if step else None)
     except Exception as exc:                           # noqa: BLE001 -- a shifter reads this
         print("ERROR: run %d not posted: %s" % (args.run, exc))
         return 2
-    if step is not None and step.get("seq_id"):
-        # the daemon must not post this sequence again
-        db.update_status("run_sequence", step["seq_id"], "DONE")
     print("posted context %s with %d file(s)" % (context["context_id"],
                                                    len(context["measurement"]["files"])))
     return 0

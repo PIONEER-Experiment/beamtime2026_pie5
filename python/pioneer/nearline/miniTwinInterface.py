@@ -268,6 +268,13 @@ class miniTwinInterface:
                 self._daq_muted_until = time.time() + self._breaker_cooldown_s
             return False
 
+    def Drop(self, context_id):                        # noqa: N802
+        """Take a queued context out of the queue again (the CLI, which
+        cannot retry later)."""
+        kept = [c for c in self._pending if c.get("context_id") != context_id]
+        self._pending.clear()
+        self._pending.extend(kept)
+
     def Flush(self):                                   # noqa: N802
         """Retry queued contexts without asking for a proposal.  Never raises."""
         try:

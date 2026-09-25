@@ -148,8 +148,10 @@ class NearlineDaemon:
             odb = self.client,
             message = self.message
         )
-        # last proposal id and the step in flight survive a restart
+        # last proposal id and the step in flight survive a restart, and a
+        # context that was still queued when the daemon stopped is sent again
         self.tuning.restore()
+        self.tuning.resume_claimed()
         self.minitwin_enabled = self.tuning.refresh_enable()
 
 

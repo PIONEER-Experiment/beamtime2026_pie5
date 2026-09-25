@@ -290,11 +290,13 @@ def test_post_sequence_with_the_service_down_queues_the_context():
     loop, _, _, _ = make_loop(db=db, mt=mt)
     loop.post_sequence(57)
     assert mt.pending == 1
-    assert db.sequences[57]["status"] == "DONE"
+    # not DONE until the service took it
+    assert db.sequences[57]["status"] == "CLAIMED"
     http.fail = False
     mt._muted_until = 0.0
     mt._flush()
     assert mt.pending == 0 and len(http.contexts) == 1
+    assert db.sequences[57]["status"] == "DONE"
 
 
 # -- A3: persistence and the pause switch ------------------------------------
@@ -991,3 +993,52 @@ def test_non_finite_header_values_are_refused():
     header = dict(HEADER, measured=[float("nan")] + HEADER["measured"][1:])
     with pytest.raises(ValueError, match="non-finite"):
         knobs_from_header(header)
+
+
+# -- review blocker 2: a queued context must survive a restart -----------------
+
+def test_a_queued_context_keeps_its_sequence_and_step_open():
+    loop, db, odb, http, _ = loop_with_service([proposal(5)])
+    seq_id = finished_step(loop, db, 604)
+    db.sequences[seq_id]["status"] = "CLAIMED"
+    http.fail = True
+    loop.post_sequence(seq_id)
+    assert db.sequences[seq_id]["status"] == "CLAIMED"
+    assert loop.active["proposal_id"] == 5
+    assert odb.values["/Nearline/MiniTwin/Active step/Proposal id"] == 5
+    assert not [r for r in http.daq if r["stage"] == "posted"]
+    # delivered later by the same process: closed then
+    http.fail = False
+    loop.mt._muted_until = 0.0
+    loop.mt.Flush()
+    assert db.sequences[seq_id]["status"] == "DONE"
+    assert loop.active is None
+    assert http.daq[-1]["stage"] == "posted"
+
+
+def test_a_restart_posts_a_claimed_sequence_again_with_its_step():
+    loop, db, odb, http, _ = loop_with_service([proposal(5)])
+    seq_id = finished_step(loop, db, 604)
+    db.sequences[seq_id]["status"] = "CLAIMED"
+    http.fail = True
+    loop.post_sequence(seq_id)
+    # the daemon stops with the context in its in-memory queue
+    del loop
+
+    loop2, _, _, http2, _ = loop_with_service([], odb=odb, db=db)
+    assert loop2.resume_claimed() == [seq_id]
+    (context,) = http2.contexts
+    assert context["context_id"] == "run00604"
+    assert context["responds_to"] == {"proposal_id": 5}
+    assert db.sequences[seq_id]["status"] == "DONE"
+    assert loop2.active is None
+
+
+def test_resume_claimed_leaves_other_sequences_alone():
+    loop, db, odb, http, _ = loop_with_service([])
+    db.add_run(604, subruns=1, seq_id=57)
+    db.sequences[57]["on_complete"] = "merge mt_add"
+    db.add_run(605, subruns=1, seq_id=58)
+    db.sequences[58]["status"] = "DONE"
+    assert loop.resume_claimed() == []
+    assert http.contexts == []

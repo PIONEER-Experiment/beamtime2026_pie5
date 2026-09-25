@@ -629,9 +629,14 @@ daemon calls it and the command line above runs the same functions.
    knobs (Demand) and readback (Measured) of the type 1/4/5 channels in the
    first subrun's `beamline` header; the step (`responds_to`, `step_id`,
    `attempt`, `plan`) when the sequence is the one the active step was
-   scheduled in. The sequence is then `DONE`, or `FAILED` with a MIDAS error
-   message when the context could not be built. A context the service does not
-   take stays queued in the daemon and is retried.
+   scheduled in. The sequence becomes `DONE` and the step is closed only once
+   the service has taken the context. A context the service cannot be reached
+   for stays queued in the daemon and is retried, with the sequence left
+   `CLAIMED`; the queue is in memory, so a restarted daemon posts every
+   `CLAIMED` `mt_add` sequence again (the service recognises a repeat by its
+   context id). A context the service refuses (a 4xx about its content) is
+   dropped: the sequence is `FAILED`, with a MIDAS error and a `failed`
+   report. So is a context that could not be built.
 4. **Progress is reported.** While a step is active the daemon posts
    `beamtune.daq/v1` reports to `POST /v1/daq`, at most every 10 s and only
    when something changed: `scheduled`, `running` (events sent / requested),

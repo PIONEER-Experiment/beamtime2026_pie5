@@ -78,6 +78,15 @@ class FakeDb:
                                   "runs": list(run_ids)}
         return seq_id
 
+    def find_sequences(self, status, limit=1):
+        found = [dict(s, id=i) for i, s in sorted(self.sequences.items()) if s["status"] == status]
+        return found[:limit]
+
+    def get_sequence_entry(self, id):
+        seq = self.sequences.get(id)
+        return None if seq is None else {"id": id, "status": seq["status"],
+                                         "on_complete": seq["on_complete"]}
+
     def get_all_runs_in_sequence(self, id):
         return list(self.sequences.get(id, {}).get("runs", []))
 
