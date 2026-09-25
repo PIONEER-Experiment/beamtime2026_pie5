@@ -700,16 +700,25 @@ stops a proposal from being scheduled: the service decides what runs next.
 **Exposure:** every context carries `measurement.exposure`, so the service can
 normalise rates by run time when the SMA proton current is empty:
 `{"seconds", "wd_events", "per_run": [{"run", "seconds", "wd_events", "bor",
-"eor"}], "source": {"seconds", "wd_events"}}`. A run's `bor`/`eor` (ISO UTC)
-are the earliest BOR and latest EOR rows of `logs.slow_control` in the run
-database, the ones the run database page shows, and its `seconds` is their
-difference; the total `seconds` is the sum over the context's runs, null when
-any run lacks either row. `wd_events` is
-`/Equipment/WDWaveforms/Statistics/Events sent` as the daemon reads it in its
-stop transition, stored for the active step's run in `/Nearline/MiniTwin/Active
-step/Events at EOR`; it is given for a context of one run only, and not taken
-from the run database, whose `requested_events` is the request, not the count.
-What cannot be known is null, with one MIDAS message; the context is posted
+"eor", "time_source", "complete"}], "source": {"seconds", "wd_events"}}`. The
+daemon records the active step's run in its own transitions: at the start
+(sequence 600, after the frontends reset their statistics at 500)
+`/Runinfo/Start time binary` and `/Equipment/WDWaveforms/Statistics/Events
+sent`, at the stop (sequence 900) `/Runinfo/Stop time binary` and the same
+counter, under `/Nearline/MiniTwin/Active step/` (keys below). A run's
+`seconds` is stop minus start, from begin to end of run, so it includes any
+time the run was paused; `wd_events` is the counter at stop minus at start;
+`time_source` is `odb`. Only a run the daemon did not record (it was down at
+a transition, or `post --run N` of an older run) takes its times from the
+earliest BOR and latest EOR rows of `logs.slow_control` in the run database
+(`time_source` `run_db`), with no events; that table has no index on the
+live database, so the lookup is cancelled after 5 s (the index on
+`(midas_run_number, reason)` in `rundb/db_viewer.sql` would make it fast).
+A run with subrun files left out of the context has `complete` false and
+null `seconds` and `wd_events`, so the exposure only describes data in the
+histograms. A value that is missing, not positive seconds, or a counter that
+went down is null, and a total over runs with a null is null; what is
+missing is said in one MIDAS info message and the context is posted
 regardless.
 
 **Pause:** set `/Nearline/config/MiniTwin enable` to `n`. It is read every
@@ -757,9 +766,11 @@ recognises a repeated context by its id.
 | `/Nearline/MiniTwin/Active step/Proposal id` | `0` | proposal of the run in flight; `0` = none |
 | `/Nearline/MiniTwin/Active step/Step id`, `Attempt`, `Plan` | `""`, `-1`, `""` | the proposal's plan step; empty / `-1` = not known |
 | `/Nearline/MiniTwin/Active step/Seq id` | `0` | the run-database sequence of the run in flight |
-| `/Nearline/MiniTwin/Active step/Events at EOR` | `-1` | WaveDREAM events sent at the end of the step's run, for `measurement.exposure`; `-1` = not known (reset with every new step) |
+| `/Nearline/MiniTwin/Active step/Recorded run` | `0` | MIDAS run the next four keys belong to; `0` = none. All five are reset with every new step |
+| `/Nearline/MiniTwin/Active step/Run start`, `Run stop` | `0.0`, `0.0` | Unix time of the run's start and stop transitions (`/Runinfo/Start`, `Stop time binary`); `0` = not known |
+| `/Nearline/MiniTwin/Active step/Events at BOR`, `Events at EOR` | `-1`, `-1` | WaveDREAM events sent at the start (after the reset) and at the stop; `-1` = not known |
 | `/Nearline/MiniTwin/Last context id` | `""` | context id of the last context the service took |
-| `/Nearline/MiniTwin/Pending/<seq id>/Proposal id`, `Step id`, `Attempt`, `Plan`, `Events at EOR` | — | the step a claimed sequence belongs to, until its context is delivered |
+| `/Nearline/MiniTwin/Pending/<seq id>/Proposal id`, `Step id`, `Attempt`, `Plan`, `Recorded run`, `Run start`, `Run stop`, `Events at BOR`, `Events at EOR` | — | the step a claimed sequence belongs to, until its context is delivered |
 
 The keys this loop added are created with their defaults when the daemon
 starts and are never overwritten.
