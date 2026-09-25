@@ -31,6 +31,20 @@ CONFIG_DEFAULTS = {
     "MiniTwin remote prefix": "/home/pioneer/nearline/histograms/",
 }
 
+#: The loop's memory, under /Nearline/MiniTwin: the newest proposal id seen
+#: and the step whose run is being taken.  Restored at start-up, so a restart
+#: never schedules the outstanding proposal again.  Proposal id 0 means no
+#: active step; an empty string or attempt -1 means "not known".
+ODB_STATE = "/Nearline/MiniTwin"
+STATE_DEFAULTS = {
+    "Last proposal id": 0,
+    "Active step/Proposal id": 0,
+    "Active step/Step id": "",
+    "Active step/Attempt": -1,
+    "Active step/Plan": "",
+    "Active step/Seq id": 0,
+}
+
 #: the daemon's own /Nearline/config/Output path default
 DEFAULT_OUTPUT_PATH = "/home/pinky/nearline"
 
@@ -41,10 +55,45 @@ FINAL_EVENTS = 1e7
 
 def ensure_odb_keys(odb):
     """Create the keys this module reads, with their defaults, if missing."""
-    for key, default in CONFIG_DEFAULTS.items():
-        path = ODB_CONFIG + "/" + key
-        if not odb.odb_exists(path):
-            odb.odb_set(path, default)
+    for base, defaults in ((ODB_CONFIG, CONFIG_DEFAULTS), (ODB_STATE, STATE_DEFAULTS)):
+        for key, default in defaults.items():
+            path = base + "/" + key
+            if not odb.odb_exists(path):
+                odb.odb_set(path, default)
+
+
+def load_state(odb):
+    """``(last proposal id, active step or None)`` from /Nearline/MiniTwin."""
+    def get(key):
+        return odb_value(odb, ODB_STATE + "/" + key, STATE_DEFAULTS[key])
+    last_id = int(get("Last proposal id") or 0)
+    proposal_id = int(get("Active step/Proposal id") or 0)
+    if proposal_id <= 0:
+        return last_id, None
+    attempt = int(get("Active step/Attempt"))
+    step = {
+        "proposal_id": proposal_id,
+        "step_id": str(get("Active step/Step id")) or None,
+        "attempt": attempt if attempt >= 0 else None,
+        "plan": str(get("Active step/Plan")) or None,
+        "seq_id": int(get("Active step/Seq id") or 0) or None,
+    }
+    return last_id, step
+
+
+def save_last_id(odb, last_id):
+    odb.odb_set(ODB_STATE + "/Last proposal id", int(last_id))
+
+
+def save_step(odb, step):
+    """Write the active step; None clears it."""
+    step = step or {}
+    attempt = step.get("attempt")
+    odb.odb_set(ODB_STATE + "/Active step/Proposal id", int(step.get("proposal_id") or 0))
+    odb.odb_set(ODB_STATE + "/Active step/Step id", str(step.get("step_id") or ""))
+    odb.odb_set(ODB_STATE + "/Active step/Attempt", int(attempt) if attempt is not None else -1)
+    odb.odb_set(ODB_STATE + "/Active step/Plan", str(step.get("plan") or ""))
+    odb.odb_set(ODB_STATE + "/Active step/Seq id", int(step.get("seq_id") or 0))
 
 
 def odb_value(odb, path, default):
@@ -155,6 +204,7 @@ def schedule_configs(db, configs, table, target_config, dry_run=False):
                 mrs.set_subsequence(centre_seq)
                 mrs.num_ev = ITER_EVENTS
                 entry["run_ids"] = mrs.schedule()
+                entry["seq_id"] = centre_seq.seq_id
             scheduled.append(entry)
         elif aConfig['type'] == 'final':
             entry = {
@@ -194,9 +244,40 @@ class TuningLoop:
         self.mt = mt
         self.odb = odb
         self.clock = clock
+        self._message = message or (lambda msg, is_error=False: print(msg))
         #: path -> beam header dict; tests replace it, the default needs ROOT
         self.header_reader = header_reader
-        self._message = message or (lambda msg, is_error=False: print(msg))
+        #: the step whose run is being taken (see STATE_DEFAULTS), or None
+        self.active = None
+        self._saved_last_id = 0
+        self.enabled = None
+
+    def restore(self):
+        """Take the last proposal id and the active step from the ODB, so a
+        restart neither re-schedules the outstanding proposal nor forgets
+        which step the run in flight belongs to."""
+        last_id, self.active = load_state(self.odb)
+        self.mt.last_proposal_id = last_id
+        self._saved_last_id = last_id
+        if last_id or self.active:
+            self.message("Tuning: restored last proposal id %d%s" % (
+                last_id, ", active step %s (seq %s)" % (self.active.get("step_id"), self.active.get("seq_id"))
+                if self.active else ""))
+
+    def set_active(self, step):
+        self.active = dict(step) if step else None
+        save_step(self.odb, self.active)
+
+    def refresh_enable(self):
+        """Re-read /Nearline/config/MiniTwin enable, the pause switch.
+        Returns True while the loop may poll and schedule."""
+        enabled = bool(odb_value(self.odb, ODB_CONFIG + "/MiniTwin enable", False))
+        if enabled != self.enabled:
+            if self.enabled is not None or not enabled:
+                self.message("Tuning: loop %s (MiniTwin enable = %s)"
+                             % ("resumed" if enabled else "paused", "y" if enabled else "n"))
+            self.enabled = enabled
+        return enabled
 
     def message(self, msg, is_error=False):
         try:
@@ -232,12 +313,42 @@ class TuningLoop:
     # -- proposals -> runs -------------------------------------------------
 
     def poll_and_schedule(self, dry_run=False):
-        """Ask the service for a newer proposal and schedule it."""
+        """Ask the service for a newer proposal and schedule it.
+
+        The proposal id is stored before the runs are written: a proposal
+        whose scheduling fails is reported and not retried by itself (retake
+        it with the CLI, see the README), rather than scheduled twice."""
         configs = self.mt.NextConfiguration()
+        proposal_id = self.mt.last_proposal_id
+        if not dry_run and proposal_id != self._saved_last_id:
+            save_last_id(self.odb, proposal_id)
+            self._saved_last_id = proposal_id
         if not configs:
             return []
-        return schedule_configs(self.db, configs, self.update_table,
-                                self.target_config, dry_run=dry_run)
+        hints = self.mt.last_run_hints or {}
+        scheduled = schedule_configs(self.db, configs, self.update_table,
+                                     self.target_config, dry_run=dry_run)
+        if dry_run:
+            return scheduled
+        for entry in scheduled:
+            if entry["type"] == "iter":
+                self.set_active({
+                    "proposal_id": proposal_id,
+                    "step_id": hints.get("step_id"),
+                    "attempt": hints.get("attempt"),
+                    "plan": hints.get("plan"),
+                    "seq_id": entry["seq_id"],
+                })
+                self.message("Tuning: proposal %d%s scheduled as run %s in sequence %s" % (
+                    proposal_id, " (step %s)" % hints["step_id"] if hints.get("step_id") else "",
+                    ", ".join(str(r) for r in entry["run_ids"]), entry["seq_id"]))
+        return scheduled
+
+    def step_for_sequence(self, seq_id):
+        """The active step when `seq_id` is its sequence, else None."""
+        if self.active and self.active.get("seq_id") == seq_id:
+            return dict(self.active)
+        return None
 
     # -- finished runs -> context ------------------------------------------
 
@@ -278,11 +389,14 @@ class TuningLoop:
         sequence DONE, or FAILED with a MIDAS error message if that raised."""
         try:
             run_ids = self.db.get_all_runs_in_sequence(seq_id)
-            context = self.post_runs(run_ids)
+            step = self.step_for_sequence(seq_id)
+            context = self.post_runs(run_ids, step=step)
         except Exception as exc:                       # noqa: BLE001 -- reported, sequence FAILED
             self.message("Tuning: context for sequence %d not posted: %s" % (seq_id, exc),
                          is_error=True)
             self.db.update_status("run_sequence", seq_id, "FAILED")
             return None
         self.db.update_status("run_sequence", seq_id, "DONE")
+        if step is not None:
+            self.set_active(None)
         return context

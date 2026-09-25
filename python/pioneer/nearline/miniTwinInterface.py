@@ -203,6 +203,23 @@ class miniTwinInterface:
                 "run": (dict(self._last_run) if self._last_run else None)}
 
     @property
+    def last_proposal_id(self):
+        """The newest proposal id seen; proposals up to it are not handed out."""
+        return self._last_id
+
+    @last_proposal_id.setter
+    def last_proposal_id(self, value):
+        self._last_id = int(value or 0)
+
+    def Flush(self):                                   # noqa: N802
+        """Retry queued contexts without asking for a proposal.  Never raises."""
+        try:
+            return self._flush()
+        except Exception as exc:                       # noqa: BLE001 -- never escape
+            self._log("Flush: %r" % (exc,))
+            return False
+
+    @property
     def last_run_hints(self):
         """The ``run`` annex of the proposal last handed out, or None."""
         return dict(self._last_run) if self._last_run else None

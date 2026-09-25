@@ -11,7 +11,7 @@ import pytest
 
 from pathlib import Path
 
-from tuning_fakes import FakeDb, FakeHttp, FakeOdb
+from tuning_fakes import FakeDb, FakeHttp, FakeOdb, proposal
 
 from pioneer.nearline import tuning
 
@@ -23,6 +23,8 @@ class FakeMt:
         self.configs = list(configs or [])
         self.added = []
         self.add_raises = add_raises
+        self.last_proposal_id = 0
+        self.last_run_hints = None
 
     def NextConfiguration(self):                       # noqa: N802
         configs, self.configs = self.configs, []
@@ -286,6 +288,112 @@ def test_post_sequence_with_the_service_down_queues_the_context():
     assert mt.pending == 0 and len(http.contexts) == 1
 
 
+# -- A3: persistence and the pause switch ------------------------------------
+
+def loop_with_service(proposals, odb=None, db=None):
+    http = FakeHttp(proposals)
+    odb = odb or FakeOdb({"/Nearline/config/MiniTwin updates": "pim1_epics",
+                          "/Nearline/config/MiniTwin enable": True})
+    tuning.ensure_odb_keys(odb)
+    loop, db, odb, messages = make_loop(db=db, mt=real_mt(http), odb=odb)
+    loop.restore()
+    return loop, db, odb, http, messages
+
+
+def test_schedule_keeps_the_sequence_id():
+    import pioneer.nearline.run as nl_run
+    db = FakeDb()
+    mrs = nl_run.midas_run_sequence(db, num_ev=1e6)
+    mrs.set_config_id("target_position", 2)
+    mrs.schedule()
+    assert mrs.seq_id in db.sequences
+
+
+def test_scheduling_stores_proposal_and_step_in_the_odb():
+    loop, db, odb, http, _ = loop_with_service([proposal(5)])
+    scheduled = loop.poll_and_schedule()
+    seq_id = scheduled[0]["seq_id"]
+    assert db.sequences[seq_id]["on_complete"] == "mt_add"
+    v = odb.values
+    assert v["/Nearline/MiniTwin/Last proposal id"] == 5
+    assert v["/Nearline/MiniTwin/Active step/Proposal id"] == 5
+    assert v["/Nearline/MiniTwin/Active step/Step id"] == "ASM12_90.44"
+    assert v["/Nearline/MiniTwin/Active step/Attempt"] == 0
+    assert v["/Nearline/MiniTwin/Active step/Plan"] == "quick_run00588_ASM12"
+    assert v["/Nearline/MiniTwin/Active step/Seq id"] == seq_id
+
+
+def test_a_restart_does_not_schedule_the_outstanding_proposal_again():
+    loop, db, odb, http, _ = loop_with_service([proposal(5)])
+    loop.poll_and_schedule()
+    assert len(db.runs) == 1
+
+    # a new daemon on the same ODB and run database, service unchanged
+    loop2, _, _, http2, _ = loop_with_service([proposal(5)], odb=odb, db=db)
+    assert loop2.mt.last_proposal_id == 5
+    assert loop2.active["proposal_id"] == 5
+    assert loop2.poll_and_schedule() == []
+    assert http2.since == [5]
+    assert len(db.runs) == 1
+
+
+def test_restored_step_is_posted_with_the_context_and_then_cleared():
+    loop, db, odb, http, _ = loop_with_service([proposal(5)])
+    seq_id = loop.poll_and_schedule()[0]["seq_id"]
+    (run_id,) = db.sequences[seq_id]["runs"]
+    db.runs[run_id]["midas_run_number"] = 604
+    db.files.append({"run_id": run_id, "filebase": "run00604_00000", "fileext": "root",
+                     "status": "DONE"})
+
+    loop2, _, _, http2, _ = loop_with_service([], odb=odb, db=db)
+    loop2.post_sequence(seq_id)
+    (context,) = http2.contexts
+    assert context["responds_to"] == {"proposal_id": 5}
+    assert context["provenance"]["step_id"] == "ASM12_90.44"
+    assert loop2.active is None
+    assert odb.values["/Nearline/MiniTwin/Active step/Proposal id"] == 0
+    assert odb.values["/Nearline/MiniTwin/Last proposal id"] == 5
+
+
+def test_another_sequence_is_posted_without_the_step():
+    loop, db, odb, http, _ = loop_with_service([proposal(5)])
+    loop.poll_and_schedule()
+    db.add_run(700, subruns=1, seq_id=999)
+    loop.post_sequence(999)
+    assert "responds_to" not in http.contexts[-1]
+    assert "step_id" not in http.contexts[-1]["provenance"]
+    assert loop.active["proposal_id"] == 5
+
+
+def test_a_failed_schedule_still_consumes_the_proposal():
+    odb = FakeOdb({"/Nearline/config/MiniTwin updates": "pim1_epics",
+                   "/Nearline/config/MiniTwin target config": 99})
+    loop, db, odb, http, _ = loop_with_service([proposal(5)], odb=odb)
+    with pytest.raises(RuntimeError):
+        loop.poll_and_schedule()
+    assert odb.values["/Nearline/MiniTwin/Last proposal id"] == 5
+    assert loop.active is None
+
+
+def test_dry_run_stores_nothing():
+    loop, db, odb, http, _ = loop_with_service([proposal(5)])
+    loop.poll_and_schedule(dry_run=True)
+    assert odb.values["/Nearline/MiniTwin/Last proposal id"] == 0
+    assert loop.active is None and db.runs == {}
+
+
+def test_enable_is_re_read_every_time():
+    loop, db, odb, http, messages = loop_with_service([])
+    assert loop.refresh_enable() is True
+    odb.values["/Nearline/config/MiniTwin enable"] = False
+    assert loop.refresh_enable() is False
+    assert loop.refresh_enable() is False
+    odb.values["/Nearline/config/MiniTwin enable"] = True
+    assert loop.refresh_enable() is True
+    texts = [m for m, _ in messages if "paused" in m or "resumed" in m]
+    assert len(texts) == 2
+
+
 # -- the daemon, with midas faked ----------------------------------------------
 
 @pytest.fixture
@@ -322,6 +430,28 @@ def test_daemon_mt_add_branch_posts_and_closes_the_sequence(daemon_module):
     d.build_and_dispatch_seq({"id": 57, "on_complete": "mt_add", "status": "CLAIMED"})
     assert db.sequences[57]["status"] == "DONE"
     assert len(loop.mt.added) == 1
+
+
+def test_daemon_does_not_poll_while_paused(daemon_module):
+    loop, db, odb, http, _ = loop_with_service([proposal(5)])
+    d = bare_daemon(daemon_module, loop, db, odb)
+    odb.values["/Nearline/config/MiniTwin enable"] = False
+    d.minitwin_enabled = loop.refresh_enable()
+    d.check_for_updates()
+    assert http.since == [] and db.runs == {}
+    odb.values["/Nearline/config/MiniTwin enable"] = True
+    d.minitwin_enabled = loop.refresh_enable()
+    d.check_for_updates()
+    assert http.since == [0] and len(db.runs) == 1
+
+
+def test_daemon_posts_a_finished_step_even_while_paused(daemon_module):
+    loop, db, odb, http, _ = loop_with_service([])
+    db.add_run(604, subruns=1, seq_id=57)
+    d = bare_daemon(daemon_module, loop, db, odb)
+    d.minitwin_enabled = False
+    d.build_and_dispatch_seq({"id": 57, "on_complete": "mt_add", "status": "CLAIMED"})
+    assert len(http.contexts) == 1 and db.sequences[57]["status"] == "DONE"
 
 
 def test_daemon_check_for_updates_schedules_the_centre(daemon_module):

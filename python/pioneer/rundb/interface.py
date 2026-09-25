@@ -390,7 +390,8 @@ class interface:
 
         return run_id
 
-    def register_sequence(self, run_ids : list, on_complete : str) -> bool:
+    def register_sequence(self, run_ids : list, on_complete : str) -> int:
+        """Create a sequence around `run_ids`; returns the new sequence id."""
         conn = connect(user = self.user, password = self.password)
 
         with conn.cursor() as cursor:
@@ -405,7 +406,7 @@ class interface:
                 )
         conn.commit()
         conn.close()
-        return True
+        return seq_id
 
     def find_sequences(self, status : str, limit : int = 1) -> list[dict]:
         conn = connect(user = self.user, password = self.password)

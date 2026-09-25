@@ -10,6 +10,8 @@ class midas_run_sequence:
         self.on_complete = None
         self.iface = iface
         self.num_ev = num_ev
+        # id of the sequence the last schedule() registered
+        self.seq_id = None
 
     def add_config_list(self, name : str, config : list[dict]):
         if name in self.this_sequence.keys():
@@ -56,7 +58,7 @@ class midas_run_sequence:
                         self.the_sub_sequence.num_ev = self.num_ev;
                     self.the_sub_sequence.set_config_list(k, [v])
                 run_list.extend(self.the_sub_sequence.schedule())
-        self.iface.register_sequence(run_list, self.on_complete)
+        self.seq_id = self.iface.register_sequence(run_list, self.on_complete)
         return run_list
 
 class midas_run:

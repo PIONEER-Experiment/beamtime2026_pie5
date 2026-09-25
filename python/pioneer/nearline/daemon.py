@@ -148,6 +148,9 @@ class NearlineDaemon:
             odb = self.client,
             message = self.message
         )
+        # last proposal id and the step in flight survive a restart
+        self.tuning.restore()
+        self.minitwin_enabled = self.tuning.refresh_enable()
 
 
     def message(self, msg, is_error = False, send_to_slack = False):
@@ -187,10 +190,12 @@ class NearlineDaemon:
             theJob = nl_jobs.create_job(seq_cfg, self.db_interface)
             theJob.start()
             self.sequence_queue.add(theJob)
-        elif "mt_add" in on_complete and self.minitwin_enabled:
+        elif "mt_add" in on_complete:
             # This sequence does not merge: the run's histogram files are
             # posted as they are. As this operation is fast, we'll do it
             # right here. The sequence ends up DONE, or FAILED if it raised.
+            # Posted even while "MiniTwin enable" is off: the pause stops new
+            # proposals, not the result of a run that was already taken.
             self.tuning.post_sequence(seq_cfg['id'])
 
     def communicate_with_midas(self):
@@ -205,6 +210,9 @@ class NearlineDaemon:
 
                 # Update max number of jobs in nearline queue
                 self.queues['nearline'].maxJobs = self.client.odb_get("/Nearline/config/Num parallel jobs")
+
+                # "MiniTwin enable" is the tuning loop's pause switch
+                self.minitwin_enabled = self.tuning.refresh_enable()
 
     def iterate_nearline_queues(self):
         for aQueue in self.queues.values():
@@ -237,6 +245,8 @@ class NearlineDaemon:
 
     def check_for_updates(self):
         if not self.minitwin_enabled:
+            # paused: no proposals, no scheduling; queued contexts still go out
+            self.mt_interface.Flush()
             return
         # 'iter': one run at the target config (the stage centre), posted
         # without a merge. 'final': five-point x degrader scan, merge only.
