@@ -93,23 +93,25 @@ class NearlineDaemon:
         if not self.client.odb_exists("/Nearline"):
             self.client.odb_set("/Nearline", {
                 "config" : {
-                    "Backup path" : os.environ.get("NEARLINE_BACKUP_DIR", "/home/pinky/backup"),
+                    "Backup path" : os.environ.get("NEARLINE_BACKUP_DIR", "/home/pinky/backup/pim1_epics"),
                     "Remote path" : os.environ.get("NEARLINE_REMOTE", "analysis:/home/pioneer/inbox"),
                     "Output path" : os.environ.get("NEARLINE_DIR", "/home/pinky/nearline"),
                     "Num parallel jobs" : njobs,
                     "MiniTwin URL" : "http://127.0.0.1:8420",
-                    "MiniTwin updates" : "pim1_epics"
+                    "MiniTwin updates" : "pim1_epics",
+                    "MiniTwin enable" : True
                     }
             })
         elif (args.jobs):
             self.client.odb_set("/Nearline/config/Num parallel jobs", njobs)
 
         self.queues['nearline'].maxJobs = self.client.odb_get("/Nearline/config/Num parallel jobs")
-        self.midas_logger_path    = pathlib.Path(self.client.odb_get("/Logger/Data dir"))
-        self.backup_path          = pathlib.Path(self.client.odb_get("/Nearline/config/Backup path"))
-        self.remote_path          = pathlib.Path(self.client.odb_get("/Nearline/config/Remote path"))
-        self.nearline_output_path = pathlib.Path(self.client.odb_get("/Nearline/config/Output path"))
+        self.midas_logger_path     = pathlib.Path(self.client.odb_get("/Logger/Data dir"))
+        self.backup_path           = pathlib.Path(self.client.odb_get("/Nearline/config/Backup path"))
+        self.remote_path           = pathlib.Path(self.client.odb_get("/Nearline/config/Remote path"))
+        self.nearline_output_path  = pathlib.Path(self.client.odb_get("/Nearline/config/Output path"))
         self.minitwin_update_table = self.client.odb_get("/Nearline/config/MiniTwin updates")
+        self.minitwin_enabled      = self.client.odb_get("/Nearline/config/MiniTwin enable")
 
         self.client.register_transition_callback(
             transition = midas.TR_START,
@@ -175,7 +177,7 @@ class NearlineDaemon:
             theJob = nl_jobs.create_job(seq_cfg, self.db_interface)
             theJob.start()
             self.sequence_queue.add(theJob)
-        elif "mt_add" in on_complete:
+        elif "mt_add" in on_complete and self.minitwin_enabled:
             # This sequence does not merge but adds all runs
             # As this operation is fast, we'll do it right here
             run_ids = self.db_interface.get_all_runs_in_sequence(seq_cfg['id'])
@@ -215,7 +217,7 @@ class NearlineDaemon:
         for aJob in finished_jobs:
             print("Finalising job")
             aJob.finalise()
-            if "mt_add" in aJob.config['on_complete'].split():
+            if "mt_add" in aJob.config['on_complete'].split() and self.minitwin_enabled:
                 self.mt_interface.AddContext(aJob.config['output_file'])
 
         numOpen = self.sequence_queue.getOpenSlots()
@@ -225,17 +227,19 @@ class NearlineDaemon:
                 self.build_and_dispatch_seq(seq)
 
     def check_for_updates(self):
+        if not self.minitwin_enabled:
+            return
         new_configs = self.mt_interface.NextConfiguration()
         if len(new_configs) > 0:
             for aConfig in new_configs:
                 mrs = nl_run.midas_run_sequence(self.db_interface)
                 mrs.set_config_list(self.minitwin_update_table, aConfig['currents'])
+                fiveScan = nl_run.five_point_sequence(self.db_interface)
                 if aConfig['type'] == 'iter':
-                    # default 5 point sequence triggers file merging.
-                    mrs.set_subsequence(nl_run.five_point_sequence(self.db_interface))
+                    fiveScan.set_on_complete("merge mt_add")
+                    mrs.set_subsequence(fiveScan)
                     mrs.num_ev = 1e6
                 elif aConfig['type'] == 'final':
-                    fiveScan = nl_run.five_point_sequence(self.db_interface)
                     fiveScan.set_on_complete("merge") # it shall only merge and not submit to minitwin.
                     dscan = nl_run.degrader_scan(self.db_interface)
                     dscan.set_subsequence(fiveScan)

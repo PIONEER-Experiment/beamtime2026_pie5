@@ -102,7 +102,6 @@ class midas_run:
 def five_point_sequence(iface : db_interface):
     mrs = midas_run_sequence(iface)
     mrs.set_config_seq("target_position", 2) # Default 5 point sequence is marked with sequence number 2 in the runDB
-    mrs.set_on_complete("merge mt_add")
     return mrs
 
 def degrader_scan(iface : db_interface):
