@@ -112,7 +112,7 @@ def test_target_config_comes_from_the_odb():
 def test_missing_target_config_schedules_nothing():
     odb = FakeOdb({"/Nearline/config/MiniTwin target config": 99})
     loop, db, _, _ = make_loop(mt=FakeMt([iter_config()]), odb=odb)
-    with pytest.raises(RuntimeError, match="99"):
+    with pytest.raises(tuning.ScheduleError, match="99"):
         loop.poll_and_schedule()
     assert db.runs == {} and db.sequences == {}
 
@@ -392,6 +392,223 @@ def test_enable_is_re_read_every_time():
     assert loop.refresh_enable() is True
     texts = [m for m, _ in messages if "paused" in m or "resumed" in m]
     assert len(texts) == 2
+
+
+# -- A4: DAQ progress reports -------------------------------------------------
+
+class Clock:
+    def __init__(self, t=1_790_000_000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def monitored_loop(proposals=None):
+    loop, db, odb, http, messages = loop_with_service(proposals or [proposal(5)])
+    loop.clock = Clock()
+    loop.refresh_enable()
+    return loop, db, odb, http, messages
+
+
+def test_post_daq_goes_to_v1_daq(monkeypatch):
+    import json
+    import urllib.request
+    from pioneer.nearline import beamtune_client
+
+    seen = {}
+
+    class Response:
+        status = 200
+
+        def read(self):
+            return b'{"accepted": true}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(request, timeout=None):
+        seen["url"] = request.full_url
+        seen["method"] = request.get_method()
+        seen["body"] = json.loads(request.data.decode())
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    client = beamtune_client.BeamTuneClient("http://127.0.0.1:1122")
+    report = tuning.daq_report(5, "running", step={"step_id": "ASM12_90.44"}, seq_id=57)
+    assert client.post_daq(report) == {"accepted": True}
+    assert seen["url"] == "http://127.0.0.1:1122/v1/daq"
+    assert seen["method"] == "POST"
+    assert seen["body"]["schema"] == "beamtune.daq/v1"
+    assert set(seen["body"]) == {"schema", "proposal_id", "step_id", "stage", "seq_id", "runs",
+                                 "events", "subruns", "message", "sent_utc"}
+
+
+def test_post_daq_failure_never_raises_and_trips_the_breaker():
+    mt = real_mt(FakeHttp(fail=True))
+    report = tuning.daq_report(5, "running")
+    assert [mt.PostDaq(report) for _ in range(3)] == [False, False, False]
+    assert mt.muted
+
+
+def test_progress_through_the_stages():
+    loop, db, odb, http, _ = monitored_loop()
+    seq_id = loop.poll_and_schedule()[0]["seq_id"]
+    (run_id,) = db.sequences[seq_id]["runs"]
+
+    # scheduling reports at once
+    (first,) = http.daq
+    assert first["stage"] == "scheduled" and first["proposal_id"] == 5
+    assert first["step_id"] == "ASM12_90.44" and first["seq_id"] == seq_id
+    assert first["runs"] == [{"run_db_id": run_id, "run_number": None, "status": "PENDING"}]
+    assert first["sent_utc"].endswith("Z")
+
+    # nothing changed: nothing sent, and not looked at before 10 s anyway
+    loop.clock.t += 10
+    loop.monitor()
+    assert len(http.daq) == 1
+
+    # the run starts
+    db.runs[run_id].update(status="RUNNING", midas_run_number=604)
+    odb.values["/Runinfo/Run DB PK"] = run_id
+    odb.values["/Equipment/WDWaveforms/Statistics/Events sent"] = 100000
+    loop.clock.t += 5
+    loop.monitor()
+    assert len(http.daq) == 1          # only 5 s since the last look
+    loop.clock.t += 5
+    loop.monitor()
+    assert http.daq[-1]["stage"] == "running"
+    assert http.daq[-1]["events"] == {"sent": 100000, "requested": 1000000}
+    assert http.daq[-1]["runs"][0]["run_number"] == 604
+
+    # 5 % more events: not worth a report; 10 % more: reported
+    odb.values["/Equipment/WDWaveforms/Statistics/Events sent"] = 150000
+    loop.clock.t += 10
+    loop.monitor()
+    assert len(http.daq) == 2
+    odb.values["/Equipment/WDWaveforms/Statistics/Events sent"] = 200000
+    loop.clock.t += 10
+    loop.monitor()
+    assert len(http.daq) == 3 and http.daq[-1]["events"]["sent"] == 200000
+
+    # run done, nearline 1 of 2 subruns
+    db.runs[run_id]["status"] = "DONE"
+    for i, status in enumerate(["DONE", "RUNNING"]):
+        db.files.append({"run_id": run_id, "filebase": "run00604_%05d" % i, "fileext": "root",
+                         "status": status})
+        db.jobs.append({"midas_run_id": run_id, "job_type": "nearline", "status": status})
+    loop.clock.t += 10
+    loop.monitor()
+    assert http.daq[-1]["stage"] == "nearline"
+    assert http.daq[-1]["subruns"] == {"done": 1, "total": 2}
+    assert http.daq[-1]["events"] is None
+
+    # all subruns done, the daemon posts the context
+    db.jobs[-1]["status"] = "DONE"
+    db.files[-1]["status"] = "DONE"
+    loop.post_sequence(seq_id)
+    assert http.daq[-1]["stage"] == "posted"
+    assert "run00604" in http.daq[-1]["message"]
+    assert http.contexts[-1]["responds_to"] == {"proposal_id": 5}
+    n = len(http.daq)
+    loop.clock.t += 60
+    loop.monitor()
+    assert len(http.daq) == n          # no active step, no more reports
+
+
+def test_a_failed_run_is_reported_once():
+    loop, db, odb, http, _ = monitored_loop()
+    seq_id = loop.poll_and_schedule()[0]["seq_id"]
+    (run_id,) = db.sequences[seq_id]["runs"]
+    db.runs[run_id].update(status="FAILED", midas_run_number=604)
+    for _ in range(3):
+        loop.clock.t += 10
+        loop.monitor()
+    failed = [r for r in http.daq if r["stage"] == "failed"]
+    assert len(failed) == 1 and "604 FAILED" in failed[0]["message"]
+
+
+def test_a_failed_post_is_reported():
+    loop, db, odb, http, messages = monitored_loop()
+    loop.header_reader = HeaderReader({"names": [], "demand": [], "measured": [], "types": []})
+    seq_id = loop.poll_and_schedule()[0]["seq_id"]
+    (run_id,) = db.sequences[seq_id]["runs"]
+    db.runs[run_id].update(status="DONE", midas_run_number=604)
+    db.files.append({"run_id": run_id, "filebase": "run00604_00000", "fileext": "root", "status": "DONE"})
+    loop.post_sequence(seq_id)
+    assert db.sequences[seq_id]["status"] == "FAILED"
+    assert http.daq[-1]["stage"] == "failed" and "no knobs" in http.daq[-1]["message"]
+    assert any(is_error and "no knobs" in m for m, is_error in messages)
+
+
+def test_a_failed_schedule_is_reported():
+    odb = FakeOdb({"/Nearline/config/MiniTwin updates": "pim1_epics",
+                   "/Nearline/config/MiniTwin enable": True,
+                   "/Nearline/config/MiniTwin target config": 99})
+    loop, db, odb, http, messages = loop_with_service([proposal(5)], odb=odb)
+    with pytest.raises(tuning.ScheduleError):
+        loop.poll_and_schedule()
+    assert http.daq[-1]["stage"] == "failed" and http.daq[-1]["proposal_id"] == 5
+    assert "99" in http.daq[-1]["message"]
+    assert any(is_error for _, is_error in messages)
+
+
+def test_pause_is_reported_once_and_stops_the_monitor():
+    loop, db, odb, http, _ = monitored_loop()
+    seq_id = loop.poll_and_schedule()[0]["seq_id"]
+    odb.values["/Nearline/config/MiniTwin enable"] = False
+    loop.refresh_enable()
+    loop.refresh_enable()
+    assert [r["stage"] for r in http.daq] == ["scheduled", "paused"]
+    assert http.daq[-1]["proposal_id"] == 5 and http.daq[-1]["seq_id"] == seq_id
+    (run_id,) = db.sequences[seq_id]["runs"]
+    db.runs[run_id].update(status="RUNNING", midas_run_number=604)
+    loop.clock.t += 30
+    loop.monitor()
+    assert len(http.daq) == 2
+    # back on: the next look reports the real state
+    odb.values["/Nearline/config/MiniTwin enable"] = True
+    loop.refresh_enable()
+    loop.monitor()
+    assert http.daq[-1]["stage"] == "running"
+
+
+def test_resume_without_a_step_repeats_the_last_report():
+    loop, db, odb, http, _ = monitored_loop()
+    seq_id = loop.poll_and_schedule()[0]["seq_id"]
+    loop.set_active(None)
+    odb.values["/Nearline/config/MiniTwin enable"] = False
+    loop.refresh_enable()
+    odb.values["/Nearline/config/MiniTwin enable"] = True
+    loop.refresh_enable()
+    assert [r["stage"] for r in http.daq] == ["scheduled", "paused", "scheduled"]
+    assert http.daq[-1]["message"] == "loop resumed"
+
+
+def test_monitor_never_raises():
+    loop, db, odb, http, messages = monitored_loop()
+    loop.poll_and_schedule()
+
+    def boom(seq_id):
+        raise RuntimeError("database gone")
+    db.get_sequence_progress = boom
+    for _ in range(3):
+        loop.clock.t += 10
+        assert loop.monitor() is False
+    assert sum("database gone" in m for m, _ in messages) == 1
+
+
+def test_the_cli_writing_the_odb_is_picked_up():
+    loop, db, odb, http, _ = monitored_loop()
+    loop.poll_and_schedule()
+    # another process posted the step and took proposal 6
+    tuning.save_step(odb, None)
+    tuning.save_last_id(odb, 6)
+    loop.refresh_enable()
+    assert loop.active is None and loop.mt.last_proposal_id == 6
 
 
 # -- the daemon, with midas faked ----------------------------------------------

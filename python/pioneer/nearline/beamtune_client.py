@@ -10,6 +10,7 @@ import urllib.request
 
 DEFAULT_URL = "http://127.0.0.1:8420"
 CONTEXT_SCHEMA = "beamtune.context/v1"
+DAQ_SCHEMA = "beamtune.daq/v1"
 
 #: measurement file role, chosen by extension.  The nearline stitches ROOT into
 #: maps.h5 before posting (see the StitchJob), so ".h5" is the normal path and
@@ -64,6 +65,11 @@ class BeamTuneClient:
     def proposal(self, since=0):
         """2) What is the new current I should set?"""
         return self._call("GET", "/v1/proposal?since=%d" % int(since))[1]
+
+    def post_daq(self, report):
+        """DAQ progress of the step in flight (POST /v1/daq).  The service
+        keeps the latest report per proposal; it never changes a proposal."""
+        return self._call("POST", "/v1/daq", report)[1]
 
     def reset(self, reason="", config_overrides=None):
         """3) Clear your internal state of the beam."""

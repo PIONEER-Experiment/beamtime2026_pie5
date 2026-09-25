@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import time
 
+from pioneer.nearline.beamtune_client import DAQ_SCHEMA
+
 ODB_CONFIG = "/Nearline/config"
 
 #: keys under /Nearline/config this module needs, with their defaults.  They
@@ -44,6 +46,21 @@ STATE_DEFAULTS = {
     "Active step/Plan": "",
     "Active step/Seq id": 0,
 }
+
+#: DAQ progress reports (POST /v1/daq): looked at no more often than this,
+#: posted only when the stage, a run status or the subrun counts changed, or
+#: the events sent moved by EVENTS_STEP of the requested number.
+MONITOR_INTERVAL_S = 10.0
+EVENTS_STEP = 0.1
+
+#: run-database statuses, as utils.status in rundb/db_config.sql
+PENDING_STATUSES = {"HOLDING", "PENDING", "DEPENDING"}
+SUCCESS_STATUSES = {"DONE"}
+FAILURE_STATUSES = {"FAILED", "BLOCKED", "ERROR", "CANCELLED"}
+
+#: what the running experiment shows about the run in progress
+ODB_RUN_DB_PK = "/Runinfo/Run DB PK"
+ODB_EVENTS_SENT = "/Equipment/WDWaveforms/Statistics/Events sent"
 
 #: the daemon's own /Nearline/config/Output path default
 DEFAULT_OUTPUT_PATH = "/home/pinky/nearline"
@@ -166,6 +183,60 @@ def remote_path(local, local_prefix, remote_prefix):
     return remote_prefix + local[len(local_prefix):]
 
 
+class ScheduleError(RuntimeError):
+    """A proposal could not be scheduled; already reported when raised."""
+
+
+def utc_now(clock=time.time):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(clock()))
+
+
+def daq_report(proposal_id, stage, step=None, seq_id=None, runs=None, events=None,
+               subruns=None, message=None, sent_utc=None):
+    """One DAQ progress report as POST /v1/daq takes it."""
+    return {
+        "schema": DAQ_SCHEMA,
+        "proposal_id": int(proposal_id),
+        "step_id": (step or {}).get("step_id"),
+        "stage": stage,
+        "seq_id": seq_id,
+        "runs": list(runs or []),
+        "events": events,
+        "subruns": subruns,
+        "message": message,
+        "sent_utc": sent_utc or utc_now(),
+    }
+
+
+def progress_stage(progress):
+    """``(stage, message)`` of a sequence from
+    ``interface.get_sequence_progress``: failed, posted (the sequence is
+    DONE), scheduled (every run pending), nearline (every run DONE, the
+    context not yet posted) or running."""
+    if progress is None:
+        return "failed", "sequence not found in the run database"
+    runs = progress.get("runs") or []
+    if not runs:
+        return "failed", "sequence %s has no runs" % progress.get("id")
+    bad = [r for r in runs if r["status"] in FAILURE_STATUSES]
+    if bad:
+        return "failed", "; ".join("run %s %s" % (r["run_number"] if r["run_number"] is not None
+                                                  else "(db id %s)" % r["run_db_id"], r["status"])
+                                   for r in bad)
+    nearline_failed = sum(int(r["nearline_failed"]) for r in runs)
+    if nearline_failed:
+        return "failed", "%d nearline job(s) failed" % nearline_failed
+    if progress["status"] in FAILURE_STATUSES:
+        return "failed", "sequence %s" % progress["status"]
+    if progress["status"] == "DONE":
+        return "posted", None
+    if all(r["status"] in PENDING_STATUSES for r in runs):
+        return "scheduled", None
+    if all(r["status"] in SUCCESS_STATUSES for r in runs):
+        return "nearline", None
+    return "running", None
+
+
 def schedule_configs(db, configs, table, target_config, dry_run=False):
     """Write the runs for `configs` (what `NextConfiguration()` returns).
 
@@ -251,6 +322,12 @@ class TuningLoop:
         self.active = None
         self._saved_last_id = 0
         self.enabled = None
+        # progress reports: what was last sent, and when the state was last looked at
+        self._last_monitor = 0.0
+        self._last_key = None
+        self._last_events = None
+        self._last_report = None
+        self._last_monitor_error = None
 
     def restore(self):
         """Take the last proposal id and the active step from the ODB, so a
@@ -264,19 +341,42 @@ class TuningLoop:
                 last_id, ", active step %s (seq %s)" % (self.active.get("step_id"), self.active.get("seq_id"))
                 if self.active else ""))
 
+    def sync_state(self):
+        """Pick up what the manual CLI wrote to /Nearline/MiniTwin while this
+        process was running: a newer last proposal id, a new or cleared step."""
+        last_id, active = load_state(self.odb)
+        if last_id > self.mt.last_proposal_id:
+            self.mt.last_proposal_id = last_id
+        self._saved_last_id = max(self._saved_last_id, last_id)
+        if active != self.active:
+            self.active = active
+            self._last_key = None
+
     def set_active(self, step):
         self.active = dict(step) if step else None
         save_step(self.odb, self.active)
+        self._last_key = None
+        self._last_events = None
 
     def refresh_enable(self):
         """Re-read /Nearline/config/MiniTwin enable, the pause switch.
-        Returns True while the loop may poll and schedule."""
+        Returns True while the loop may poll and schedule.  Going off posts
+        one `paused` report; coming back on repeats the last report."""
         enabled = bool(odb_value(self.odb, ODB_CONFIG + "/MiniTwin enable", False))
+        try:
+            self.sync_state()
+        except Exception as exc:                       # noqa: BLE001 -- keep the loop going
+            self.message("Tuning: could not read /Nearline/MiniTwin: %s" % exc)
         if enabled != self.enabled:
-            if self.enabled is not None or not enabled:
+            was = self.enabled
+            self.enabled = enabled
+            if was is not None or not enabled:
                 self.message("Tuning: loop %s (MiniTwin enable = %s)"
                              % ("resumed" if enabled else "paused", "y" if enabled else "n"))
-            self.enabled = enabled
+            if not enabled:
+                self._report_paused()
+            elif was is not None:
+                self._report_resumed()
         return enabled
 
     def message(self, msg, is_error=False):
@@ -316,8 +416,9 @@ class TuningLoop:
         """Ask the service for a newer proposal and schedule it.
 
         The proposal id is stored before the runs are written: a proposal
-        whose scheduling fails is reported and not retried by itself (retake
-        it with the CLI, see the README), rather than scheduled twice."""
+        whose scheduling fails is reported (MIDAS error, `failed` DAQ report),
+        raises ScheduleError, and is not retried by itself -- retake it with the CLI,
+        see the README -- rather than scheduled twice."""
         configs = self.mt.NextConfiguration()
         proposal_id = self.mt.last_proposal_id
         if not dry_run and proposal_id != self._saved_last_id:
@@ -326,8 +427,17 @@ class TuningLoop:
         if not configs:
             return []
         hints = self.mt.last_run_hints or {}
-        scheduled = schedule_configs(self.db, configs, self.update_table,
-                                     self.target_config, dry_run=dry_run)
+        try:
+            scheduled = schedule_configs(self.db, configs, self.update_table,
+                                         self.target_config, dry_run=dry_run)
+        except Exception as exc:
+            if not dry_run:
+                self.message("Tuning: proposal %d could not be scheduled: %s" % (proposal_id, exc),
+                             is_error=True)
+                self.report(daq_report(proposal_id, "failed", step=hints,
+                                       message="not scheduled: %s" % exc,
+                                       sent_utc=utc_now(self.clock)))
+            raise ScheduleError("proposal %d not scheduled: %s" % (proposal_id, exc)) from exc
         if dry_run:
             return scheduled
         for entry in scheduled:
@@ -342,11 +452,20 @@ class TuningLoop:
                 self.message("Tuning: proposal %d%s scheduled as run %s in sequence %s" % (
                     proposal_id, " (step %s)" % hints["step_id"] if hints.get("step_id") else "",
                     ", ".join(str(r) for r in entry["run_ids"]), entry["seq_id"]))
+                self.report_progress()
         return scheduled
 
     def step_for_sequence(self, seq_id):
         """The active step when `seq_id` is its sequence, else None."""
         if self.active and self.active.get("seq_id") == seq_id:
+            return dict(self.active)
+        return None
+
+    def step_for_run(self, run_id):
+        """The active step when run `run_id` (run database id) is in its sequence."""
+        if not self.active or not self.active.get("seq_id"):
+            return None
+        if run_id in self.db.get_all_runs_in_sequence(self.active["seq_id"]):
             return dict(self.active)
         return None
 
@@ -380,23 +499,164 @@ class TuningLoop:
         return self.mt.BuildContextFiles(context_id, files, numbers, header, step=step)
 
     def post_runs(self, run_ids, step=None):
-        """Build the context of `run_ids` and post it through the retry queue."""
+        """Build the context of `run_ids` and post it through the retry queue.
+        With `step` (the active one), report `posted` and clear the step."""
         context_id, files, numbers, header = self.context_parts(run_ids)
-        return self.mt.AddContextFiles(context_id, files, numbers, header, step=step)
+        context = self.mt.AddContextFiles(context_id, files, numbers, header, step=step)
+        if step is not None:
+            queued = self.mt.pending > 0
+            self._report_final(step, "posted", "context %s %s" % (
+                context_id, "queued, service not reachable yet" if queued else "delivered"))
+            self.set_active(None)
+        return context
 
     def post_sequence(self, seq_id):
         """Post the context of a finished `mt_add` sequence, then mark the
         sequence DONE, or FAILED with a MIDAS error message if that raised."""
+        step = self.step_for_sequence(seq_id)
         try:
             run_ids = self.db.get_all_runs_in_sequence(seq_id)
-            step = self.step_for_sequence(seq_id)
             context = self.post_runs(run_ids, step=step)
         except Exception as exc:                       # noqa: BLE001 -- reported, sequence FAILED
             self.message("Tuning: context for sequence %d not posted: %s" % (seq_id, exc),
                          is_error=True)
+            if step is not None:
+                self._report_final(step, "failed", "context not posted: %s" % exc)
             self.db.update_status("run_sequence", seq_id, "FAILED")
             return None
         self.db.update_status("run_sequence", seq_id, "DONE")
-        if step is not None:
-            self.set_active(None)
         return context
+
+    # -- DAQ progress reports ----------------------------------------------
+
+    def collect_progress(self, step):
+        """The DAQ report of `step` from the run database and the ODB."""
+        seq_id = step.get("seq_id")
+        progress = self.db.get_sequence_progress(seq_id) if seq_id else None
+        stage, message = progress_stage(progress)
+        runs = (progress or {}).get("runs") or []
+        subruns = None
+        if progress is not None:
+            subruns = {"done": sum(int(r["nearline_done"]) for r in runs),
+                       "total": sum(int(r["nearline_total"]) for r in runs)}
+        events = None
+        running = [r for r in runs if r["status"] == "RUNNING"]
+        if running:
+            # Events sent is the running experiment's counter; only trust it
+            # when the ODB says the run in progress is ours.
+            pk = odb_value(self.odb, ODB_RUN_DB_PK, 0)
+            ours = [r for r in running if r["run_db_id"] == pk]
+            if ours:
+                sent = odb_value(self.odb, ODB_EVENTS_SENT, None)
+                events = {"sent": int(sent) if sent is not None else None,
+                          "requested": int(ours[0]["requested_events"] or 0) or None}
+        return daq_report(
+            step["proposal_id"], stage, step=step, seq_id=seq_id,
+            runs=[{"run_db_id": r["run_db_id"], "run_number": r["run_number"],
+                   "status": r["status"]} for r in runs],
+            events=events, subruns=subruns, message=message,
+            sent_utc=utc_now(self.clock))
+
+    def monitor(self):
+        """Called every mainloop iteration: at most every MONITOR_INTERVAL_S,
+        while a step is active and the loop is not paused, post its progress
+        if it changed.  Never raises."""
+        try:
+            if self.active is None or self.enabled is False:
+                return False
+            now = self.clock()
+            if now - self._last_monitor < MONITOR_INTERVAL_S:
+                return False
+            self._last_monitor = now
+            return self.report_progress(only_if_changed=True)
+        except Exception as exc:                       # noqa: BLE001 -- never into the mainloop
+            self._progress_error(exc)
+            return False
+
+    def report_progress(self, only_if_changed=False):
+        """Collect and post the active step's progress.  Never raises."""
+        try:
+            if self.active is None:
+                return False
+            report = self.collect_progress(self.active)
+            if only_if_changed and not self._changed(report):
+                return False
+        except Exception as exc:                       # noqa: BLE001
+            self._progress_error(exc)
+            return False
+        self._last_monitor_error = None
+        return self.report(report)
+
+    def _progress_error(self, exc):
+        # once per distinct error, not every 10 s
+        text = "Tuning: progress report failed: %s" % exc
+        if text != self._last_monitor_error:
+            self._last_monitor_error = text
+            self.message(text)
+
+    def _changed(self, report):
+        if _report_key(report) != self._last_key:
+            return True
+        events = report.get("events") or {}
+        sent, requested = events.get("sent"), events.get("requested")
+        if sent is None or not requested:
+            return False
+        if self._last_events is None:
+            return True
+        return abs(sent - self._last_events) >= EVENTS_STEP * requested
+
+    def report(self, report):
+        """Post one DAQ report; remembers it when the service took it.
+        Reports without a proposal id are not sent.  Never raises."""
+        try:
+            if not report.get("proposal_id"):
+                return False
+            if not self.mt.PostDaq(report):
+                return False
+        except Exception as exc:                       # noqa: BLE001
+            self.message("Tuning: DAQ report not sent: %s" % exc)
+            return False
+        self._last_key = _report_key(report)
+        self._last_events = (report.get("events") or {}).get("sent")
+        if report.get("stage") != "paused":
+            self._last_report = dict(report)
+        return True
+
+    def _report_final(self, step, stage, message):
+        """`posted` or `failed` for `step`, with its runs when they can be read."""
+        try:
+            report = self.collect_progress(step)
+        except Exception:                              # noqa: BLE001
+            report = daq_report(step["proposal_id"], stage, step=step,
+                                seq_id=step.get("seq_id"), sent_utc=utc_now(self.clock))
+        report["stage"] = stage
+        report["message"] = message
+        report["events"] = None
+        self.report(report)
+
+    def _report_paused(self):
+        if self.active:
+            step = self.active
+        else:
+            step = {"proposal_id": self.mt.last_proposal_id}
+        self.report(daq_report(step.get("proposal_id") or 0, "paused", step=step,
+                               seq_id=step.get("seq_id"),
+                               message="MiniTwin enable is off: not polling for proposals",
+                               sent_utc=utc_now(self.clock)))
+
+    def _report_resumed(self):
+        # the monitor posts the step's state at its next look; without a step
+        # repeat the last report, so the page stops showing `paused`
+        self._last_key = None
+        self._last_monitor = 0.0
+        if self.active is None and self._last_report is not None:
+            report = dict(self._last_report)
+            report["message"] = "loop resumed"
+            report["sent_utc"] = utc_now(self.clock)
+            self.report(report)
+
+
+def _report_key(report):
+    return (report.get("stage"),
+            tuple((r.get("run_db_id"), r.get("status")) for r in report.get("runs") or []),
+            tuple(sorted((report.get("subruns") or {}).items())))

@@ -211,6 +211,20 @@ class miniTwinInterface:
     def last_proposal_id(self, value):
         self._last_id = int(value or 0)
 
+    def PostDaq(self, report):                         # noqa: N802
+        """Send one DAQ progress report.  Not queued (only the latest one
+        matters), behind the same circuit breaker as everything else.
+        Returns True when the service took it; never raises."""
+        try:
+            if self._muted():
+                return False
+            self.client.post_daq(report)
+            self._succeed()
+            return True
+        except Exception as exc:                       # noqa: BLE001 -- never escape
+            self._fail("post_daq(%s): %r" % (report.get("stage"), exc))
+            return False
+
     def Flush(self):                                   # noqa: N802
         """Retry queued contexts without asking for a proposal.  Never raises."""
         try:

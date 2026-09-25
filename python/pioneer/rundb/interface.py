@@ -408,6 +408,49 @@ class interface:
         conn.close()
         return seq_id
 
+    def get_sequence_progress(self, seq_id : int) -> dict | None:
+        """
+        Status of a sequence, its runs and their nearline jobs, for progress
+        reports. None when the sequence does not exist. Otherwise
+        {"id", "status", "on_complete", "runs": [{"run_db_id", "run_number",
+        "status", "requested_events", "nearline_total", "nearline_done",
+        "nearline_failed"}]}, runs in id order.
+        """
+        conn = connect(user = self.user, password = self.password)
+        try:
+            with conn.cursor(row_factory = psycopg.rows.dict_row) as cursor:
+                cursor.execute(
+                    "SELECT id, status, on_complete FROM state.run_sequence WHERE id = %s", (seq_id, )
+                )
+                seq = cursor.fetchone()
+                if seq is None:
+                    return None
+                cursor.execute(
+                    """
+                    SELECT
+                        mr.id AS run_db_id,
+                        mr.midas_run_number AS run_number,
+                        mr.status,
+                        mr.requested_events,
+                        COUNT(ppj.id) AS nearline_total,
+                        COUNT(ppj.id) FILTER (WHERE utils.is_success(ppj.status)) AS nearline_done,
+                        COUNT(ppj.id) FILTER (WHERE utils.is_failure(ppj.status)) AS nearline_failed
+                    FROM state.runs_in_sequence AS ris
+                    JOIN state.midas_run AS mr ON ris.midas_run_id = mr.id
+                    LEFT JOIN state.postproc_job AS ppj
+                        ON ppj.midas_run_id = mr.id AND ppj.job_type = 'nearline'
+                    WHERE ris.seq_id = %s
+                    GROUP BY mr.id
+                    ORDER BY mr.id
+                    """, (seq_id, )
+                )
+                runs = [dict(r) for r in cursor.fetchall()]
+        finally:
+            conn.close()
+        result = dict(seq)
+        result["runs"] = runs
+        return result
+
     def find_sequences(self, status : str, limit : int = 1) -> list[dict]:
         conn = connect(user = self.user, password = self.password)
         with conn.cursor(row_factory = psycopg.rows.dict_row) as cursor:

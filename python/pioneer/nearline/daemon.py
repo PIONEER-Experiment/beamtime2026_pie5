@@ -251,7 +251,11 @@ class NearlineDaemon:
         # 'iter': one run at the target config (the stage centre), posted
         # without a merge. 'final': five-point x degrader scan, merge only.
         # The logic is in tuning.py, shared with the manual CLI.
-        self.tuning.poll_and_schedule()
+        try:
+            self.tuning.poll_and_schedule()
+        except nl_tuning.ScheduleError:
+            # already sent as a MIDAS error and a 'failed' DAQ report
+            pass
 
     def filename_change_callback(self, client, path, value):
         # path should be
@@ -315,6 +319,9 @@ class NearlineDaemon:
 
                 # Step 4: Poll update strategies for new configuration
                 self.check_for_updates()
+
+                # Step 5: Report the tuning step's DAQ progress (never raises)
+                self.tuning.monitor()
 
             except Exception as e:
                 self.client.msg(f"Nearline Error {e}", is_error= True)
