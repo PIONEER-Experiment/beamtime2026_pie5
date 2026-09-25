@@ -1824,3 +1824,78 @@ def test_a_done_proposal_needs_no_column_map():
     http.config_answer = {"config": {}}
     assert loop.poll_and_schedule() == []
     assert loop.mt.last_proposal_id == 5
+
+
+# -- laptop integration test findings ---------------------------------------------
+
+def test_a_last_proposal_id_lowered_by_hand_is_taken_at_once():
+    loop, db, odb, http, messages = loop_with_service([proposal(5)])
+    loop.poll_and_schedule()
+    assert odb.values["/Nearline/MiniTwin/Last proposal id"] == 5
+    # the service restarted with a new state directory: its proposals start at 1
+    http.proposals = [proposal(1)]
+    assert loop.poll_and_schedule() == []
+    odb.values["/Nearline/MiniTwin/Last proposal id"] = 0      # the shifter's fix
+    loop.refresh_enable()
+    assert loop.mt.last_proposal_id == 0
+    assert sum("lowered by hand from 5 to 0" in m for m, _ in messages) == 1
+    assert len(loop.poll_and_schedule()) == 1
+    assert odb.values["/Nearline/MiniTwin/Last proposal id"] == 1
+    loop.refresh_enable()
+    assert sum("lowered by hand" in m for m, _ in messages) == 1
+
+
+def test_the_daemons_own_lower_odb_value_is_not_taken_for_a_hand_edit():
+    class NoWatermarkWrites(FakeOdb):
+        def odb_set(self, path, value):
+            if path.endswith("/Last proposal id") and value:
+                raise OSError("ODB full")
+            super().odb_set(path, value)
+
+    odb = NoWatermarkWrites({"/Nearline/config/MiniTwin updates": "pim1_epics",
+                             "/Nearline/config/MiniTwin enable": True,
+                             "/Nearline/MiniTwin/Last proposal id": 0})
+    loop, db, odb, http, messages = loop_with_service([proposal(5)], odb=odb)
+    loop.poll_and_schedule()            # stored write fails: ODB still 0
+    loop.refresh_enable()
+    assert loop.mt.last_proposal_id == 5
+    assert not any("lowered by hand" in m for m, _ in messages)
+
+
+def test_a_delivery_during_a_pause_keeps_the_page_on_paused():
+    loop, db, odb, http, _ = loop_with_service([proposal(5)])
+    seq_id = finished_step(loop, db, 604)
+    db.sequences[seq_id]["status"] = "CLAIMED"
+    odb.values["/Nearline/config/MiniTwin enable"] = False
+    loop.refresh_enable()
+    loop.post_sequence(seq_id)
+    assert http.contexts[-1]["responds_to"] == {"proposal_id": 5}
+    stages = [r["stage"] for r in http.daq]
+    assert stages[-2:] == ["posted", "paused"]
+    assert "paused" in http.daq[-2]["message"]
+    assert http.daq[-1]["runs"][0]["run_number"] == 604
+
+
+def test_the_paused_report_carries_the_active_steps_runs():
+    loop, db, odb, http, _ = loop_with_service([proposal(5)])
+    seq_id = loop.poll_and_schedule()[0]["seq_id"]
+    (run_id,) = db.sequences[seq_id]["runs"]
+    db.runs[run_id].update(status="RUNNING", midas_run_number=604)
+    db.jobs.append({"midas_run_id": run_id, "job_type": "nearline", "status": "DONE"})
+    odb.values["/Nearline/config/MiniTwin enable"] = False
+    loop.refresh_enable()
+    report = http.daq[-1]
+    assert report["stage"] == "paused"
+    assert report["runs"] == [{"run_db_id": run_id, "run_number": 604, "status": "RUNNING"}]
+    assert report["subruns"] == {"done": 1, "total": 1}
+    assert report["seq_id"] == seq_id
+
+
+def test_a_retake_after_a_nominal_bracket_says_so():
+    loop, db, odb, http, messages = loop_with_service(
+        [proposal(6, step_id="nominal_1", attempt=0,
+                  in_reply_to=in_reply_to("run00604", outcome="retake", attempt=0))])
+    odb.values["/Nearline/MiniTwin/Last context id"] = "run00604"
+    loop.poll_and_schedule()
+    assert ("Tuning: step ASM12_90.44 will be retaken after a nominal bracket (attempt 1)", False) \
+        in messages

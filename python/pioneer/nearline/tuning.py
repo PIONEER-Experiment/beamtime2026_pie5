@@ -484,6 +484,9 @@ class TuningLoop:
         self._watermark_warned = None
         self._step_unsaved = False
         self._reply_error = False
+        #: the last proposal id this process read or wrote in the ODB; a
+        #: different, lower value there was put by hand (sync_state)
+        self._known_last_id = 0
         self._column_map_warned = None
         #: seq id -> time it was claimed, for sequences waiting out the post delay
         self._waiting = {}
@@ -515,17 +518,26 @@ class TuningLoop:
         which step the run in flight belongs to."""
         last_id, self.active = load_state(self.odb)
         self.mt.last_proposal_id = last_id
+        self._known_last_id = last_id
         if last_id or self.active:
             self.message("Tuning: restored last proposal id %d%s" % (
                 last_id, ", active step %s (seq %s)" % (self.active.get("step_id"), self.active.get("seq_id"))
                 if self.active else ""))
 
     def sync_state(self):
-        """Pick up what the manual CLI wrote to /Nearline/MiniTwin while this
-        process was running: a newer last proposal id, a new or cleared step."""
+        """Pick up what was written to /Nearline/MiniTwin while this process
+        was running: a newer last proposal id or a new or cleared step (the
+        manual CLI), or a last proposal id lowered by hand -- honoured at
+        once, so proposals above it are taken again."""
         last_id, active = load_state(self.odb)
         if last_id > self.mt.last_proposal_id:
             self.mt.last_proposal_id = last_id
+            self._known_last_id = last_id
+        elif last_id < self.mt.last_proposal_id and last_id != self._known_last_id:
+            self.message("Tuning: Last proposal id lowered by hand from %d to %d; proposals above "
+                         "%d will be taken" % (self.mt.last_proposal_id, last_id, last_id))
+            self.mt.last_proposal_id = last_id
+            self._known_last_id = last_id
         if self._step_unsaved:
             # our step never made it to the ODB whole: write it again rather
             # than take up what is there
@@ -601,9 +613,14 @@ class TuningLoop:
             except Exception as exc:                   # noqa: BLE001 -- never into the queue
                 self.message("Tuning: could not remove %s: %s" % (_pending_base(seq_id), exc))
         if step is not None:
-            self._report_final(step, "posted", "context %s delivered" % context_id)
+            paused = self.enabled is False
+            self._report_final(step, "posted", "context %s delivered%s" % (
+                context_id, " (loop paused: no new proposal is taken)" if paused else ""))
             if self.active and self.active.get("proposal_id") == step.get("proposal_id"):
                 self.set_active(None)
+            if paused:
+                # the latest report stays `paused`, with the posted step's runs
+                self._report_paused(step)
 
     def context_rejected(self, context, exc):
         """`context` left the queue undelivered: the service refused it for
@@ -655,10 +672,14 @@ class TuningLoop:
             self.message("Tuning: proposal %d answers context %s (%s)"
                          % (proposal_id, reply["got"], outcome))
         if outcome == "retake":
-            attempt = hints.get("attempt") if hints.get("step_id") == in_reply_to.get("step_id") \
-                else None
-            self.message("Tuning: step %s is retaken, attempt %s"
-                         % (step, attempt if attempt is not None else "?"))
+            if hints.get("step_id") == in_reply_to.get("step_id") and hints.get("attempt") is not None:
+                self.message("Tuning: step %s is retaken, attempt %s" % (step, hints["attempt"]))
+            else:
+                # the next proposal is something else (the nominal bracket);
+                # the step comes back after it
+                attempt = in_reply_to.get("attempt")
+                self.message("Tuning: step %s will be retaken after a nominal bracket (attempt %s)"
+                             % (step, int(attempt) + 1 if isinstance(attempt, int) else "?"))
         elif outcome == "failed":
             attempt = in_reply_to.get("attempt")
             self.message("Tuning: step %s given up after %s attempts"
@@ -780,6 +801,7 @@ class TuningLoop:
             stored = int(odb_value(self.odb, ODB_STATE + "/Last proposal id", 0) or 0)
             if proposal_id > stored:
                 save_last_id(self.odb, proposal_id)
+                self._known_last_id = proposal_id
             self._watermark_error = False
         except Exception as exc:                       # noqa: BLE001 -- schedule anyway
             if not self._watermark_error:
@@ -802,7 +824,8 @@ class TuningLoop:
         self._watermark_warned = (service_id, ours)
         self.message("Tuning: the service's last proposal is #%d, below our last proposal id #%d "
                      "(%s/Last proposal id): its proposals are ignored until one passes #%d. "
-                     "If the service was restarted with a new state, set that key to %d."
+                     "If the service was restarted with a new state, set that key to %d; "
+                     "the daemon takes it up at once."
                      % (service_id, ours, ODB_STATE, ours, service_id), is_error=True)
 
     def step_for_sequence(self, seq_id):
@@ -1148,15 +1171,23 @@ class TuningLoop:
         report["events"] = None
         self.report(report)
 
-    def _report_paused(self):
-        if self.active:
-            step = self.active
-        else:
-            step = {"proposal_id": self.mt.last_proposal_id}
-        self.report(daq_report(step.get("proposal_id") or 0, "paused", step=step,
-                               seq_id=step.get("seq_id"),
-                               message="MiniTwin enable is off: not polling for proposals",
-                               sent_utc=utc_now(self.clock)))
+    def _report_paused(self, step=None):
+        """One `paused` report, with the runs and subruns of `step` (default
+        the active step) when there is one."""
+        step = step or self.active or {"proposal_id": self.mt.last_proposal_id}
+        report = None
+        if step.get("seq_id"):
+            try:
+                report = self.collect_progress(step)
+            except Exception:                          # noqa: BLE001 -- bare report instead
+                report = None
+        if report is None:
+            report = daq_report(step.get("proposal_id") or 0, "paused", step=step,
+                                seq_id=step.get("seq_id"), sent_utc=utc_now(self.clock))
+        report["stage"] = "paused"
+        report["events"] = None
+        report["message"] = "MiniTwin enable is off: not polling for proposals"
+        self.report(report)
 
     def _report_resumed(self):
         # the monitor posts the step's state at its next look; without a step
