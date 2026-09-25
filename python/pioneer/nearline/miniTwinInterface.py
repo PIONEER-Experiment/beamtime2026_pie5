@@ -5,7 +5,6 @@ from __future__ import annotations
 import collections
 import time
 import os
-import ROOT
 
 from pioneer.nearline.beamtune_client import (
     BeamTuneClient,
@@ -56,6 +55,8 @@ class miniTwinInterface:
 
     def AddContext(self, ctxt):                        # noqa: N802 -- daemon's API
         """One completed sequence.  ``ctxt`` is a merged file path."""
+        import ROOT        # lazy: the rest of this module works without ROOT
+
         filename = str(ctxt)
         aFile = ROOT.TFile.Open(filename)
 

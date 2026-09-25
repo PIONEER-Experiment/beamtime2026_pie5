@@ -2,6 +2,7 @@
 import pioneer.rundb.interface
 import pioneer.nearline.jobs as nl_jobs
 import pioneer.nearline.run as nl_run
+import pioneer.nearline.tuning as nl_tuning
 from pioneer.nearline.miniTwinInterface import miniTwinInterface as mt_iface
 
 import midas.client        # connect to MIDAS ODB
@@ -104,6 +105,8 @@ class NearlineDaemon:
             })
         elif (args.jobs):
             self.client.odb_set("/Nearline/config/Num parallel jobs", njobs)
+        # keys of the tuning loop, created with their defaults when missing
+        nl_tuning.ensure_odb_keys(self.client)
 
         self.queues['nearline'].maxJobs = self.client.odb_get("/Nearline/config/Num parallel jobs")
         self.midas_logger_path     = pathlib.Path(self.client.odb_get("/Logger/Data dir"))
@@ -136,7 +139,14 @@ class NearlineDaemon:
 
         # Proper mini twin initialisation goes here.
         self.mt_interface = mt_iface(
-            base_url = self.client.odb_get("/Nearline/config/MiniTwin URL")
+            base_url = self.client.odb_get("/Nearline/config/MiniTwin URL"),
+            config_type = self.minitwin_update_table
+        )
+        self.tuning = nl_tuning.TuningLoop(
+            db = self.db_interface,
+            mt = self.mt_interface,
+            odb = self.client,
+            message = self.message
         )
 
 
@@ -178,11 +188,10 @@ class NearlineDaemon:
             theJob.start()
             self.sequence_queue.add(theJob)
         elif "mt_add" in on_complete and self.minitwin_enabled:
-            # This sequence does not merge but adds all runs
-            # As this operation is fast, we'll do it right here
-            run_ids = self.db_interface.get_all_runs_in_sequence(seq_cfg['id'])
-            files = self.db_interface.find_files(run_ids, "root")
-            self.mt_interface.AddContextFiles(files)
+            # This sequence does not merge: the run's histogram files are
+            # posted as they are. As this operation is fast, we'll do it
+            # right here. The sequence ends up DONE, or FAILED if it raised.
+            self.tuning.post_sequence(seq_cfg['id'])
 
     def communicate_with_midas(self):
         if (self.client):
@@ -229,24 +238,10 @@ class NearlineDaemon:
     def check_for_updates(self):
         if not self.minitwin_enabled:
             return
-        new_configs = self.mt_interface.NextConfiguration()
-        if len(new_configs) > 0:
-            for aConfig in new_configs:
-                mrs = nl_run.midas_run_sequence(self.db_interface)
-                mrs.set_config_list(self.minitwin_update_table, aConfig['currents'])
-                fiveScan = nl_run.five_point_sequence(self.db_interface)
-                if aConfig['type'] == 'iter':
-                    fiveScan.set_on_complete("merge mt_add")
-                    mrs.set_subsequence(fiveScan)
-                    mrs.num_ev = 1e6
-                elif aConfig['type'] == 'final':
-                    fiveScan.set_on_complete("merge") # it shall only merge and not submit to minitwin.
-                    dscan = nl_run.degrader_scan(self.db_interface)
-                    dscan.set_subsequence(fiveScan)
-                    mrs.set_subsequence(dscan)
-                    mrs.num_ev = 1e7
-
-                mrs.schedule()
+        # 'iter': one run at the target config (the stage centre), posted
+        # without a merge. 'final': five-point x degrader scan, merge only.
+        # The logic is in tuning.py, shared with the manual CLI.
+        self.tuning.poll_and_schedule()
 
     def filename_change_callback(self, client, path, value):
         # path should be
