@@ -1144,3 +1144,24 @@ def test_header_from_an_emulated_root_object_uses_uproot(monkeypatch):
     monkeypatch.setitem(sys.modules, "ROOT", root)
     monkeypatch.setattr(tuning, "read_beamline_header_uproot", lambda path: {"via": "uproot"})
     assert tuning.read_beamline_header("x_hists.root") == {"via": "uproot"}
+
+
+# -- review should-fix 7: no proposal taken without the column map -------------
+
+def test_no_proposal_is_taken_while_the_column_map_is_unavailable():
+    from pioneer.nearline.beamtune_client import BeamTuneError
+    loop, db, odb, http, messages = loop_with_service(
+        [proposal(5, currents={"ASM12": 90.44, "QTB12": 56.12})])
+    http.config_answer = BeamTuneError("GET /v1/config failed: timed out")
+    assert loop.poll_and_schedule() == []
+    assert loop.poll_and_schedule() == []
+    assert db.runs == {}
+    assert loop.mt.last_proposal_id == 0
+    assert odb.values["/Nearline/MiniTwin/Last proposal id"] == 0
+    errors = [m for m, e in messages if e and "knobs.columns" in m]
+    assert len(errors) == 1
+    # the service answers again: fetched now, proposal taken with column names
+    http.config_answer = {"config": {"knobs": {"columns": {"ASM12": "ASM12:SOL:2", "QTB12": "QTB12:SOL:2"}}}}
+    assert len(loop.poll_and_schedule()) == 1
+    assert db.written == [("pim1_epics", {"ASM12:SOL:2": 90.44, "QTB12:SOL:2": 56.12})]
+    assert odb.values["/Nearline/MiniTwin/Last proposal id"] == 5

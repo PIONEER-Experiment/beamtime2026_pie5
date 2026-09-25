@@ -380,6 +380,7 @@ class TuningLoop:
         self.active = None
         self._watermark_error = False
         self._watermark_warned = None
+        self._column_map_warned = None
         self.enabled = None
         # progress reports: what was last sent, and when the state was last looked at
         self._last_monitor = 0.0
@@ -571,6 +572,11 @@ class TuningLoop:
         if not dry_run and proposal_id != before:
             self._store_watermark(proposal_id)
         self._check_service_watermark()
+        column_error = getattr(self.mt, "column_map_error", None)
+        if column_error and column_error != self._column_map_warned:
+            self.message("Tuning: proposal not taken, trying again: %s" % column_error,
+                         is_error=True)
+        self._column_map_warned = column_error
         if not configs:
             return []
         hints = self.mt.last_run_hints or {}

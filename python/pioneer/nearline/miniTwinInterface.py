@@ -85,6 +85,9 @@ class miniTwinInterface:
         #: good (see beamtune_client.is_permanent_rejection); it is dropped
         self.on_rejected = None
         self._columns_fetched = False
+        #: why the column map could not be fetched, while it cannot; no
+        #: proposal is taken meanwhile
+        self.column_map_error = None
         self._pending = collections.deque(maxlen=int(max_pending))
         self._failures = 0
         self._breaker_failures = int(breaker_failures)
@@ -199,6 +202,16 @@ class miniTwinInterface:
         self.service_last_id = proposal_id
         if proposal_id <= self._last_id:
             return []
+        try:
+            self._column_map()
+        except Exception as exc:                       # noqa: BLE001 -- retried next call
+            # Without the map the row would carry knob names where the table
+            # has column names; leave the proposal for the next call rather
+            # than take it (the watermark does not move).
+            self.column_map_error = "knobs.columns not available from the service: %s" % exc
+            self._log(self.column_map_error)
+            return []
+        self.column_map_error = None
         self._last_id = proposal_id
         reply = payload.get("in_reply_to")
         self._last_reply = dict(reply) if isinstance(reply, dict) else None
@@ -304,20 +317,18 @@ class miniTwinInterface:
 
     def _column_map(self):
         """``column_map`` given at construction, else the service's
-        ``knobs.columns`` (from the beam file), fetched once and lazily.  A
-        failure here is not fatal: the row falls back to knob names, which is
-        what every daemon got before this existed."""
+        ``knobs.columns`` (from the beam file), fetched lazily until it has
+        been fetched once.  A service that answers without ``knobs.columns``
+        leaves the row with knob names; one that cannot be asked raises, and
+        is asked again next time."""
         if self.column_map or self._columns_fetched:
             return self.column_map
+        config = (self.client.config().get("config") or {})
         self._columns_fetched = True
-        try:
-            config = (self.client.config().get("config") or {})
-            columns = (config.get("knobs") or {}).get("columns") or {}
-            if isinstance(columns, dict) and columns:
-                self.column_map = {str(k): str(v) for k, v in columns.items()}
-                self._log("column map from service: %d knobs" % len(self.column_map))
-        except Exception as exc:                       # noqa: BLE001 -- never escape
-            self._log("could not fetch knobs.columns from the service: %r" % (exc,))
+        columns = (config.get("knobs") or {}).get("columns") or {}
+        if isinstance(columns, dict) and columns:
+            self.column_map = {str(k): str(v) for k, v in columns.items()}
+            self._log("column map from service: %d knobs" % len(self.column_map))
         return self.column_map
 
     def _envelope(self, context_id, files=None, inline=None, knobs=None,

@@ -194,8 +194,13 @@ class FakeHttp:
         self.daq.append(report)
         return {"accepted": True}
 
+    #: what GET /v1/config answers: a dict, or an exception to raise
+    config_answer = None
+
     def config(self):
-        return {"config": {}}
+        if isinstance(self.config_answer, Exception):
+            raise self.config_answer
+        return self.config_answer or {"config": {}}
 
 
 _ABSENT = object()
