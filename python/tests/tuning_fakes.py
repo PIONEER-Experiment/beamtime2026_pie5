@@ -20,6 +20,10 @@ class FakeOdb:
     def odb_set(self, path, value):
         self.values[path] = value
 
+    def odb_delete(self, path):
+        for key in [k for k in self.values if k == path or k.startswith(path + "/")]:
+            del self.values[key]
+
     def msg(self, text, is_error=False):
         self.messages.append((text, is_error))
 

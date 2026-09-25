@@ -122,6 +122,49 @@ def save_step(odb, step):
         odb.odb_set(ODB_STATE + "/Active step/Proposal id", int(step["proposal_id"]))
 
 
+def _pending_base(seq_id):
+    return "%s/Pending/%d" % (ODB_STATE, int(seq_id))
+
+
+def save_pending(odb, seq_id, step):
+    """Record, under /Nearline/MiniTwin/Pending/<seq id>/, the step a claimed
+    sequence belongs to, so neither a new proposal nor a restart before its
+    post can strip its provenance.  Proposal id is written last."""
+    base = _pending_base(seq_id)
+    attempt = step.get("attempt")
+    odb.odb_set(base + "/Proposal id", 0)
+    odb.odb_set(base + "/Step id", str(step.get("step_id") or ""))
+    odb.odb_set(base + "/Attempt", int(attempt) if attempt is not None else -1)
+    odb.odb_set(base + "/Plan", str(step.get("plan") or ""))
+    odb.odb_set(base + "/Proposal id", int(step["proposal_id"]))
+
+
+def load_pending(odb, seq_id):
+    """The step recorded for `seq_id` by save_pending, or None."""
+    base = _pending_base(seq_id)
+    proposal_id = int(odb_value(odb, base + "/Proposal id", 0) or 0)
+    if proposal_id <= 0:
+        return None
+    attempt = int(odb_value(odb, base + "/Attempt", -1))
+    return {
+        "proposal_id": proposal_id,
+        "step_id": str(odb_value(odb, base + "/Step id", "")) or None,
+        "attempt": attempt if attempt >= 0 else None,
+        "plan": str(odb_value(odb, base + "/Plan", "")) or None,
+        "seq_id": int(seq_id),
+    }
+
+
+def delete_pending(odb, seq_id):
+    base = _pending_base(seq_id)
+    if not odb.odb_exists(base):
+        return
+    if hasattr(odb, "odb_delete"):
+        odb.odb_delete(base)
+    else:
+        odb.odb_set(base + "/Proposal id", 0)
+
+
 def odb_value(odb, path, default):
     """`path` from the ODB, or `default` when there is no ODB or no key."""
     if odb is None:
@@ -399,6 +442,9 @@ def schedule_configs(db, configs, table, target_config, dry_run=False):
     return scheduled
 
 
+_UNSET = object()
+
+
 class TuningLoop:
     """The daemon's side of the loop.
 
@@ -428,6 +474,8 @@ class TuningLoop:
         self._column_map_warned = None
         #: seq id -> time it was claimed, for sequences waiting out the post delay
         self._waiting = {}
+        #: seq id -> the step it was claimed with (or None), see claim()
+        self._claim_steps = {}
         self.enabled = None
         # progress reports: what was last sent, and when the state was last looked at
         self._last_monitor = 0.0
@@ -532,6 +580,11 @@ class TuningLoop:
             except Exception as exc:                   # noqa: BLE001 -- never into the queue
                 self.message("Tuning: context %s delivered, but sequence %s could not be set DONE: %s"
                              % (context_id, seq_id, exc), is_error=True)
+            self._claim_steps.pop(seq_id, None)
+            try:
+                delete_pending(self.odb, seq_id)
+            except Exception as exc:                   # noqa: BLE001 -- never into the queue
+                self.message("Tuning: could not remove %s: %s" % (_pending_base(seq_id), exc))
         if step is not None:
             self._report_final(step, "posted", "context %s delivered" % context_id)
             if self.active and self.active.get("proposal_id") == step.get("proposal_id"):
@@ -824,7 +877,7 @@ class TuningLoop:
         becomes DONE when the service took it, FAILED with a MIDAS error
         message when it could not be built or was refused, and stays CLAIMED
         while it waits in the queue."""
-        step = self.step_for_sequence(seq_id)
+        step = self.step_of_claimed(seq_id)
         try:
             run_ids = self.db.get_all_runs_in_sequence(seq_id)
             context = self.post_runs(run_ids, step=step, seq_id=seq_id)
@@ -845,11 +898,40 @@ class TuningLoop:
         return float(odb_value(self.odb, ODB_CONFIG + "/MiniTwin post delay",
                                CONFIG_DEFAULTS["MiniTwin post delay"]))
 
-    def claim(self, seq_id):
+    def claim(self, seq_id, step=_UNSET):
         """The daemon claimed finished `mt_add` sequence `seq_id`: post it
-        once it has waited `MiniTwin post delay` seconds (post_due)."""
+        once it has waited `MiniTwin post delay` seconds (post_due).  The
+        step it belongs to is taken now -- the active step if this is its
+        sequence, else what was recorded for it -- and recorded under
+        /Nearline/MiniTwin/Pending/<seq id>, so a proposal taken while it
+        waits, or a restart, cannot strip its provenance."""
+        if seq_id not in self._claim_steps:
+            if step is _UNSET:
+                step = self.step_for_sequence(seq_id) or self._load_pending(seq_id)
+            self._claim_steps[seq_id] = step
+            if step is not None:
+                try:
+                    save_pending(self.odb, seq_id, step)
+                except Exception as exc:               # noqa: BLE001 -- kept in memory
+                    self.message("Tuning: could not record the step of sequence %d: %s"
+                                 % (seq_id, exc), is_error=True)
         self._waiting.setdefault(seq_id, self.clock())
         self.post_due()
+
+    def _load_pending(self, seq_id):
+        try:
+            return load_pending(self.odb, seq_id)
+        except Exception as exc:                       # noqa: BLE001
+            self.message("Tuning: could not read the step of sequence %d: %s" % (seq_id, exc))
+            return None
+
+    def step_of_claimed(self, seq_id):
+        """The step a sequence is posted with: taken at claim time, else the
+        active step if it is its sequence, else the recorded one."""
+        if seq_id in self._claim_steps:
+            step = self._claim_steps[seq_id]
+            return dict(step) if step else None
+        return self.step_for_sequence(seq_id) or self._load_pending(seq_id)
 
     def post_due(self):
         """Post every waiting sequence whose delay is over.  Called every
@@ -869,11 +951,15 @@ class TuningLoop:
                 self.message("Tuning: sequence %d not posted: %s" % (seq_id, exc), is_error=True)
 
     def resume_claimed(self):
-        """At daemon start-up: post again every `mt_add` sequence left
-        CLAIMED -- its context was still queued (the queue lives in memory)
-        or never built when the daemon stopped.  The service recognises a
-        context it already has by its id, so a repeat is harmless.  Returns
-        the sequence ids; never raises."""
+        """At daemon start-up: every `mt_add` sequence left CLAIMED had its
+        context still queued (the queue lives in memory) or not yet posted
+        when the daemon stopped.  Those whose step belongs to the current
+        proposal (the last proposal id) or is the active step go back to the
+        waiting set and are posted by post_due after the post delay (the
+        service recognises a repeat by its context id).  The others are
+        listed in one MIDAS message and left alone: post them by hand.
+        Nothing is read from the histogram files here.  Returns the sequence
+        ids queued; never raises."""
         try:
             claimed = [s for s in self.db.find_sequences("CLAIMED", limit=100)
                        if "mt_add" in (s.get("on_complete") or "").split()
@@ -881,13 +967,34 @@ class TuningLoop:
         except Exception as exc:                       # noqa: BLE001 -- start-up must go on
             self.message("Tuning: could not look for CLAIMED sequences: %s" % exc, is_error=True)
             return []
+        queued, left = [], []
         for seq in claimed:
-            self.message("Tuning: sequence %d was left CLAIMED; posting it again" % seq["id"])
-            try:
-                self.post_sequence(seq["id"])
-            except Exception as exc:                   # noqa: BLE001
-                self.message("Tuning: sequence %d not posted: %s" % (seq["id"], exc), is_error=True)
-        return [seq["id"] for seq in claimed]
+            seq_id = seq["id"]
+            active = self.step_for_sequence(seq_id)
+            step = active or self._load_pending(seq_id)
+            if step is not None and (active is not None
+                                     or step.get("proposal_id") == self.mt.last_proposal_id):
+                self.message("Tuning: sequence %d was left CLAIMED; posting it again after the "
+                             "post delay" % seq_id)
+                self._claim_steps[seq_id] = step
+                self._waiting.setdefault(seq_id, self.clock())
+                queued.append(seq_id)
+            else:
+                left.append(seq_id)
+        if left:
+            runs = []
+            for seq_id in left:
+                try:
+                    runs += [self.db.get_midas_run_number(r)
+                             for r in self.db.get_all_runs_in_sequence(seq_id)]
+                except Exception:                      # noqa: BLE001 -- only for the message
+                    pass
+            self.message("Tuning: sequence(s) %s left CLAIMED without a step of the current "
+                         "proposal; not posted. Post by hand if wanted: "
+                         "python -m pioneer.nearline.tuning post --run N (run(s) %s)"
+                         % (", ".join(str(s) for s in left),
+                            ", ".join(str(r) for r in runs if r is not None) or "?"))
+        return queued
 
     # -- DAQ progress reports ----------------------------------------------
 

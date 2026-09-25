@@ -1031,7 +1031,11 @@ def test_a_restart_posts_a_claimed_sequence_again_with_its_step():
     del loop
 
     loop2, _, _, http2, _ = loop_with_service([], odb=odb, db=db)
+    loop2.clock = Clock()
     assert loop2.resume_claimed() == [seq_id]
+    assert http2.contexts == []          # waits out the post delay like any claim
+    loop2.clock.t += 60
+    loop2.post_due()
     (context,) = http2.contexts
     assert context["context_id"] == "run00604"
     assert context["responds_to"] == {"proposal_id": 5}
@@ -1581,3 +1585,69 @@ def test_a_failed_step_write_keeps_the_step_in_memory():
 def test_a_reply_without_a_context_id_is_none():
     check, reply = tuning.reply_check({"context_id": None, "outcome": "accepted"}, "run00604")
     assert check == "none" and reply["ok"] is True
+
+
+# -- second review S4 / N8: the step is taken at claim time ----------------------
+
+def test_a_kick_while_waiting_out_the_delay_keeps_the_old_steps_provenance():
+    loop, db, odb, http, _ = loop_with_service([proposal(5)])
+    loop.clock = Clock()
+    seq_id = finished_step(loop, db, 604)
+    db.sequences[seq_id]["status"] = "CLAIMED"
+    loop.claim(seq_id)
+    assert odb.values["/Nearline/MiniTwin/Pending/%d/Proposal id" % seq_id] == 5
+    # a new proposal is taken before the post delay is over
+    http.proposals.append(proposal(6, step_id="ASM12_95.20"))
+    loop.poll_and_schedule()
+    assert loop.active["proposal_id"] == 6
+    loop.clock.t += 61
+    loop.post_due()
+    context = http.contexts[-1]
+    assert context["context_id"] == "run00604"
+    assert context["responds_to"] == {"proposal_id": 5}
+    assert context["provenance"]["step_id"] == "ASM12_90.44"
+    assert loop.active["proposal_id"] == 6        # the new step is untouched
+    assert "/Nearline/MiniTwin/Pending/%d/Proposal id" % seq_id not in odb.values
+
+
+def test_a_restart_during_the_delay_keeps_the_provenance():
+    loop, db, odb, http, _ = loop_with_service([proposal(5)])
+    loop.clock = Clock()
+    seq_id = finished_step(loop, db, 604)
+    db.sequences[seq_id]["status"] = "CLAIMED"
+    loop.claim(seq_id)
+    del loop
+    loop2, _, _, http2, _ = loop_with_service([], odb=odb, db=db)
+    loop2.clock = Clock()
+    assert loop2.resume_claimed() == [seq_id]
+    loop2.clock.t += 60
+    loop2.post_due()
+    assert http2.contexts[-1]["responds_to"] == {"proposal_id": 5}
+
+
+def test_resume_leaves_sequences_of_other_proposals_alone():
+    loop, db, odb, http, messages = loop_with_service([])
+    loop.clock = Clock()
+    # a CLAIMED sequence nobody recorded a step for
+    db.add_run(590, subruns=1, seq_id=40)
+    # one recorded for proposal 3 while the watermark is at 6
+    db.add_run(591, subruns=1, seq_id=41)
+    tuning.save_pending(odb, 41, {"proposal_id": 3, "step_id": "S", "attempt": 0, "plan": "P"})
+    loop.mt.last_proposal_id = 6
+    assert loop.resume_claimed() == []
+    loop.clock.t += 120
+    loop.post_due()
+    assert http.contexts == []
+    (text,) = [m for m, _ in messages if "left CLAIMED" in m]
+    assert "40" in text and "41" in text and "590" in text and "post --run" in text
+
+
+def test_resume_reads_no_histograms():
+    calls = []
+    loop, db, odb, http, _ = loop_with_service([proposal(5)])
+    loop.header_reader = lambda path: calls.append(path) or HEADER
+    seq_id = finished_step(loop, db, 604)
+    db.sequences[seq_id]["status"] = "CLAIMED"
+    loop.clock = Clock()
+    assert loop.resume_claimed() == [seq_id]
+    assert calls == []

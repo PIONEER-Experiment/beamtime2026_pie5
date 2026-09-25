@@ -653,9 +653,15 @@ daemon calls it and the command line above runs the same functions.
    scheduled in. The sequence becomes `DONE` and the step is closed only once
    the service has taken the context. A context the service cannot be reached
    for stays queued in the daemon and is retried, with the sequence left
-   `CLAIMED`; the queue is in memory, so a restarted daemon posts every
-   `CLAIMED` `mt_add` sequence again (the service recognises a repeat by its
-   context id). A context the service refuses (a 4xx about its content) is
+   `CLAIMED`. The step a sequence belongs to is taken when the daemon claims
+   it and recorded under `/Nearline/MiniTwin/Pending/<seq id>/` (removed once
+   delivered), so a proposal taken while it waits out the post delay, or a
+   restart, does not strip its `responds_to`. The queue is in memory: a
+   restarted daemon puts every `CLAIMED` `mt_add` sequence whose step belongs
+   to the current proposal (or is the active step) back into the post delay
+   and posts it again (the service recognises a repeat by its context id);
+   any other `CLAIMED` sequence is named in one MIDAS message and left for
+   `post --run N`. A context the service refuses (a 4xx about its content) is
    dropped: the sequence is `FAILED`, with a MIDAS error and a `failed`
    report. So is a context that could not be built.
 4. **Progress is reported.** While a step is active the daemon posts
@@ -715,6 +721,7 @@ closes the sequence.
 | `/Nearline/MiniTwin/Active step/Step id`, `Attempt`, `Plan` | `""`, `-1`, `""` | the proposal's plan step; empty / `-1` = not known |
 | `/Nearline/MiniTwin/Active step/Seq id` | `0` | the run-database sequence of the run in flight |
 | `/Nearline/MiniTwin/Last context id` | `""` | context id of the last context the service took |
+| `/Nearline/MiniTwin/Pending/<seq id>/Proposal id`, `Step id`, `Attempt`, `Plan` | — | the step a claimed sequence belongs to, until its context is delivered |
 
 The keys this loop added are created with their defaults when the daemon
 starts and are never overwritten.
