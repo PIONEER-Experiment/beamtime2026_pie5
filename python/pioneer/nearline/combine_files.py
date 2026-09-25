@@ -27,7 +27,42 @@ def load_json_config(config_file : Path) -> dict:
 
 def merge_sub_runs(input_files : list[str]):
     """
-    Combine histograms from the same run that got split into subruns.
+    Combine histograms from the same run that got split into subruns, and
+    normalise them by the run's current pulses (see normalise).
+    """
+    headers, histos = sum_sub_runs(input_files)
+    normalise([histos], [input_files[0]])
+    return headers, histos
+
+
+def current_count(histos : dict) -> float:
+    """Current pulses of one run's summed histograms; 0 without any."""
+    current = histos.get(current_path)
+    return current.Integral() if current is not None else 0.0
+
+
+def normalise(runs : list[dict], names : list[str]) -> bool:
+    """
+    Divide each run's histograms by its own number of current pulses -- all
+    of them or none: if any run has no current histogram, or an empty one,
+    every run is left as raw counts (factor 1), with one warning line, so
+    runs stay comparable with each other. Returns True when normalised.
+    """
+    counts = [current_count(h) for h in runs]
+    missing = [name for name, count in zip(names, counts) if count <= 0]
+    if missing:
+        print(f"warning: {current_path} is missing or empty in {', '.join(missing)}; "
+              "histograms are summed but not normalised (factor 1)")
+        return False
+    for histos, count in zip(runs, counts):
+        for h in histos.values():
+            h.Scale ( 1. / count)
+    return True
+
+
+def sum_sub_runs(input_files : list[str]):
+    """
+    Sum the histograms of one run's subrun files; no normalisation.
     """
 
     import ROOT     # here, not at module level, so the module imports without ROOT
@@ -81,33 +116,23 @@ def merge_sub_runs(input_files : list[str]):
         next_file.Close()
 
 
-    # Normalise all histograms by the number of current pulses. Without any
-    # (no histogram, or no entries) they are left as counts, with one warning.
-    current = histos.get(current_path)
-    ref_count = current.Integral() if current is not None else 0.0
-    if ref_count <= 0:
-        print(f"warning: {current_path} is missing or empty in {input_files[0]}; "
-              "histograms are summed but not normalised (factor 1)")
-    else:
-        for h in histos.values():
-            h.Scale ( 1. / ref_count)
-
     return headers, histos
 
 
-def main():
-    import ROOT
+def combine_runs(runs : list[list[str]]):
+    """
+    Sum each run's subruns, normalise all runs or none (see normalise), and
+    add the runs together. Returns (headers, histos).
+    """
+    summed = [sum_sub_runs(files) for files in runs]
+    if not normalise([h for _, h in summed], [files[0] for files in runs]):
+        # raw counts: the current histogram is not part of the result
+        for _, histos in summed:
+            histos.pop(current_path, None)
 
-    parser = argparse.ArgumentParser(description="Combine nearline ROOT files.")
-    parser.add_argument("config", type=Path, help="JSON merge configuration file")
-    args = parser.parse_args()
-
-    config = load_json_config(args.config)
     combined_headers = {}
     combined_histos = {}
-
-    for run_files in config["runs"].values():
-        headers, histos = merge_sub_runs(run_files)
+    for headers, histos in summed:
         if not combined_headers:
             combined_headers = headers
         else:
@@ -122,8 +147,20 @@ def main():
         else:
             if set(combined_histos.keys()) != set(histos.keys()):
                 raise ValueError(f"Inconsistent histogram sets between runs")
-            for histo in histos.items():
+            for name, histo in histos.items():
                 combined_histos[name].Add(histo)
+    return combined_headers, combined_histos
+
+
+def main():
+    import ROOT
+
+    parser = argparse.ArgumentParser(description="Combine nearline ROOT files.")
+    parser.add_argument("config", type=Path, help="JSON merge configuration file")
+    args = parser.parse_args()
+
+    config = load_json_config(args.config)
+    combined_headers, combined_histos = combine_runs(list(config["runs"].values()))
 
     output = ROOT.TFile.Open(config["output"], "RECREATE")
     if not output or output.IsZombie():

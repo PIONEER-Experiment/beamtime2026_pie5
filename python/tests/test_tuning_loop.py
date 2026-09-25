@@ -1733,3 +1733,35 @@ def test_empty_maps_are_not_sent_inline():
     assert "inline" not in context["measurement"]
     assert len(context["measurement"]["files"]) == 1
     assert any("empty" in m and "warning" in m.lower() for m, _ in messages)
+
+
+# -- second review N9: combine_files across runs ---------------------------------
+
+def _run_files(prefix, current_counts):
+    files = {}
+    for sub in ("0", "1"):
+        objects = dict(mupix_maps(10.0), beamline=FakeHeader())
+        if current_counts is not None:
+            objects["histograms/musip/current"] = FakeTH2([[current_counts]], (0, 1), (0, 1))
+        files[prefix + sub] = objects
+    return files
+
+
+def test_combine_adds_several_runs(monkeypatch):
+    files = {**_run_files("a", 5.0), **_run_files("b", 10.0)}
+    monkeypatch.setitem(sys.modules, "ROOT", fake_root(files))
+    from pioneer.nearline import combine_files
+    headers, histos = combine_files.combine_runs([["a0", "a1"], ["b0", "b1"]])
+    # run a: 20 counts / 10 pulses, run b: 20 counts / 20 pulses
+    assert histos[XXP].Integral() == pytest.approx(2.0 + 1.0)
+
+
+def test_combine_normalises_all_runs_or_none(monkeypatch, capsys):
+    files = {**_run_files("a", 5.0), **_run_files("b", None)}
+    monkeypatch.setitem(sys.modules, "ROOT", fake_root(files))
+    from pioneer.nearline import combine_files
+    headers, histos = combine_files.combine_runs([["a0", "a1"], ["b0", "b1"]])
+    assert histos[XXP].Integral() == pytest.approx(40.0)      # raw counts of both runs
+    assert "histograms/musip/current" not in histos
+    out = capsys.readouterr().out
+    assert out.count("warning") == 1 and "b0" in out

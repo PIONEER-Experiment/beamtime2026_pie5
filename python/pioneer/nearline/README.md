@@ -811,18 +811,14 @@ differ in their selection and binning.
 
 ## The merge step normalises by `PSM_CURRENT_CHANNEL`
 
-`combine_files.py` sums the histograms of a run's sub-runs and divides every one
-of them by `Integral()` of `histograms/musip/current`. When that histogram is
-missing or empty (`PSM_DECODE = False`, `PSM_CURRENT_CHANNEL = None`, or a run
-with no current pulses) it prints one warning and leaves the sums as counts
-(factor 1), so merged runs are then not comparable per current pulse.
-
-**Two known defects, not fixed here.** `MergeJob.build_job_description_file()`
-feeds `combine_files` the RNTuple file `<filebase>.root` while the histograms
-live in `<filebase>_hists.root`, so the merge looks in the wrong file; and the
-cross-run loop at `combine_files.py:114-116` iterates `histos.items()` while
-indexing `combined_histos[name]` with a `name` leaked from the previous loop,
-which happens to work for one run and fails on a sequence of more than one.
+`combine_files.py` sums the histograms of each run's sub-runs, divides each
+run by its own `Integral()` of `histograms/musip/current`, and adds the runs
+together. Normalisation is all or nothing: when any run's current histogram
+is missing or empty (`PSM_DECODE = False`, `PSM_CURRENT_CHANNEL = None`, or a
+run with no current pulses) it prints one warning and every run stays raw
+counts (factor 1), so the runs remain comparable with each other but not per
+current pulse. `MergeJob` feeds it the `<filebase>_hists.root` files
+(`jobs.py`), and the loop adding runs together handles any number of runs.
 
 ## Output size
 
