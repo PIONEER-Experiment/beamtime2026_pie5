@@ -765,6 +765,30 @@ class RunDbView:
             }
         )
 
+    def config_list(self, config_type: str) -> dict:
+        """One line per configuration of the given type, newest first.
+
+        The `config_type` must be a table in schema `config`, and the rows are
+        shown with their values.  The page shows the same columns as psql does,
+        and the full values are one click away.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT id, config_type, do_not_use, comment FROM config.configuration "
+                "WHERE config_type = %s ORDER BY id ASC",
+                (config_type,)
+            )
+            results = cur.fetchall()
+            vals = self._config_values(cur, [(config_type, r['id']) for r in results])
+            values = [ {
+                "config_id": row["id"],
+                "config_type": row["config_type"],
+                "do_not_use": bool(row["do_not_use"]),
+                "comment": row["comment"],
+                "values": vals.get((row["config_type"], row["id"]))
+            } for row in results]
+        return jsonable(values)
+
 
 # ------------------------------------------------------------------ command line
 
@@ -823,6 +847,14 @@ def _print_status(data: dict) -> None:
     counts = data["counts"] or {}
     print("counts   " + ", ".join(f"{key}={value}" for key, value in counts.items()))
 
+def _print_config(item: dict) -> None:
+    print(f"configuration {item['config_id']} ({item['config_type']}), "
+          f"do not use: {item['do_not_use']}")
+    if item["values"] is None:
+        print("no table for this configuration type")
+        return
+    for key, value in item["values"].items():
+        print(f"  {key:20s} {value}")
 
 def _print_data(cmd: str, data: dict) -> None:
     if cmd == "status":
@@ -899,14 +931,11 @@ def _print_data(cmd: str, data: dict) -> None:
                                             ("status", "status")]))
         return
     if cmd == "config":
-        item = data["config"]
-        print(f"configuration {item['config_id']} ({item['config_type']}), "
-              f"do not use: {item['do_not_use']}")
-        if item["values"] is None:
-            print("no table for this configuration type")
-            return
-        for key, value in item["values"].items():
-            print(f"  {key:20s} {value}")
+        if isinstance(data, list):
+            for item in data:
+                _print_config(item)
+        else:
+            _print_config(data['config'])
 
 
 def main(argv=None) -> int:
@@ -923,7 +952,7 @@ def main(argv=None) -> int:
     )
     parser.add_argument("command", choices=sorted(commands.CLI_COMMANDS),
                         help="which view to print")
-    parser.add_argument("id", nargs="?", type=int,
+    parser.add_argument("id", nargs="?",
                         help="database id, for the run and config commands")
     parser.add_argument("--limit", type=int, default=None,
                         help="how many rows (runlog, queue, sequences)")

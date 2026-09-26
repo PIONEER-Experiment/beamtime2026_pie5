@@ -54,6 +54,7 @@ DEFAULTS = {
     "Runlog refresh seconds": 30.0,
     "Max reply kB": 256,
     "Stale seconds": 20.0,
+    "Beamline" : "PiE5",
     "Client name": "RunDBView",
 }
 
