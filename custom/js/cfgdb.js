@@ -531,7 +531,7 @@ async function renderConfigurations() {
          dlgAlert("Number of runs does not match confirmation.");
          return;
       } else {
-         dlgQuery("Schedule " + numRuns + " runs?", "", async function(resp, param) {
+         dlgQuery("Confirm scheduling " + numRuns + " runs. Enter shifter password.</br></br> Password: ", "", async function(resp, param) {
             if (resp) {
                try {
                   await R.call("generate_sequence", {"config" : selected, "events" : document.getElementById("submit_events").value, "password" : resp})
