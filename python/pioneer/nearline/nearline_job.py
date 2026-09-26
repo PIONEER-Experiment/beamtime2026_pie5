@@ -311,6 +311,12 @@ PSM_GEOMETRY_MAPS = ["MUPIX:mupix_chip_map", "MUTRIG:mutrig_channel_map"]
 PSM_GEOMETRY_TRANS = ["COND:isel"]
 # Containers supplying the base table and the two map tables above.
 PSM_GEOMETRY_FILES = ["bt2026_psm_geometry.json", "bt2026_psm_readout_map.json"]
+# Tag of the base geometry table; None reads the table's default tag, which is
+# bt2026-v4: the MuPix chips of each quad 0.32 mm apart, a PROVISIONAL value from
+# the in-beam wedge study, to be measured after the beamtime. "bt2026-v3" is the
+# same geometry with the chips edge to edge. Only the geometry table is pinned;
+# the two maps keep their own default tags.
+PSM_GEOMETRY_TAG = None
 # --- MuPix monitor ---------------------------------------------------------
 # The low-level MuPix check: a hit map per chip and per plane, and tracks made
 # from an L1/L2 time coincidence alone. It reads the MuPix hits and nothing
@@ -326,7 +332,8 @@ PSM_MUPIX_MONITOR = True
 # histograms/PIPSMMuPixMonitor/dt, which is filled over the wider range below.
 PSM_MUPIX_WINDOW_NS = 40.0
 # Pixels per bin of every hit map. 1 is one bin per pixel: 256 x 250 per chip
-# and 512 x 500 per plane on bt2026, about 4 MB of histogram in total, and the
+# and 516 x 504 per plane on bt2026-v4 (512 x 500 of pixels, four empty bins
+# across each gap between the chips), about 4 MB of histogram in total, and the
 # granularity a dead column or a hot pixel is visible at. Setting it to n
 # divides the bin count of every map by n squared.
 PSM_MUPIX_PIXELS_PER_BIN = 1
@@ -344,7 +351,8 @@ PSM_MUPIX_DT_BINS = 51
 PSM_MUPIX_SLOPE_RANGE_MRAD = 0.0
 # Half-width in mm of the fixed x/y axes of track_xy_expanded, xxp_central and
 # yyp_central. It covers the standard five-point scan (PSM_POSITIONS_MM, +-17 mm)
-# and the +-20 mm 3x3 grid, plus the 20.48 mm half-width of a plane (40.48 mm),
+# and the +-20 mm 3x3 grid, plus the 20.64 mm half-width of a plane with the
+# 0.32 mm gap between its chips (40.64 mm),
 # rounded up to 41.6 = 130 x 0.32 so the monitor's 260 bins stay 0.32 mm (four
 # pixels) wide; the monitor shifts the axis by a quarter pixel so a half-pixel
 # stage offset such as 17 mm puts no pixel on a bin edge. It is a fixed number
@@ -501,7 +509,8 @@ PSM_WEIGHT_MARGIN_MM = 2.0
 # number of PSM_POSITIONS_MM windows containing it at both L1 and L2, where
 # each window is the conditions footprint (PIGeometrySvc) of the L1/L2 plane
 # moved from this run's own stage position to that config position and eroded
-# by PSM_WEIGHT_MARGIN_MM. Over the runs of a scan the weights a trajectory
+# by PSM_WEIGHT_MARGIN_MM, less the gaps between the MuPix chips there (a track
+# through a position's chip gap is one that position cannot see). Over the runs of a scan the weights a trajectory
 # would receive then sum to 1 wherever at least one run can see it. A run at
 # none of PSM_POSITIONS_MM (within 0.01 mm) counts its own window as one more
 # position and warns that its weights will not sum to 1 with the scan.
@@ -720,6 +729,10 @@ def check():
             problems.append(f"PSM_SMA_COARSE_SHIFT is {PSM_SMA_COARSE_SHIFT!r}: it must be None "
                             "(from the conditions) or an integer 0-18; above 18 the coarse "
                             "field no longer pins the fine field's 2^20 ns wrap.")
+    if PSM_GEOMETRY_TAG is not None and not (isinstance(PSM_GEOMETRY_TAG, str)
+                                             and PSM_GEOMETRY_TAG):
+        problems.append(f"PSM_GEOMETRY_TAG is {PSM_GEOMETRY_TAG!r}: it must be None (the "
+                        "table's default tag) or the name of a tag of the geometry table.")
     if PSM_PIXEL_MASK_TAG is not None and not (isinstance(PSM_PIXEL_MASK_TAG, str)
                                                and PSM_PIXEL_MASK_TAG):
         problems.append(f"PSM_PIXEL_MASK_TAG is {PSM_PIXEL_MASK_TAG!r}: it must be None (the "
@@ -871,9 +884,12 @@ if PG_CONNECTIONS:
 services = [PIHeaderSvc(), selector, PIMidasConversionSvc("ConversionSvc"),
             EvtDataSvc(), PIDataModelSvc(), condSvc]
 if PSM_DECODE:
-    services.append(PIGeometrySvc(Base=str(PSM_GEOMETRY_BASE),
-                                  Trans=[str(t) for t in PSM_GEOMETRY_TRANS],
-                                  Maps=[str(m) for m in PSM_GEOMETRY_MAPS]))
+    geo_svc = PIGeometrySvc(Base=str(PSM_GEOMETRY_BASE),
+                            Trans=[str(t) for t in PSM_GEOMETRY_TRANS],
+                            Maps=[str(m) for m in PSM_GEOMETRY_MAPS])
+    if PSM_GEOMETRY_TAG:
+        geo_svc.GeometryTag = str(PSM_GEOMETRY_TAG)
+    services.append(geo_svc)
 services.append(PIHistogramSvc(OutputFile=hist_file(NL_OUT)))
 services.append(EvtPersistencySvc(CnvServices=["PIMidasConversionSvc/ConversionSvc"]))
 audit = AuditorSvc()
@@ -1101,8 +1117,10 @@ if PSM_RECO:
     if PSM_RF_CHANNEL is not None:
         # Each tracklet's S1 hit gets its RF phase (s1rfphase) under the same
         # rule and defaults as the SMA monitor's rf_phase, and the prompt
-        # tracklets fill xy_vs_s1phase, so a MuPix map for any phase window is
-        # a projection of it. /Event/rf is optional per frame, as there.
+        # tracklets fill xy_vs_s1phase, xxp_vs_s1phase and yyp_vs_s1phase (and
+        # their scan-weighted _w twins), so a MuPix map or a phase space for any
+        # phase window is a projection of them. /Event/rf is optional per
+        # frame, as there.
         all_reco.RFInput = _TES_RF
     weight_reco = PIPSMComputeWeight(
         input=all_reco.output, output=_TES_PSM_WEIGHTS,
