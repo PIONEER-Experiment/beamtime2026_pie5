@@ -292,9 +292,9 @@ function configTableHtml(configuration_tables) {
               "<td>" + row.config_id + "</td>" +
               "<td>" + (row.comment ? row.comment : " --- ") + "</td>" +
               "<td>" + do_not_use_cell + "</td>" +
-              "<td>" + row.values.seq_id + "</td>" +
-              "<td>" + row.values.xpos + "</td>" +
-              "<td>" + row.values.ypos + "</td>" +
+              "<td>" + (row.values ? row.values.seq_id : "---") + "</td>" +
+              "<td>" + (row.values ? row.values.xpos : "---") + "</td>" +
+              "<td>" + (row.values ? row.values.ypos : "---") + "</td>" +
               "</tr>"
 
    });
@@ -308,8 +308,8 @@ function configTableHtml(configuration_tables) {
               "<td>" + row.config_id + "</td>" +
               "<td>" + (row.comment ? row.comment : " --- ") + "</td>" +
               "<td>" + do_not_use_cell + "</td>" +
-              "<td>" + row.values.seq_id + "</td>" +
-              "<td>" + row.values.xpos + "</td>" +
+              "<td>" + (row.values ? row.values.seq_id : "---") + "</td>" +
+              "<td>" + (row.values ? row.values.xpos : "---") + "</td>" +
               "</tr>"
 
    });
@@ -321,7 +321,7 @@ function configTableHtml(configuration_tables) {
        return "<tr>" +
               "<td>" + row.config_id + "</td>" +
               "<td>" + do_not_use_cell + "</td>" +
-              "<td>" + row.values.seq_id + "</td>" +
+              "<td>" + (row.values ? row.values.seq_id : " ---" ) + "</td>" +
               "<td>" + (row.comment ? row.comment : " --- ") + "</td>" +
               "</tr>"
 
