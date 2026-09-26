@@ -248,7 +248,8 @@ $$ LANGUAGE SQL STABLE;
 CREATE TABLE IF NOT EXISTS config.configuration (
     id SERIAL PRIMARY KEY,               -- primary identifier of the configuration
     config_type TEXT,                    -- specify the configuration type. Shall reference another table in SCHEMA config
-    do_not_use BOOLEAN DEFAULT false     -- set this to true if specific configuration causes problems, e.g. tripping hardware
+    do_not_use BOOLEAN DEFAULT false,    -- set this to true if specific configuration causes problems, e.g. tripping hardware
+    comment TEXT                         -- free form comment
 );
 
 -- dummy configuration table for testing
@@ -266,30 +267,30 @@ CREATE TABLE IF NOT EXISTS config.target_position (
     ypos FLOAT                                              -- y position where the target should be placed, in mm
 );
 
-WITH positions(rn, seq_id, xpos, ypos) AS (
+WITH positions(rn, seq_id, xpos, ypos, comment) AS (
     SELECT *
     FROM (
         VALUES
-            ( 1, 1,  0.0,   0.0),    -- single point measurement, centre only
-            ( 2, 2,  0.0,   0.0),    -- 5 point measurement, centre
-            ( 3, 2, 17.0,  17.0),    -- 5 point measurement, top right
-            ( 4, 2,-17.0,  17.0),    -- 5 point measurement, top left
-            ( 5, 2, 17.0, -17.0),    -- 5 point measurement, bottom right
-            ( 6, 2,-17.0, -17.0),    -- 5 point measurement, bottom left
-            ( 7, 3,-20.0,  20.0),    -- 3x3 measurement, top left
-            ( 8, 3,  0.0,  20.0),    -- 3x3 measurement, top centre
-            ( 9, 3, 20.0,  20.0),    -- 3x3 measurement, top right
-            (10, 3,-20.0,   0.0),    -- 3x3 measurement, centre left
-            (11, 3,  0.0,   0.0),    -- 3x3 measurement, centre
-            (12, 3, 20.0,   0.0),    -- 3x3 measurement, centre right
-            (13, 3,-20.0, -20.0),    -- 3x3 measurement, bottom left
-            (14, 3,  0.0, -20.0),    -- 3x3 measurement, bottom centre
-            (15, 3, 20.0, -20.0)     -- 3x3 measurement, bottom right
-    ) v(rn, seq_id, xpos, ypos)
+            ( 1, 1,  0.0,   0.0, 'single point centre'),    -- single point measurement, centre only
+            ( 2, 2,  0.0,   0.0, '5p, centre'),    -- 5 point measurement, centre
+            ( 3, 2, 17.0,  17.0, '5p top right'),    -- 5 point measurement, top right
+            ( 4, 2,-17.0,  17.0, '5p top left'),    -- 5 point measurement, top left
+            ( 5, 2, 17.0, -17.0, '5p bottom right'),    -- 5 point measurement, bottom right
+            ( 6, 2,-17.0, -17.0, '5p bottom left'),    -- 5 point measurement, bottom left
+            ( 7, 3,-20.0,  20.0, '3x3 top left'),    -- 3x3 measurement, top left
+            ( 8, 3,  0.0,  20.0, '3x3 top centre'),    -- 3x3 measurement, top centre
+            ( 9, 3, 20.0,  20.0, '3x3 top right'),    -- 3x3 measurement, top right
+            (10, 3,-20.0,   0.0, '3x3 centre left'),    -- 3x3 measurement, centre left
+            (11, 3,  0.0,   0.0, '3x3 centre'),    -- 3x3 measurement, centre
+            (12, 3, 20.0,   0.0, '3x3 centre right'),    -- 3x3 measurement, centre right
+            (13, 3,-20.0, -20.0, '3x3 bottom left'),    -- 3x3 measurement, bottom left
+            (14, 3,  0.0, -20.0, '3x3 bottom centre'),    -- 3x3 measurement, bottom centre
+            (15, 3, 20.0, -20.0, '3x3 bottom right')     -- 3x3 measurement, bottom right
+    ) v(rn, seq_id, xpos, ypos, comment)
 ),
 configs AS (
-    INSERT INTO config.configuration (config_type)
-    SELECT 'target_position'
+    INSERT INTO config.configuration (config_type, comment)
+    SELECT 'target_position', comment
     FROM positions
     ORDER BY rn
     RETURNING id
@@ -316,21 +317,21 @@ WITH positions(rn, seq_id, xpos, comment) AS (
     SELECT *
     FROM (
         VALUES
-            ( 1, 1,  34.0, '4 mm'),
-            ( 2, 1,  89.0, '5 mm'),
-            ( 3, 1, 143.0, '6 mm'),
-            ( 4, 1, 198.0, '7 mm'),
-            ( 5, 1, 253.0, '8 mm'),
-            ( 6, 2,  44.5, '4.5 mm IFP'),
-            ( 7, 2,  81.5, '6.5 mm IFP'),
-            ( 8, 2, 118.5, '14.0 mm IFP'),
-            ( 9, 2, 155.5, '25.8 mm IFP'),
-            (10, 2, 192.5, '31.2 mm IFP')
+            ( 1, 1,  34.0, 'PSM 4 mm'),
+            ( 2, 1,  89.0, 'PSM 5 mm'),
+            ( 3, 1, 143.0, 'PSM 6 mm'),
+            ( 4, 1, 198.0, 'PSM 7 mm'),
+            ( 5, 1, 253.0, 'PSM 8 mm'),
+            ( 6, 2,  50.5, 'IFP  4.5 mm'),
+            ( 7, 2,  87.5, 'IFP  6.5 mm'),
+            ( 8, 2, 124.0, 'IFP 14.0 mm'),
+            ( 9, 2, 161.0, 'IFP 25.8 mm'),
+            (10, 2, 198.0, 'IFP 31.2 mm')
     ) v(rn, seq_id, xpos, comment)
 ),
 configs AS (
-    INSERT INTO config.configuration (config_type)
-    SELECT 'degrader_position'
+    INSERT INTO config.configuration (config_type, comment)
+    SELECT 'degrader_position', comment
     FROM positions
     ORDER BY rn
     RETURNING id
