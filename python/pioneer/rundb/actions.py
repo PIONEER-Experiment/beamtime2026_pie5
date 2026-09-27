@@ -29,9 +29,11 @@ on them as they are:
   for as long as the scheduling call runs, under a lock, and puts it back in a
   `finally`.  The read path does not go through `config` at all (`pg.py` builds
   its own connection strings), so a poll running at the same time is unaffected;
-* `interface.register_sequence` returns `True`, not the id of the sequence it
-  created.  The id is read back afterwards from `state.runs_in_sequence` for
-  the runs that were just created.
+* `midas_run_sequence.schedule` returns the run ids, not the id of the
+  sequence it created (`interface.register_sequence` now returns that id and
+  `schedule` keeps it as `seq_id`, but this module predates that).  The id is
+  read back afterwards from `state.runs_in_sequence` for the runs that were
+  just created.
 
 `interface.load_config_sequence` has no `ORDER BY`, so the order in which the
 five target positions come back is whatever the database feels like.  The reply
@@ -635,9 +637,10 @@ def _schedule(write_dsn: str, configs: list, events: int) -> list:
 def _sequence_of(conn, run_ids: list):
     """The sequence the new runs ended up in.
 
-    `interface.register_sequence` returns `True` rather than the id it created,
-    so the id is read back from the membership rows of the runs that were just
-    scheduled.  More than one would mean somebody else was writing at the same
+    `midas_run_sequence.schedule` returns run ids rather than the sequence id
+    (it is kept on the object as `seq_id` since `interface.register_sequence`
+    returns it), so the id is read back from the membership rows of the runs
+    that were just scheduled.  More than one would mean somebody else was writing at the same
     moment; that is reported as no id rather than as a wrong one.
     """
     if not run_ids:

@@ -177,6 +177,63 @@ class interface:
         conn.close()
         return result[0] if result is not None else None
 
+    def get_run_id(self, midas_run_number : int) -> int | None:
+        """Run database id of MIDAS run `midas_run_number` (the newest, should
+        a number have been used twice), or None."""
+        conn = connect(self.user, self.password)
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id FROM state.midas_run WHERE midas_run_number = %s ORDER BY id DESC LIMIT 1",
+                (midas_run_number, )
+            )
+            result = cursor.fetchone()
+        conn.close()
+        return result[0] if result is not None else None
+
+    def get_run_times(self, midas_run_numbers : int | list[int], timeout_s : float = 5.0) -> dict:
+        """Start and stop time of MIDAS runs `midas_run_numbers`.
+
+        Returns ``{run number: {"bor": datetime | None, "eor": datetime | None}}``
+        with an entry for every number asked about.  The times are the
+        ``log_time`` of the begin-of-run and end-of-run rows the slow-control
+        logger writes to ``logs.slow_control`` (earliest BOR, latest EOR, as
+        the run database page shows them); a run without such a row gets None.
+        Read-only.
+
+        Without the index on (midas_run_number, reason) that db_viewer.sql
+        creates this scans the whole log, which only grows: the query is
+        cancelled after `timeout_s` seconds (statement_timeout, raised as
+        psycopg.errors.QueryCanceled).
+        """
+        if isinstance(midas_run_numbers, int):
+            midas_run_numbers = [midas_run_numbers]
+        numbers = sorted({int(n) for n in midas_run_numbers})
+        out = {n: {"bor": None, "eor": None} for n in numbers}
+        if not numbers:
+            return out
+        conn = connect(self.user, self.password)
+        try:
+            with conn.cursor() as cursor:
+                # an int, not user input: SET takes no bind parameters
+                cursor.execute("SET LOCAL statement_timeout = '%dms'"
+                               % max(1, int(float(timeout_s) * 1000)))
+                cursor.execute(
+                    """
+                    SELECT midas_run_number,
+                           min(log_time) FILTER (WHERE reason = 'BOR'),
+                           max(log_time) FILTER (WHERE reason = 'EOR')
+                    FROM logs.slow_control
+                    WHERE reason IN ('BOR', 'EOR')
+                      AND midas_run_number = ANY(%s)
+                    GROUP BY midas_run_number
+                    """, (numbers, )
+                )
+                for number, started, stopped in cursor.fetchall():
+                    out[number] = {"bor": started, "eor": stopped}
+        finally:
+            conn.close()
+        return out
+
     def schedule_postproc_job(self, run_id : int, task : str):
         conn = connect(self.user, self.password)
         with conn.cursor() as cursor:
@@ -391,7 +448,8 @@ class interface:
 
         return run_id
 
-    def register_sequence(self, run_ids : list, on_complete : str) -> bool:
+    def register_sequence(self, run_ids : list, on_complete : str) -> int:
+        """Create a sequence around `run_ids`; returns the new sequence id."""
         conn = connect(user = self.user, password = self.password)
 
         with conn.cursor() as cursor:
@@ -406,7 +464,50 @@ class interface:
                 )
         conn.commit()
         conn.close()
-        return True
+        return seq_id
+
+    def get_sequence_progress(self, seq_id : int) -> dict | None:
+        """
+        Status of a sequence, its runs and their nearline jobs, for progress
+        reports. None when the sequence does not exist. Otherwise
+        {"id", "status", "on_complete", "runs": [{"run_db_id", "run_number",
+        "status", "requested_events", "nearline_total", "nearline_done",
+        "nearline_failed"}]}, runs in id order.
+        """
+        conn = connect(user = self.user, password = self.password)
+        try:
+            with conn.cursor(row_factory = psycopg.rows.dict_row) as cursor:
+                cursor.execute(
+                    "SELECT id, status, on_complete FROM state.run_sequence WHERE id = %s", (seq_id, )
+                )
+                seq = cursor.fetchone()
+                if seq is None:
+                    return None
+                cursor.execute(
+                    """
+                    SELECT
+                        mr.id AS run_db_id,
+                        mr.midas_run_number AS run_number,
+                        mr.status,
+                        mr.requested_events,
+                        COUNT(ppj.id) AS nearline_total,
+                        COUNT(ppj.id) FILTER (WHERE utils.is_success(ppj.status)) AS nearline_done,
+                        COUNT(ppj.id) FILTER (WHERE utils.is_failure(ppj.status)) AS nearline_failed
+                    FROM state.runs_in_sequence AS ris
+                    JOIN state.midas_run AS mr ON ris.midas_run_id = mr.id
+                    LEFT JOIN state.postproc_job AS ppj
+                        ON ppj.midas_run_id = mr.id AND ppj.job_type = 'nearline'
+                    WHERE ris.seq_id = %s
+                    GROUP BY mr.id
+                    ORDER BY mr.id
+                    """, (seq_id, )
+                )
+                runs = [dict(r) for r in cursor.fetchall()]
+        finally:
+            conn.close()
+        result = dict(seq)
+        result["runs"] = runs
+        return result
 
     def find_sequences(self, status : str, limit : int = 1) -> list[dict]:
         conn = connect(user = self.user, password = self.password)
@@ -452,11 +553,14 @@ class interface:
 
     def get_all_runs_in_sequence(self, id : int) -> list[int]:
         conn = connect(user = self.user, password = self.password)
-        with conn.cursor() as cursor:
-            cursor.execute(
-                "SELECT midas_run_id FROM state.runs_in_sequence WHERE seq_id = %s", (id, )
-            )
-            run_ids = cursor.fetchall()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT midas_run_id FROM state.runs_in_sequence WHERE seq_id = %s", (id, )
+                )
+                run_ids = cursor.fetchall()
+        finally:
+            conn.close()
         return [r[0] for r in run_ids]
 
 

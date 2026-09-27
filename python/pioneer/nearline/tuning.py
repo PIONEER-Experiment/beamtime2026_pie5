@@ -1,0 +1,1715 @@
+"""The tuning loop between the nearline daemon and the beam-tuning service.
+
+One proposal from the service becomes one run in the run database: the
+proposal's row in the config table named by `/Nearline/config/MiniTwin updates`
+times one `target_position` config (the stage centre by default), in a
+sequence with `on_complete = mt_add`.  When the run and every one of its
+nearline jobs are done the run database marks that sequence RUNSDONE, the
+daemon claims it and `post_sequence()` sends the run's histogram files to the
+service as a context.
+
+The daemon calls the functions here; nothing in this module imports midas or
+ROOT at module level, so it also runs by hand (see the README, "Running it").
+"""
+
+from __future__ import annotations
+
+import time
+
+from pioneer.nearline.beamtune_client import DAQ_SCHEMA
+
+ODB_CONFIG = "/Nearline/config"
+
+#: keys under /Nearline/config this module needs, with their defaults.  They
+#: are created when missing and never overwritten.
+CONFIG_DEFAULTS = {
+    # config.target_position id the one run per proposal is taken at; id 1 is
+    # the one-point centre sequence (seq 1, (0, 0)).
+    "MiniTwin target config": 1,
+    # the nearline output tree as pinky writes it, and where the service
+    # reads the mirror of it; a posted file path has the first replaced by
+    # the second.
+    "MiniTwin local prefix": "/home/pinky/nearline/",
+    "MiniTwin remote prefix": "/home/pioneer/nearline/histograms/",
+    # seconds a finished sequence waits before its context is posted; 0 posts
+    # at once, the inline maps being the measurement (a positive value lets
+    # the service's file mirror, rsync every 30 s, catch up first)
+    "MiniTwin post delay": 0,
+    # upper limit on the events a proposal may request for its run
+    "MiniTwin max events": 10000000,
+}
+
+#: The loop's memory, under /Nearline/MiniTwin: the newest proposal id seen,
+#: the step whose run is being taken, and the id of the last context the
+#: service took (checked against a new proposal's ``in_reply_to``).  Restored at start-up, so a restart
+#: never schedules the outstanding proposal again.  Proposal id 0 means no
+#: active step; an empty string, attempt -1, or a RUN_RECORD key at its
+#: "not known" value means "not known".
+ODB_STATE = "/Nearline/MiniTwin"
+
+#: What the daemon records of the active step's run in its start and stop
+#: transitions (record_run_start, record_run_stop), for measurement.exposure:
+#: ``(step key, ODB key under Active step/ and Pending/<seq id>/, "not
+#: known")``.  Times are Unix seconds from /Runinfo/Start and Stop time
+#: binary, events the WaveDREAM ODB_EVENTS_SENT at each transition.  A
+#: time or run number <= 0 and events < 0 read as not known.
+RUN_RECORD = (
+    ("run_number", "Recorded run", 0),
+    ("run_start", "Run start", 0.0),
+    ("run_stop", "Run stop", 0.0),
+    ("events_start", "Events at BOR", -1),
+    ("events_stop", "Events at EOR", -1),
+)
+STATE_DEFAULTS = {
+    "Last proposal id": 0,
+    "Active step/Proposal id": 0,
+    "Active step/Step id": "",
+    "Active step/Attempt": -1,
+    "Active step/Plan": "",
+    "Active step/Seq id": 0,
+    **{"Active step/" + key: unknown for _, key, unknown in RUN_RECORD},
+    "Last context id": "",
+}
+
+#: DAQ progress reports (POST /v1/daq): looked at no more often than this,
+#: posted only when the stage, a run status or the subrun counts changed, or
+#: the events sent moved by EVENTS_STEP of the requested number.
+MONITOR_INTERVAL_S = 10.0
+EVENTS_STEP = 0.1
+
+#: run-database statuses, as utils.status in rundb/db_config.sql
+PENDING_STATUSES = {"HOLDING", "PENDING", "DEPENDING"}
+SUCCESS_STATUSES = {"DONE"}
+FAILURE_STATUSES = {"FAILED", "BLOCKED", "ERROR", "CANCELLED"}
+
+#: what the running experiment shows about the run in progress
+ODB_RUN_DB_PK = "/Runinfo/Run DB PK"
+ODB_EVENTS_SENT = "/Equipment/WDWaveforms/Statistics/Events sent"
+ODB_START_TIME = "/Runinfo/Start time binary"
+ODB_STOP_TIME = "/Runinfo/Stop time binary"
+
+#: where measurement.exposure takes its numbers from (sent with it); each
+#: per_run entry says in ``time_source`` which of the two its times are from
+EXPOSURE_SOURCES = {
+    "seconds": "stop minus start of each run, summed over the runs: %s and %s as the nearline "
+               "daemon recorded them in the run's transitions (time_source odb); for a run it "
+               "did not record, the latest EOR minus the earliest BOR log_time in the run "
+               "database's logs.slow_control (time_source run_db)"
+               % (ODB_START_TIME, ODB_STOP_TIME),
+    "wd_events": "%s at the run's stop transition minus at its start transition (after the "
+                 "frontends reset it), as the nearline daemon recorded them" % ODB_EVENTS_SENT,
+}
+
+#: seconds before the fallback run-time lookup in the run database is cancelled
+RUN_TIMES_TIMEOUT_S = 5.0
+
+#: the daemon's own /Nearline/config/Output path default
+DEFAULT_OUTPUT_PATH = "/home/pinky/nearline"
+
+#: requested WaveDREAM events per run (ITER_EVENTS unless the proposal's
+#: run.stop asks for a number of events, see requested_events)
+ITER_EVENTS = 1e6
+FINAL_EVENTS = 1e7
+
+
+def ensure_odb_keys(odb):
+    """Create the keys this module reads, with their defaults, if missing."""
+    for base, defaults in ((ODB_CONFIG, CONFIG_DEFAULTS), (ODB_STATE, STATE_DEFAULTS)):
+        for key, default in defaults.items():
+            path = base + "/" + key
+            if not odb.odb_exists(path):
+                odb.odb_set(path, default)
+
+
+def load_state(odb):
+    """``(last proposal id, active step or None)`` from /Nearline/MiniTwin."""
+    def get(key):
+        return odb_value(odb, ODB_STATE + "/" + key, STATE_DEFAULTS[key])
+    last_id = int(get("Last proposal id") or 0)
+    proposal_id = int(get("Active step/Proposal id") or 0)
+    if proposal_id <= 0:
+        return last_id, None
+    attempt = int(get("Active step/Attempt"))
+    step = {
+        "proposal_id": proposal_id,
+        "step_id": str(get("Active step/Step id")) or None,
+        "attempt": attempt if attempt >= 0 else None,
+        "plan": str(get("Active step/Plan")) or None,
+        "seq_id": int(get("Active step/Seq id") or 0) or None,
+    }
+    step.update(_read_record(lambda key: get("Active step/" + key)))
+    return last_id, step
+
+
+def save_last_id(odb, last_id):
+    odb.odb_set(ODB_STATE + "/Last proposal id", int(last_id))
+
+
+def save_step(odb, step):
+    """Write the active step; None clears it.  Proposal id (what marks a
+    step as active) is cleared first and written last, so a step half
+    written when something fails in between is never taken up."""
+    step = step or {}
+    attempt = step.get("attempt")
+    odb.odb_set(ODB_STATE + "/Active step/Proposal id", 0)
+    odb.odb_set(ODB_STATE + "/Active step/Step id", str(step.get("step_id") or ""))
+    odb.odb_set(ODB_STATE + "/Active step/Attempt", int(attempt) if attempt is not None else -1)
+    odb.odb_set(ODB_STATE + "/Active step/Plan", str(step.get("plan") or ""))
+    odb.odb_set(ODB_STATE + "/Active step/Seq id", int(step.get("seq_id") or 0))
+    _write_record(odb, ODB_STATE + "/Active step/", step)
+    if step.get("proposal_id"):
+        odb.odb_set(ODB_STATE + "/Active step/Proposal id", int(step["proposal_id"]))
+
+
+def _known(value, unknown):
+    """`value` as read from the ODB, or None when it means "not known"."""
+    if value is None:
+        return None
+    if isinstance(unknown, float):
+        value = float(value)
+        return value if value > 0 else None
+    value = int(value)
+    if unknown == 0:
+        return value if value > 0 else None
+    return value if value >= 0 else None
+
+
+def _read_record(get):
+    """The RUN_RECORD keys of a step, ``get(ODB key)`` giving each value."""
+    return {name: _known(get(key), unknown) for name, key, unknown in RUN_RECORD}
+
+
+def _write_record(odb, base, step, names=None):
+    """Write the RUN_RECORD keys of `step` (only `names`, if given) under `base`."""
+    for name, key, unknown in RUN_RECORD:
+        if names is not None and name not in names:
+            continue
+        value = _known(step.get(name), unknown)
+        odb.odb_set(base + key, type(unknown)(value) if value is not None else unknown)
+
+
+def _pending_base(seq_id):
+    return "%s/Pending/%d" % (ODB_STATE, int(seq_id))
+
+
+def save_pending(odb, seq_id, step):
+    """Record, under /Nearline/MiniTwin/Pending/<seq id>/, the step a claimed
+    sequence belongs to, so neither a new proposal nor a restart before its
+    post can strip its provenance.  Proposal id is written last."""
+    base = _pending_base(seq_id)
+    attempt = step.get("attempt")
+    odb.odb_set(base + "/Proposal id", 0)
+    odb.odb_set(base + "/Step id", str(step.get("step_id") or ""))
+    odb.odb_set(base + "/Attempt", int(attempt) if attempt is not None else -1)
+    odb.odb_set(base + "/Plan", str(step.get("plan") or ""))
+    _write_record(odb, base + "/", step)
+    odb.odb_set(base + "/Proposal id", int(step["proposal_id"]))
+
+
+def load_pending(odb, seq_id):
+    """The step recorded for `seq_id` by save_pending, or None."""
+    base = _pending_base(seq_id)
+    proposal_id = int(odb_value(odb, base + "/Proposal id", 0) or 0)
+    if proposal_id <= 0:
+        return None
+    attempt = int(odb_value(odb, base + "/Attempt", -1))
+    step = {
+        "proposal_id": proposal_id,
+        "step_id": str(odb_value(odb, base + "/Step id", "")) or None,
+        "attempt": attempt if attempt >= 0 else None,
+        "plan": str(odb_value(odb, base + "/Plan", "")) or None,
+        "seq_id": int(seq_id),
+    }
+    # a record written before these keys existed reads as not known
+    step.update(_read_record(lambda key: odb_value(
+        odb, base + "/" + key, dict((k, u) for _, k, u in RUN_RECORD)[key])))
+    return step
+
+
+def delete_pending(odb, seq_id):
+    base = _pending_base(seq_id)
+    if not odb.odb_exists(base):
+        return
+    if hasattr(odb, "odb_delete"):
+        odb.odb_delete(base)
+    else:
+        odb.odb_set(base + "/Proposal id", 0)
+
+
+def odb_value(odb, path, default):
+    """`path` from the ODB, or `default` when there is no ODB or no key."""
+    if odb is None:
+        return default
+    if not odb.odb_exists(path):
+        return default
+    return odb.odb_get(path)
+
+
+def read_beamline_header(path):
+    """The ``beamline`` header of a nearline histogram file, as plain lists.
+
+    ROOT reads it when the PIONEER dictionaries (``PIODBBeamEntry``) are
+    loaded.  Without them ROOT only has an emulated object with no methods;
+    then, or when there is no ROOT at all, uproot reads the stored members
+    instead.  Neither is imported at module level.
+    """
+    try:
+        import ROOT
+    except ImportError:
+        ROOT = None
+    if ROOT is not None:
+        aFile = ROOT.TFile.Open(str(path))
+        if not aFile or aFile.IsZombie():
+            raise OSError("cannot open %s" % path)
+        try:
+            hdr = aFile.Get("beamline")
+            if not hdr:
+                raise KeyError("no 'beamline' header in %s" % path)
+            if hasattr(hdr, "GetNames"):
+                return {
+                    "names": [str(n) for n in hdr.GetNames()],
+                    "demand": [float(v) for v in hdr.GetDemand()],
+                    "measured": [float(v) for v in hdr.GetMeasured()],
+                    "types": [int(t) for t in hdr.GetTypes()],
+                }
+        finally:
+            aFile.Close()
+    return read_beamline_header_uproot(path)
+
+
+def read_beamline_header_uproot(path):
+    """``read_beamline_header`` through uproot: no dictionaries needed, the
+    members m_names/m_demand/m_measured/m_types are read as stored."""
+    try:
+        import uproot
+    except ImportError:
+        raise RuntimeError(
+            "cannot read the beamline header of %s: ROOT does not have the PIONEER "
+            "dictionaries for PIODBBeamEntry (source the build's setenv.sh so the "
+            "install's lib directory is on LD_LIBRARY_PATH) and uproot is not installed"
+            % path) from None
+    with uproot.open(str(path)) as aFile:
+        if "beamline" not in aFile:
+            raise KeyError("no 'beamline' header in %s" % path)
+        members = aFile["beamline"].members
+        return {
+            "names": [str(n) for n in members["m_names"]],
+            "demand": [float(v) for v in members["m_demand"]],
+            "measured": [float(v) for v in members["m_measured"]],
+            "types": [int(t) for t in members["m_types"]],
+        }
+
+
+def read_inline_maps(paths, names=None):
+    """``measurement.inline`` (maps + axes, see miniTwinInterface.inline_maps)
+    from the MuPix maps summed over the subrun files `paths` (local paths).
+    Needs ROOT, imported here; every file must bin each map the same way."""
+    import ROOT
+    from pioneer.nearline.miniTwinInterface import (inline_maps, miniTwin_histograms, hist_ranges,
+                                                    label_inline)
+
+    names = list(names or miniTwin_histograms)
+    total = [None] * len(names)
+    for path in paths:
+        aFile = ROOT.TFile.Open(str(path))
+        if not aFile or aFile.IsZombie():
+            raise OSError("cannot open %s" % path)
+        try:
+            for i, name in enumerate(names):
+                hist = aFile.Get(name)
+                if not hist:
+                    raise KeyError("%s has no %s" % (path, name))
+                if total[i] is None:
+                    total[i] = hist.Clone("tuning_sum_%d" % i)
+                    total[i].SetDirectory(0)
+                    continue
+                if (hist.GetNbinsX(), hist.GetNbinsY()) != (total[i].GetNbinsX(), total[i].GetNbinsY()) \
+                        or hist_ranges(hist) != hist_ranges(total[i]):
+                    raise ValueError("%s: %s is binned differently from %s" % (path, name, paths[0]))
+                total[i].Add(hist)
+        finally:
+            aFile.Close()
+    return label_inline(inline_maps(total), names, len(paths))
+
+
+def hist_files(db, run_ids, output_path):
+    """Per-subrun histogram files of `run_ids` (run database ids).
+
+    One entry per state.file_list 'root' row with status DONE, in filebase
+    order: ``{"run_db_id", "run_number", "local"}``, where ``local`` is
+    ``<output_path>/run<N>/<filebase>_hists.root`` as jobs.py writes it.
+    Rows in any other status are left out and listed in ``skipped`` as
+    ``(local, status, run number)``.
+    """
+    numbers = {}
+    for run_id in run_ids:
+        number = db.get_midas_run_number(run_id)
+        if number is None:
+            raise ContextError("run %d has no MIDAS run number (never started?)" % run_id)
+        numbers[run_id] = int(number)
+    found, skipped = [], []
+    for row in db.find_files(list(run_ids), "root"):
+        number = numbers[row["run_id"]]
+        local = "%s/run%05d/%s_hists.root" % (str(output_path).rstrip("/"), number, row["filebase"])
+        if row.get("status", "DONE") != "DONE":
+            skipped.append((local, row.get("status"), number))
+            continue
+        found.append({"run_db_id": row["run_id"], "run_number": number, "local": local})
+    return found, skipped, [numbers[r] for r in run_ids]
+
+
+def iso_utc(when):
+    """A datetime as ISO 8601 UTC with milliseconds (``...T10:05:12.000Z``);
+    None stays None, a naive datetime is taken to be UTC."""
+    if when is None:
+        return None
+    from datetime import timezone
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def empty_exposure(numbers):
+    """``measurement.exposure`` with nothing known; a run number that is not
+    known is null."""
+    return {
+        "seconds": None,
+        "wd_events": None,
+        "per_run": [{"run": int(n) if n is not None else None, "seconds": None, "wd_events": None,
+                     "bor": None, "eor": None, "time_source": None, "complete": None}
+                    for n in numbers],
+        "source": dict(EXPOSURE_SOURCES),
+    }
+
+
+def remote_path(local, local_prefix, remote_prefix):
+    """`local` with `local_prefix` replaced by `remote_prefix`, or None when
+    it does not start with `local_prefix`."""
+    local_prefix = str(local_prefix).rstrip("/") + "/"
+    remote_prefix = str(remote_prefix).rstrip("/") + "/"
+    local = str(local)
+    if not local.startswith(local_prefix):
+        return None
+    return remote_prefix + local[len(local_prefix):]
+
+
+class ScheduleError(RuntimeError):
+    """A proposal could not be scheduled; already reported when raised."""
+
+
+class ContextRejected(RuntimeError):
+    """The service refused a context for good; already reported when raised."""
+
+
+class ContextError(RuntimeError):
+    """A context cannot be made from what the run left behind (no files, no
+    run number, ...): retrying does not help, the sequence is FAILED."""
+
+
+#: errors that are about the context itself; anything else (the run database,
+#: the ODB, a file system) is taken as passing and the post retried
+CONTEXT_ERRORS = (ContextError, ValueError, KeyError)
+
+#: seconds before a post that failed for a passing reason is tried again
+RETRY_DELAY_S = 30.0
+
+
+def utc_now(clock=time.time):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(clock()))
+
+
+def daq_report(proposal_id, stage, step=None, seq_id=None, runs=None, events=None,
+               subruns=None, message=None, sent_utc=None, reply=None):
+    """One DAQ progress report as POST /v1/daq takes it.  ``reply`` (see
+    ``reply_check``) is optional and only sent with the `scheduled` report."""
+    report = {
+        "schema": DAQ_SCHEMA,
+        "proposal_id": int(proposal_id),
+        "step_id": (step or {}).get("step_id"),
+        "stage": stage,
+        "seq_id": seq_id,
+        "runs": list(runs or []),
+        "events": events,
+        "subruns": subruns,
+        "message": message,
+        "sent_utc": sent_utc or utc_now(),
+    }
+    if reply is not None:
+        report["reply"] = dict(reply)
+    return report
+
+
+def reply_check(in_reply_to, expected):
+    """Compare a proposal's ``in_reply_to`` with the last context we posted.
+
+    Returns ``(check, reply)``: check is "none" when the proposal answers no
+    context (null or absent: a kick, a resume, or a service without the
+    field; or an object without a context_id), "ok" when ``in_reply_to.context_id`` is `expected`, else
+    "mismatch"; reply is what the `scheduled` DAQ report carries.  This never
+    stops a proposal from being scheduled: the service is the schedule truth.
+    """
+    expected = expected or None
+    if not isinstance(in_reply_to, dict):
+        return "none", {"expected": expected, "got": None, "outcome": None, "ok": True}
+    got = in_reply_to.get("context_id")
+    if got is None:
+        check = "none"
+    else:
+        check = "ok" if got == expected else "mismatch"
+    return check, {"expected": expected, "got": got,
+                   "outcome": in_reply_to.get("outcome"), "ok": check != "mismatch"}
+
+
+def progress_stage(progress):
+    """``(stage, message)`` of a sequence from
+    ``interface.get_sequence_progress``: failed, posted (the sequence is
+    DONE), scheduled (every run pending), nearline (every run DONE, the
+    context not yet posted) or running."""
+    if progress is None:
+        return "failed", "sequence not found in the run database"
+    runs = progress.get("runs") or []
+    if not runs:
+        return "failed", "sequence %s has no runs" % progress.get("id")
+    bad = [r for r in runs if r["status"] in FAILURE_STATUSES]
+    if bad:
+        return "failed", "; ".join("run %s %s" % (r["run_number"] if r["run_number"] is not None
+                                                  else "(db id %s)" % r["run_db_id"], r["status"])
+                                   for r in bad)
+    nearline_failed = sum(int(r["nearline_failed"]) for r in runs)
+    if nearline_failed:
+        return "failed", "%d nearline job(s) failed" % nearline_failed
+    if progress["status"] in FAILURE_STATUSES:
+        return "failed", "sequence %s" % progress["status"]
+    if progress["status"] == "DONE":
+        return "posted", None
+    if all(r["status"] in PENDING_STATUSES for r in runs):
+        return "scheduled", None
+    if all(r["status"] in SUCCESS_STATUSES for r in runs):
+        return "nearline", None
+    return "running", None
+
+
+def requested_events(run, cap):
+    """Events to request for a proposal's run, from its run annex:
+    ``run.stop = {"kind": "events", "value": N}`` with N a positive integer
+    gives N (at most `cap`); anything else gives ITER_EVENTS.  Returns
+    ``(events, why, is_error)``: `why` says why the annex was not used as it
+    is, None when it was."""
+    cap = max(1, int(cap))
+    stop = (run or {}).get("stop") if isinstance(run, dict) else None
+    if not isinstance(stop, dict):
+        return int(ITER_EVENTS), "the proposal gives no run.stop", False
+    kind, value = stop.get("kind"), stop.get("value")
+    if kind != "events":
+        return int(ITER_EVENTS), "run.stop is %r, not events" % (kind,), False
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return int(ITER_EVENTS), "run.stop value %r is not a positive integer" % (value,), False
+    if value > cap:
+        return cap, ("run.stop asks for %d events, above MiniTwin max events %d; requesting %d"
+                     % (value, cap, cap)), True
+    return value, None, False
+
+
+def schedule_configs(db, configs, table, target_config, dry_run=False, iter_events=ITER_EVENTS):
+    """Write the runs for `configs` (what `NextConfiguration()` returns).
+
+    'iter': every row of `table` times the one `target_position` config
+    `target_config`, one sequence with on_complete `mt_add`, no merge.
+    'final': as before, five-point scan times degrader scan, merge only.
+
+    Returns one dict per config describing what was (or, with `dry_run`,
+    would be) scheduled.  With `dry_run` nothing is written.
+    """
+    import pioneer.nearline.run as nl_run
+
+    scheduled = []
+    for aConfig in configs:
+        if aConfig['type'] == 'iter':
+            centre = db.load_config("target_position", target_config)
+            if centre is None:
+                raise RuntimeError("target_position config id %s is not in the run database"
+                                   % target_config)
+            entry = {
+                "type": "iter",
+                "config_type": table,
+                "rows": list(aConfig['currents']),
+                "target_position": dict(centre),
+                "num_ev": int(iter_events),
+                "on_complete": "mt_add",
+                "seq_id": None,
+                "run_ids": [],
+            }
+            if not dry_run:
+                mrs = nl_run.midas_run_sequence(db)
+                mrs.set_config_list(table, aConfig['currents'])
+                centre_seq = nl_run.midas_run_sequence(db)
+                centre_seq.set_config_list("target_position", [centre])
+                centre_seq.set_on_complete("mt_add")
+                mrs.set_subsequence(centre_seq)
+                mrs.num_ev = int(iter_events)
+                entry["run_ids"] = mrs.schedule()
+                entry["seq_id"] = centre_seq.seq_id
+            scheduled.append(entry)
+        elif aConfig['type'] == 'final':
+            entry = {
+                "type": "final",
+                "config_type": table,
+                "rows": list(aConfig['currents']),
+                "num_ev": FINAL_EVENTS,
+                "on_complete": "merge",
+                "run_ids": [],
+            }
+            if not dry_run:
+                mrs = nl_run.midas_run_sequence(db)
+                mrs.set_config_list(table, aConfig['currents'])
+                fiveScan = nl_run.five_point_sequence(db)
+                fiveScan.set_on_complete("merge") # it shall only merge and not submit to minitwin.
+                dscan = nl_run.degrader_scan(db)
+                dscan.set_subsequence(fiveScan)
+                mrs.set_subsequence(dscan)
+                mrs.num_ev = FINAL_EVENTS
+                entry["run_ids"] = mrs.schedule()
+            scheduled.append(entry)
+    return scheduled
+
+
+_UNSET = object()
+
+
+class TuningLoop:
+    """The daemon's side of the loop.
+
+    `db` is a `pioneer.rundb.interface.interface`, `mt` a
+    `miniTwinInterface`, `odb` anything with `odb_exists`/`odb_get`/`odb_set`
+    (the daemon's `midas.client.MidasClient`), `message(text, is_error=...)`
+    where errors go.
+    """
+
+    def __init__(self, db, mt, odb, message=None, header_reader=read_beamline_header,
+                 clock=time.time, maps_reader=read_inline_maps):
+        self.db = db
+        self.mt = mt
+        self.odb = odb
+        self.clock = clock
+        self._message = message or (lambda msg, is_error=False: print(msg))
+        #: path -> beam header dict; tests replace it, the default needs ROOT
+        self.header_reader = header_reader
+        #: local subrun paths -> measurement.inline (or None); the default needs ROOT
+        self.maps_reader = maps_reader
+        #: the step whose run is being taken (see STATE_DEFAULTS), or None
+        self.active = None
+        self._watermark_error = False
+        self._watermark_warned = None
+        self._step_unsaved = False
+        self._reply_error = False
+        #: the last proposal id this process read or wrote in the ODB; a
+        #: different, lower value there was put by hand (sync_state)
+        self._known_last_id = 0
+        self._column_map_warned = None
+        #: seq id -> time it was claimed, for sequences waiting out the post delay
+        self._waiting = {}
+        #: seq id -> the step it was claimed with (or None), see claim()
+        self._claim_steps = {}
+        #: sequences whose post failed for a passing reason (one message each)
+        self._retrying = set()
+        self.enabled = None
+        # progress reports: what was last sent, and when the state was last looked at
+        self._last_monitor = 0.0
+        self._last_key = None
+        self._last_events = None
+        self._last_report = None
+        self._last_monitor_error = None
+        #: nearline output tree to use instead of /Nearline/config/Output path
+        self.output_override = None
+        # every context the service takes becomes /Nearline/MiniTwin/Last context id
+        self.mt.on_delivered = self.context_delivered
+        self.mt.on_rejected = self.context_rejected
+        self.mt.on_stuck = self.context_stuck
+        #: context id -> {"seq_id", "step"} of contexts handed to the queue
+        self._inflight = {}
+        #: context id -> reason, for contexts refused while post_runs waited
+        self._rejected = {}
+
+    def restore(self):
+        """Take the last proposal id and the active step from the ODB, so a
+        restart neither re-schedules the outstanding proposal nor forgets
+        which step the run in flight belongs to."""
+        last_id, self.active = load_state(self.odb)
+        self.mt.last_proposal_id = last_id
+        self._known_last_id = last_id
+        if last_id or self.active:
+            self.message("Tuning: restored last proposal id %d%s" % (
+                last_id, ", active step %s (seq %s)" % (self.active.get("step_id"), self.active.get("seq_id"))
+                if self.active else ""))
+
+    def sync_state(self):
+        """Pick up what was written to /Nearline/MiniTwin while this process
+        was running: a newer last proposal id or a new or cleared step (the
+        manual CLI), or a last proposal id lowered by hand -- honoured at
+        once, so proposals above it are taken again."""
+        last_id, active = load_state(self.odb)
+        if last_id > self.mt.last_proposal_id:
+            self.mt.last_proposal_id = last_id
+            self._known_last_id = last_id
+        elif last_id < self.mt.last_proposal_id and last_id != self._known_last_id:
+            self.message("Tuning: Last proposal id lowered by hand from %d to %d; proposals above "
+                         "%d will be taken" % (self.mt.last_proposal_id, last_id, last_id))
+            self.mt.last_proposal_id = last_id
+            self._known_last_id = last_id
+        if self._step_unsaved:
+            # our step never made it to the ODB whole: write it again rather
+            # than take up what is there
+            self._save_step()
+            return
+        if active != self.active:
+            self.active = active
+            self._last_key = None
+
+    def set_active(self, step):
+        """The active step, in memory and in the ODB.  A failed ODB write is
+        one MIDAS error; the step is kept in memory and written again every
+        iteration until it goes through."""
+        self.active = dict(step) if step else None
+        if self.active is not None:
+            # the same keys load_state gives, so sync_state sees no change
+            for name, _, _ in RUN_RECORD:
+                self.active.setdefault(name, None)
+        self._last_key = None
+        self._last_events = None
+        self._save_step()
+
+    def _save_step(self):
+        try:
+            save_step(self.odb, self.active)
+        except Exception as exc:                       # noqa: BLE001 -- keep the step in memory
+            if not self._step_unsaved:
+                self.message("Tuning: could not write the active step to %s/Active step: %s; "
+                             "kept in memory, retrying" % (ODB_STATE, exc), is_error=True)
+            self._step_unsaved = True
+            return False
+        self._step_unsaved = False
+        return True
+
+    def refresh_enable(self):
+        """Re-read /Nearline/config/MiniTwin enable, the pause switch.
+        Returns True while the loop may poll and schedule.  Going off posts
+        one `paused` report; coming back on repeats the last report."""
+        enabled = bool(odb_value(self.odb, ODB_CONFIG + "/MiniTwin enable", False))
+        try:
+            self.sync_state()
+        except Exception as exc:                       # noqa: BLE001 -- keep the loop going
+            self.message("Tuning: could not read /Nearline/MiniTwin: %s" % exc)
+        if enabled != self.enabled:
+            was = self.enabled
+            self.enabled = enabled
+            if was is not None or not enabled:
+                self.message("Tuning: loop %s (MiniTwin enable = %s)"
+                             % ("resumed" if enabled else "paused", "y" if enabled else "n"))
+            if not enabled:
+                self._report_paused()
+            elif was is not None:
+                self._report_resumed()
+        return enabled
+
+    def context_delivered(self, context):
+        """The service took `context` (accepted or already known).  Only now
+        is its sequence DONE and its step closed: a context still in the
+        queue keeps both open, so a restart posts it again (resume_claimed).
+        Its id is kept for the next reply check."""
+        context_id = context.get("context_id")
+        info = self._inflight.pop(context_id, None) or {}
+        try:
+            self.odb.odb_set(ODB_STATE + "/Last context id", str(context_id or ""))
+        except Exception as exc:                       # noqa: BLE001 -- never into the queue
+            self.message("Tuning: could not store the last context id: %s" % exc)
+        seq_id, step = info.get("seq_id"), info.get("step")
+        if seq_id:
+            try:
+                self.db.update_status("run_sequence", seq_id, "DONE")
+            except Exception as exc:                   # noqa: BLE001 -- never into the queue
+                self.message("Tuning: context %s delivered, but sequence %s could not be set DONE: %s"
+                             % (context_id, seq_id, exc), is_error=True)
+            self._claim_steps.pop(seq_id, None)
+            try:
+                delete_pending(self.odb, seq_id)
+            except Exception as exc:                   # noqa: BLE001 -- never into the queue
+                self.message("Tuning: could not remove %s: %s" % (_pending_base(seq_id), exc))
+        if step is not None:
+            paused = self.enabled is False
+            self._report_final(step, "posted", "context %s delivered%s" % (
+                context_id, " (loop paused: no new proposal is taken)" if paused else ""))
+            if self.active and self.active.get("proposal_id") == step.get("proposal_id"):
+                self.set_active(None)
+            if paused:
+                # the latest report stays `paused`, with the posted step's runs
+                self._report_paused(step)
+
+    def context_rejected(self, context, exc):
+        """`context` left the queue undelivered: the service refused it for
+        good (a 4xx about its body), it failed GIVE_UP_AFTER times, or the
+        queue was full.  Its sequence is FAILED, its step reported `failed`
+        and left active, so it can be posted by hand once fixed."""
+        from pioneer.nearline.beamtune_client import is_permanent_rejection
+
+        context_id = context.get("context_id")
+        info = self._inflight.pop(context_id, None) or {}
+        self._rejected[context_id] = str(exc)
+        seq_id, step = info.get("seq_id"), info.get("step")
+        self.message("Tuning: %s context %s%s: %s" % (
+            "the service rejected" if is_permanent_rejection(exc) else "dropped undelivered",
+            context_id, " (sequence %s set FAILED)" % seq_id if seq_id else "", exc), is_error=True)
+        if step is not None:
+            self._report_final(step, "failed", "context %s rejected: %s" % (context_id, exc))
+        if seq_id:
+            try:
+                self.db.update_status("run_sequence", seq_id, "FAILED")
+            except Exception as db_exc:                # noqa: BLE001 -- inside the queue
+                self.message("Tuning: could not set sequence %s FAILED: %s" % (seq_id, db_exc),
+                             is_error=True)
+
+    def context_stuck(self, context, exc):
+        """`context` failed STUCK_AFTER times in a row while the service
+        answered other calls: it was moved behind the others."""
+        self.message("Tuning: context %s keeps failing (%s); moved to the back of the queue so "
+                     "the others get through" % (context.get("context_id"), exc), is_error=True)
+
+    @property
+    def last_context_id(self):
+        return str(odb_value(self.odb, ODB_STATE + "/Last context id", "") or "") or None
+
+    def check_reply(self, proposal_id, hints, dry_run=False):
+        """Check the new proposal's ``in_reply_to`` and say what it means.
+        Returns the `reply` object for the `scheduled` report."""
+        in_reply_to = getattr(self.mt, "last_reply", None)
+        check, reply = reply_check(in_reply_to, self.last_context_id)
+        if dry_run:
+            return reply
+        in_reply_to = in_reply_to or {}
+        step = in_reply_to.get("step_id") or "(no step)"
+        outcome = in_reply_to.get("outcome")
+        if check == "mismatch":
+            self.message("Tuning warning: proposal %d answers context %s, but the last context "
+                         "posted was %s" % (proposal_id, reply["got"], reply["expected"]))
+        elif check == "ok":
+            self.message("Tuning: proposal %d answers context %s (%s)"
+                         % (proposal_id, reply["got"], outcome))
+        if outcome == "retake":
+            if hints.get("step_id") == in_reply_to.get("step_id") and hints.get("attempt") is not None:
+                self.message("Tuning: step %s is retaken, attempt %s" % (step, hints["attempt"]))
+            else:
+                # the next proposal is something else (the nominal bracket);
+                # the step comes back after it
+                attempt = in_reply_to.get("attempt")
+                self.message("Tuning: step %s will be retaken after a nominal bracket (attempt %s)"
+                             % (step, int(attempt) + 1 if isinstance(attempt, int) else "?"))
+        elif outcome == "failed":
+            attempt = in_reply_to.get("attempt")
+            self.message("Tuning: step %s given up after %s attempts"
+                         % (step, int(attempt) + 1 if isinstance(attempt, int) else "?"),
+                         is_error=True)
+        elif outcome == "off_plan":
+            self.message("Tuning warning: context %s was not credited to any plan step (off_plan)%s"
+                         % (reply["got"], ": %s" % in_reply_to["note"] if in_reply_to.get("note") else ""))
+        return reply
+
+    def message(self, msg, is_error=False):
+        try:
+            self._message(msg, is_error=is_error)
+        except Exception:                              # noqa: BLE001 -- reporting must not raise
+            print(msg)
+
+    # -- settings from the ODB ---------------------------------------------
+
+    @property
+    def update_table(self):
+        return odb_value(self.odb, ODB_CONFIG + "/MiniTwin updates", "pim1_epics")
+
+    @property
+    def target_config(self):
+        return int(odb_value(self.odb, ODB_CONFIG + "/MiniTwin target config",
+                             CONFIG_DEFAULTS["MiniTwin target config"]))
+
+    @property
+    def output_path(self):
+        if self.output_override:
+            return self.output_override
+        return odb_value(self.odb, ODB_CONFIG + "/Output path", DEFAULT_OUTPUT_PATH)
+
+    @property
+    def local_prefix(self):
+        return odb_value(self.odb, ODB_CONFIG + "/MiniTwin local prefix",
+                         CONFIG_DEFAULTS["MiniTwin local prefix"])
+
+    @property
+    def remote_prefix(self):
+        return odb_value(self.odb, ODB_CONFIG + "/MiniTwin remote prefix",
+                         CONFIG_DEFAULTS["MiniTwin remote prefix"])
+
+    # -- proposals -> runs -------------------------------------------------
+
+    def poll_and_schedule(self, dry_run=False):
+        """Ask the service for a newer proposal and schedule it.
+
+        The proposal id is stored before the runs are written: a proposal
+        whose scheduling fails is reported (MIDAS error, `failed` DAQ report),
+        raises ScheduleError, and is not retried by itself -- retake it with the CLI,
+        see the README -- rather than scheduled twice."""
+        before = self.mt.last_proposal_id
+        configs = self.mt.NextConfiguration()
+        proposal_id = self.mt.last_proposal_id
+        # NextConfiguration moves the watermark only for a proposal it received
+        if not dry_run and proposal_id != before:
+            self._store_watermark(proposal_id)
+        self._check_service_watermark()
+        column_error = getattr(self.mt, "column_map_error", None)
+        if column_error and column_error != self._column_map_warned:
+            self.message("Tuning: proposal not taken, trying again: %s" % column_error,
+                         is_error=True)
+        self._column_map_warned = column_error
+        if not configs:
+            return []
+        hints = self.mt.last_run_hints or {}
+        try:
+            reply = self.check_reply(proposal_id, hints, dry_run=dry_run)
+            self._reply_error = False
+        except Exception as exc:                       # noqa: BLE001 -- never blocks scheduling
+            if not self._reply_error:
+                self._reply_error = True
+                self.message("Tuning: reply check of proposal %d skipped: %s" % (proposal_id, exc),
+                             is_error=True)
+            reply = reply_check(None, None)[1]
+        try:
+            cap = odb_value(self.odb, ODB_CONFIG + "/MiniTwin max events",
+                            CONFIG_DEFAULTS["MiniTwin max events"])
+        except Exception:                              # noqa: BLE001
+            cap = CONFIG_DEFAULTS["MiniTwin max events"]
+        events, why, is_error = requested_events(hints, cap)
+        if why:
+            self.message("Tuning: proposal %d: %s; requesting %d events" % (proposal_id, why, events)
+                         if not is_error else "Tuning: proposal %d: %s" % (proposal_id, why),
+                         is_error=is_error and not dry_run)
+        try:
+            scheduled = schedule_configs(self.db, configs, self.update_table,
+                                         self.target_config, dry_run=dry_run, iter_events=events)
+        except Exception as exc:
+            if not dry_run:
+                self.message("Tuning: proposal %d could not be scheduled: %s" % (proposal_id, exc),
+                             is_error=True)
+                self.report(daq_report(proposal_id, "failed", step=hints,
+                                       message="not scheduled: %s" % exc,
+                                       sent_utc=utc_now(self.clock)))
+            raise ScheduleError("proposal %d not scheduled: %s" % (proposal_id, exc)) from exc
+        for entry in scheduled:
+            entry["reply"] = reply
+        if dry_run:
+            return scheduled
+        for entry in scheduled:
+            if entry["type"] == "iter":
+                self.set_active({
+                    "proposal_id": proposal_id,
+                    "step_id": hints.get("step_id"),
+                    "attempt": hints.get("attempt"),
+                    "plan": hints.get("plan"),
+                    "seq_id": entry["seq_id"],
+                })
+                target = entry["target_position"]
+                where = "target_position %s at (%s, %s)" % (
+                    target.get("id"), target.get("xpos"), target.get("ypos"))
+                self.message("Tuning: proposal %d%s scheduled as run %s in sequence %s, %s, "
+                             "%d events requested" % (
+                    proposal_id, " (step %s)" % hints["step_id"] if hints.get("step_id") else "",
+                    ", ".join(str(r) for r in entry["run_ids"]), entry["seq_id"], where,
+                    entry["num_ev"]))
+                if (target.get("xpos"), target.get("ypos")) not in ((0, 0), (None, None)):
+                    self.message("Tuning warning: %s is not the stage centre (0, 0); check "
+                                 "%s/MiniTwin target config" % (where, ODB_CONFIG))
+                self.report_progress(reply=reply, note=where)
+        return scheduled
+
+    def _store_watermark(self, proposal_id):
+        """Persist `proposal_id` as the last proposal id, but only when it is
+        above the stored one: nothing ever lowers it (`schedule --since`
+        lowers the in-memory watermark only).  A failed ODB write is one
+        MIDAS error; scheduling goes on."""
+        try:
+            stored = int(odb_value(self.odb, ODB_STATE + "/Last proposal id", 0) or 0)
+            if proposal_id > stored:
+                save_last_id(self.odb, proposal_id)
+                self._known_last_id = proposal_id
+            self._watermark_error = False
+        except Exception as exc:                       # noqa: BLE001 -- schedule anyway
+            if not self._watermark_error:
+                self._watermark_error = True
+                self.message("Tuning: could not store proposal id %d in %s/Last proposal id: %s; "
+                             "a restart may take this proposal again"
+                             % (proposal_id, ODB_STATE, exc), is_error=True)
+
+    def _check_service_watermark(self):
+        """A service whose newest proposal is below our watermark (a new state
+        directory, or a reset one) is ignored until it passes it.  Say so once
+        per pair of numbers; do not reset anything automatically."""
+        service_id = getattr(self.mt, "service_last_id", None)
+        ours = self.mt.last_proposal_id
+        if service_id is None or service_id >= ours:
+            self._watermark_warned = None
+            return
+        if self._watermark_warned == (service_id, ours):
+            return
+        self._watermark_warned = (service_id, ours)
+        self.message("Tuning: the service's last proposal is #%d, below our last proposal id #%d "
+                     "(%s/Last proposal id): its proposals are ignored until one passes #%d. "
+                     "If the service was restarted with a new state, set that key to %d; "
+                     "the daemon takes it up at once."
+                     % (service_id, ours, ODB_STATE, ours, service_id), is_error=True)
+
+    def step_for_sequence(self, seq_id):
+        """The active step when `seq_id` is its sequence, else None."""
+        if self.active and self.active.get("seq_id") == seq_id:
+            return dict(self.active)
+        return None
+
+    def step_for_run(self, run_id):
+        """The active step when run `run_id` (run database id) is in its sequence."""
+        if not self.active or not self.active.get("seq_id"):
+            return None
+        if run_id in self.db.get_all_runs_in_sequence(self.active["seq_id"]):
+            return dict(self.active)
+        return None
+
+    def record_run_start(self, run_id, run_number):
+        """The start transition of MIDAS run `run_number` (run database id
+        `run_id`), called after the frontends reset their statistics: when
+        it is the active step's run, record its start time and the WaveDREAM
+        events sent (RUN_RECORD), in memory and under Active step/, and
+        forget any stop recorded before.  Returns what was recorded, or
+        None.  Called inside a MIDAS transition callback: never raises."""
+        try:
+            if not self._is_step_run(run_id):
+                return None
+            start = self._odb_time(ODB_START_TIME)
+            values = {"run_number": int(run_number),
+                      "run_start": start if start is not None else float(self.clock()),
+                      "run_stop": None, "events_start": self._events_sent(), "events_stop": None}
+            self._record(values)
+            return values
+        except Exception as exc:                       # noqa: BLE001 -- inside a transition
+            self.message("Tuning: start of run %s not recorded: %s" % (run_number, exc))
+            return None
+
+    def record_run_stop(self, run_id, run_number):
+        """The stop transition of run `run_number` (run database id
+        `run_id`): when it is the active step's run, record its stop time and
+        the WaveDREAM events sent.  A run whose start was not recorded (the
+        daemon was not running then) takes its start time from
+        /Runinfo/Start time binary, which still holds it, and leaves its
+        start events unknown.  Returns the record, or None.  Called inside a
+        MIDAS transition callback: never raises."""
+        try:
+            if not self._is_step_run(run_id):
+                return None
+            values = {}
+            if self.active.get("run_number") != int(run_number):
+                values = {"run_number": int(run_number),
+                          "run_start": self._odb_time(ODB_START_TIME), "events_start": None}
+            start = values.get("run_start", self.active.get("run_start"))
+            stop = self._odb_time(ODB_STOP_TIME)
+            if stop is None or (start is not None and stop < start):
+                stop = float(self.clock())
+            values.update(run_stop=stop, events_stop=self._events_sent())
+            self._record(values)
+            return {name: self.active.get(name) for name, _, _ in RUN_RECORD}
+        except Exception as exc:                       # noqa: BLE001 -- inside a transition
+            self.message("Tuning: stop of run %s not recorded: %s" % (run_number, exc))
+            return None
+
+    def _is_step_run(self, run_id):
+        return bool(run_id) and bool(self.active) and self.step_for_run(int(run_id)) is not None
+
+    def _odb_time(self, path):
+        value = odb_value(self.odb, path, None)
+        return float(value) if value is not None and float(value) > 0 else None
+
+    def _events_sent(self):
+        value = odb_value(self.odb, ODB_EVENTS_SENT, None)
+        return int(value) if value is not None else None
+
+    def _record(self, values):
+        """Write RUN_RECORD `values` of the active step to the ODB, then keep
+        them in memory."""
+        _write_record(self.odb, ODB_STATE + "/Active step/", values, names=set(values))
+        self.active.update(values)
+
+    # -- finished runs -> context ------------------------------------------
+
+    def context_parts(self, run_ids, step=None):
+        """Everything a context of `run_ids` (run database ids) is made of:
+        ``(context_id, remote file paths, MIDAS run numbers, beam header,
+        inline maps or None, exposure)``.  The header is read from the first
+        subrun's file on this machine, the maps summed over all of them;
+        `step` (the step the runs were taken for, or None) gives the
+        events of the exposure."""
+        files, skipped, numbers = hist_files(self.db, run_ids, self.output_path)
+        for local, status, _ in skipped:
+            self.message("Tuning: leaving out %s (file status %s)" % (local, status))
+        # runs whose histograms are not all in the context
+        incomplete = {number for _, _, number in skipped}
+        incomplete |= set(numbers) - {f["run_number"] for f in files}
+        if not files:
+            raise ContextError("no finished nearline histogram files for run(s) %s"
+                               % ", ".join(str(n) for n in numbers))
+        remote = []
+        for f in files:
+            path = remote_path(f["local"], self.local_prefix, self.remote_prefix)
+            if path is None:
+                self.message("Tuning: %s is not under the local prefix %s; posting it unchanged"
+                             % (f["local"], self.local_prefix))
+                path = f["local"]
+            remote.append(path)
+        header = self.header_reader(files[0]["local"])
+        context_id = "_".join("run%05d" % n for n in numbers)
+        inline = self.inline_maps([f["local"] for f in files], context_id)
+        return context_id, remote, numbers, header, inline, self.exposure(numbers, step,
+                                                                          incomplete=incomplete)
+
+    def exposure(self, numbers, step=None, incomplete=None):
+        """``measurement.exposure`` of MIDAS runs `numbers`, so the service
+        can normalise rates by run time when the SMA proton current is empty.
+
+        A run the daemon recorded for `step` (record_run_start/_stop) gets
+        seconds = stop - start and wd_events = events at stop - events at
+        start from that record.  A run it did not record gets its times
+        from the run database (get_run_times, cancelled after
+        RUN_TIMES_TIMEOUT_S) and no events.  A value that is not known, not
+        positive seconds or a negative event count, is null, and so is a
+        total over runs with a null.  `incomplete` (run numbers with subrun
+        files left out of the context) makes those runs' seconds and events
+        null, so the exposure describes only data that is in the histograms;
+        per_run.complete is False for them, True for the others, null when
+        `incomplete` is None (not known).  Whatever is missing is said in one
+        MIDAS message; this never raises, a context is never held up by it.
+        See EXPOSURE_SOURCES."""
+        exposure, notes = empty_exposure([]), []
+        try:
+            numbers = [int(n) for n in numbers]
+            exposure = empty_exposure(numbers)
+            per_run = exposure["per_run"]
+            record = step if (step or {}).get("run_number") else None
+            fallback = []
+            for entry in per_run:
+                if incomplete is not None:
+                    entry["complete"] = entry["run"] not in incomplete
+                if entry["complete"] is False:
+                    notes.append("run %d has subrun files left out of the context: its seconds "
+                                 "and events are null" % entry["run"])
+                    continue
+                if record is not None and record["run_number"] == entry["run"]:
+                    self._exposure_from_record(entry, record, notes)
+                elif step is not None and len(per_run) == 1:
+                    notes.append("run %d was not recorded by the daemon at its start and stop "
+                                 "(was the daemon down then?): events unknown"
+                                 % entry["run"])
+                if entry["seconds"] is None and entry["bor"] is None:
+                    fallback.append(entry)
+            if fallback:
+                self._exposure_from_run_db(fallback, notes)
+            for key in ("seconds", "wd_events"):
+                values = [e[key] for e in per_run]
+                if values and all(v is not None for v in values):
+                    exposure[key] = round(sum(values), 3) if key == "seconds" else sum(values)
+        except Exception as exc:                       # noqa: BLE001 -- never blocks the post
+            try:
+                exposure = empty_exposure(numbers)
+            except Exception:                          # noqa: BLE001 -- numbers not numbers
+                exposure = empty_exposure([])
+            notes.append("not computed: %s" % exc)
+        if notes:
+            self.message("Tuning: exposure of run(s) %s: %s" % (
+                ", ".join(str(e["run"]) for e in exposure["per_run"]) or "?", "; ".join(notes)))
+        return exposure
+
+    @staticmethod
+    def _exposure_from_record(entry, record, notes):
+        """Fill one per_run `entry` from the daemon's record of the run."""
+        from datetime import datetime, timezone
+
+        start, stop = record.get("run_start"), record.get("run_stop")
+        entry["time_source"] = "odb"
+        entry["bor"] = iso_utc(datetime.fromtimestamp(start, timezone.utc)) if start else None
+        entry["eor"] = iso_utc(datetime.fromtimestamp(stop, timezone.utc)) if stop else None
+        if start is None or stop is None:
+            notes.append("run %d: %s not recorded" % (
+                entry["run"], "start and stop" if start is None and stop is None
+                else "start" if start is None else "stop"))
+        elif stop - start <= 0:
+            notes.append("run %d: stop %s is not after start %s" % (entry["run"], entry["eor"],
+                                                                     entry["bor"]))
+        else:
+            entry["seconds"] = round(stop - start, 3)
+        first, last = record.get("events_start"), record.get("events_stop")
+        if first is None or last is None:
+            notes.append("run %d: WaveDREAM events at %s not recorded" % (
+                entry["run"], "start and stop" if first is None and last is None
+                else "start" if first is None else "stop"))
+        elif last - first < 0:
+            notes.append("run %d: WaveDREAM events went down from %d to %d" % (entry["run"],
+                                                                               first, last))
+        else:
+            entry["wd_events"] = int(last - first)
+
+    def _exposure_from_run_db(self, entries, notes):
+        """Times of per_run `entries` from the run database's BOR/EOR rows."""
+        numbers = [e["run"] for e in entries]
+        try:
+            times = self.db.get_run_times(numbers, timeout_s=RUN_TIMES_TIMEOUT_S)
+        except Exception as exc:                       # noqa: BLE001 -- a timeout, the db down
+            notes.append("run times of run(s) %s not read from the run database (%s)"
+                         % (", ".join(str(n) for n in numbers), str(exc).strip() or type(exc).__name__))
+            return
+        for entry in entries:
+            bor = (times.get(entry["run"]) or {}).get("bor")
+            eor = (times.get(entry["run"]) or {}).get("eor")
+            entry.update(bor=iso_utc(bor), eor=iso_utc(eor), time_source="run_db")
+            if bor is None or eor is None:
+                notes.append("run %d has no %s row in the run database" % (
+                    entry["run"], "BOR or EOR" if bor is None and eor is None
+                    else "BOR" if bor is None else "EOR"))
+                continue
+            seconds = (eor - bor).total_seconds()
+            if seconds <= 0:
+                notes.append("run %d: EOR is not after BOR in the run database" % entry["run"])
+                continue
+            entry["seconds"] = round(seconds, 3)
+
+    def exposure_of(self, run_ids, step=None):
+        """``exposure`` of run database ids `run_ids` (the merge path); all
+        null (empty_exposure) when their run numbers cannot be read, so the
+        key is always there.  Never raises."""
+        numbers = []
+        try:
+            numbers = [self.db.get_midas_run_number(r) for r in run_ids]
+            if any(n is None for n in numbers):
+                raise ValueError("run without a MIDAS run number")
+        except Exception as exc:                       # noqa: BLE001 -- never blocks the post
+            self.message("Tuning: exposure of run(s) (db id) %s not known: %s"
+                         % (", ".join(str(r) for r in run_ids), exc))
+            return empty_exposure(numbers)
+        return self.exposure(numbers, step)
+
+    def inline_maps(self, local_paths, context_id):
+        """The maps to send inline -- the measurement -- or None.  A context
+        is never lost over them: when they cannot be made it goes out with
+        its files only, and a MIDAS error says the step's measurement then
+        depends on the service's file mirror."""
+        try:
+            inline = self.maps_reader(local_paths)
+            if inline is not None and not any(sum(map(sum, plane)) for plane in inline["maps"]):
+                raise ValueError("the maps are empty")
+        except Exception as exc:                       # noqa: BLE001 -- files only, never lost
+            self.message("Tuning: inline maps of %s could not be made (%s); posted with files "
+                         "only, so its measurement depends on piana's file mirror"
+                         % (context_id, exc), is_error=True)
+            return None
+        return inline
+
+    def build_context(self, run_ids, step=None):
+        """The context of `run_ids` as it would be posted; nothing is sent."""
+        context_id, files, numbers, header, inline, exposure = self.context_parts(run_ids, step)
+        return self.mt.BuildContextFiles(context_id, files, numbers, header, step=step,
+                                         inline=inline, exposure=exposure)
+
+    def post_runs(self, run_ids, step=None, seq_id=None, require_delivery=False):
+        """Build the context of `run_ids` and post it through the retry queue.
+        Once the service took it, `seq_id` is set DONE and `step` (the active
+        one) reported `posted` and closed (context_delivered); until then
+        both stay open.  Raises ContextRejected when the service refused it
+        for good.  With `require_delivery` (the CLI, which has no later
+        retry) raise when the service did not take it, and drop it."""
+        context_id, files, numbers, header, inline, exposure = self.context_parts(run_ids, step)
+        context = self.mt.BuildContextFiles(context_id, files, numbers, header, step=step,
+                                            inline=inline, exposure=exposure)
+        self._rejected.pop(context_id, None)
+        self._inflight[context_id] = {"seq_id": seq_id, "step": step}
+        self.mt.Enqueue(context)
+        if context_id in self._rejected:
+            raise ContextRejected("the service rejected context %s: %s"
+                                  % (context_id, self._rejected.pop(context_id)))
+        queued = context_id in self._inflight
+        if queued and require_delivery:
+            self._inflight.pop(context_id, None)
+            self.mt.Drop(context_id)
+            raise RuntimeError("the service did not take context %s" % context_id)
+        if queued:
+            self.message("Tuning: context %s queued, the service did not take it yet; "
+                         "sequence %s stays CLAIMED until it does" % (context_id, seq_id))
+        return context
+
+    def post_sequence(self, seq_id):
+        """Post the context of a finished `mt_add` sequence.  The sequence
+        becomes DONE when the service took it, FAILED with a MIDAS error
+        message when it cannot be built (CONTEXT_ERRORS) or was refused, and
+        stays CLAIMED while it waits in the queue.  Any other error (the run
+        database, the ODB, a file system) leaves it CLAIMED and puts it back
+        into the waiting set, tried again after RETRY_DELAY_S, with one MIDAS
+        error per episode.  Never raises."""
+        step = self.step_of_claimed(seq_id)
+        try:
+            run_ids = self.db.get_all_runs_in_sequence(seq_id)
+            context = self.post_runs(run_ids, step=step, seq_id=seq_id)
+        except ContextRejected:
+            # context_rejected has sent the error, the report and set FAILED
+            return None
+        except CONTEXT_ERRORS as exc:
+            self.message("Tuning: context for sequence %d not posted: %s" % (seq_id, exc),
+                         is_error=True)
+            if step is not None:
+                self._report_final(step, "failed", "context not posted: %s" % exc)
+            try:
+                self.db.update_status("run_sequence", seq_id, "FAILED")
+            except Exception as db_exc:                # noqa: BLE001 -- try again later
+                self._retry_later(seq_id, db_exc)
+            return None
+        except Exception as exc:                       # noqa: BLE001 -- passing: try again later
+            self._retry_later(seq_id, exc)
+            return None
+        self._retrying.discard(seq_id)
+        return context
+
+    def _retry_later(self, seq_id, exc):
+        try:
+            delay = self.post_delay
+        except Exception:                              # noqa: BLE001
+            delay = CONFIG_DEFAULTS["MiniTwin post delay"]
+        # due RETRY_DELAY_S from now, whatever the post delay
+        self._waiting[seq_id] = self.clock() - delay + RETRY_DELAY_S
+        if seq_id not in self._retrying:
+            self._retrying.add(seq_id)
+            self.message("Tuning: sequence %d not posted (%s); it stays CLAIMED and is tried "
+                         "again every %.0f s" % (seq_id, exc, RETRY_DELAY_S), is_error=True)
+
+    @property
+    def post_delay(self):
+        return float(odb_value(self.odb, ODB_CONFIG + "/MiniTwin post delay",
+                               CONFIG_DEFAULTS["MiniTwin post delay"]))
+
+    def claim(self, seq_id, step=_UNSET):
+        """The daemon claimed finished `mt_add` sequence `seq_id`: post it
+        once it has waited `MiniTwin post delay` seconds (post_due).  The
+        step it belongs to is taken now -- the active step if this is its
+        sequence, else what was recorded for it -- and recorded under
+        /Nearline/MiniTwin/Pending/<seq id>, so a proposal taken while it
+        waits, or a restart, cannot strip its provenance."""
+        if seq_id not in self._claim_steps:
+            if step is _UNSET:
+                step = self.step_for_sequence(seq_id) or self._load_pending(seq_id)
+            self._claim_steps[seq_id] = step
+            if step is not None:
+                try:
+                    save_pending(self.odb, seq_id, step)
+                except Exception as exc:               # noqa: BLE001 -- kept in memory
+                    self.message("Tuning: could not record the step of sequence %d: %s"
+                                 % (seq_id, exc), is_error=True)
+        self._waiting.setdefault(seq_id, self.clock())
+        self.post_due()
+
+    def _load_pending(self, seq_id):
+        try:
+            return load_pending(self.odb, seq_id)
+        except Exception as exc:                       # noqa: BLE001
+            self.message("Tuning: could not read the step of sequence %d: %s" % (seq_id, exc))
+            return None
+
+    def step_of_claimed(self, seq_id):
+        """The step a sequence is posted with: taken at claim time, else the
+        active step if it is its sequence, else the recorded one."""
+        if seq_id in self._claim_steps:
+            step = self._claim_steps[seq_id]
+            return dict(step) if step else None
+        return self.step_for_sequence(seq_id) or self._load_pending(seq_id)
+
+    def post_due(self):
+        """Post every waiting sequence whose delay is over.  Called every
+        mainloop iteration; never blocks, never raises."""
+        try:
+            delay = self.post_delay
+        except Exception:                              # noqa: BLE001
+            delay = CONFIG_DEFAULTS["MiniTwin post delay"]
+        now = self.clock()
+        for seq_id, since in sorted(self._waiting.items()):
+            if now - since < delay:
+                continue
+            del self._waiting[seq_id]
+            try:
+                self.post_sequence(seq_id)
+            except Exception as exc:                   # noqa: BLE001 -- never into the mainloop
+                self.message("Tuning: sequence %d not posted: %s" % (seq_id, exc), is_error=True)
+
+    def resume_claimed(self):
+        """At daemon start-up: every `mt_add` sequence left CLAIMED had its
+        context still queued (the queue lives in memory) or not yet posted
+        when the daemon stopped.  Those whose step belongs to the current
+        proposal (the last proposal id) or is the active step go back to the
+        waiting set and are posted by post_due after the post delay (the
+        service recognises a repeat by its context id).  The others are
+        listed in one MIDAS message and left alone: post them by hand.
+        Nothing is read from the histogram files here.  Returns the sequence
+        ids queued; never raises."""
+        try:
+            claimed = [s for s in self.db.find_sequences("CLAIMED", limit=100)
+                       if "mt_add" in (s.get("on_complete") or "").split()
+                       and "merge" not in (s.get("on_complete") or "").split()]
+        except Exception as exc:                       # noqa: BLE001 -- start-up must go on
+            self.message("Tuning: could not look for CLAIMED sequences: %s" % exc, is_error=True)
+            return []
+        queued, left = [], []
+        for seq in claimed:
+            seq_id = seq["id"]
+            active = self.step_for_sequence(seq_id)
+            step = active or self._load_pending(seq_id)
+            if step is not None and (active is not None
+                                     or step.get("proposal_id") == self.mt.last_proposal_id):
+                self.message("Tuning: sequence %d was left CLAIMED; posting it again after the "
+                             "post delay" % seq_id)
+                self._claim_steps[seq_id] = step
+                self._waiting.setdefault(seq_id, self.clock())
+                queued.append(seq_id)
+            else:
+                left.append(seq_id)
+        if left:
+            runs = []
+            for seq_id in left:
+                try:
+                    runs += [self.db.get_midas_run_number(r)
+                             for r in self.db.get_all_runs_in_sequence(seq_id)]
+                except Exception:                      # noqa: BLE001 -- only for the message
+                    pass
+            self.message("Tuning: sequence(s) %s left CLAIMED without a step of the current "
+                         "proposal; not posted. Post by hand if wanted: "
+                         "python -m pioneer.nearline.tuning post --run N (run(s) %s)"
+                         % (", ".join(str(s) for s in left),
+                            ", ".join(str(r) for r in runs if r is not None) or "?"))
+        return queued
+
+    # -- DAQ progress reports ----------------------------------------------
+
+    def collect_progress(self, step, reply=None):
+        """The DAQ report of `step` from the run database and the ODB."""
+        seq_id = step.get("seq_id")
+        progress = self.db.get_sequence_progress(seq_id) if seq_id else None
+        stage, message = progress_stage(progress)
+        runs = (progress or {}).get("runs") or []
+        subruns = None
+        if progress is not None:
+            subruns = {"done": sum(int(r["nearline_done"]) for r in runs),
+                       "total": sum(int(r["nearline_total"]) for r in runs)}
+        events = None
+        running = [r for r in runs if r["status"] == "RUNNING"]
+        if running:
+            # Events sent is the running experiment's counter; only trust it
+            # when the ODB says the run in progress is ours.
+            pk = odb_value(self.odb, ODB_RUN_DB_PK, 0)
+            ours = [r for r in running if r["run_db_id"] == pk]
+            if ours:
+                sent = odb_value(self.odb, ODB_EVENTS_SENT, None)
+                events = {"sent": int(sent) if sent is not None else None,
+                          "requested": int(ours[0]["requested_events"] or 0) or None}
+        return daq_report(
+            step["proposal_id"], stage, step=step, seq_id=seq_id,
+            runs=[{"run_db_id": r["run_db_id"], "run_number": r["run_number"],
+                   "status": r["status"]} for r in runs],
+            events=events, subruns=subruns, message=message,
+            sent_utc=utc_now(self.clock), reply=reply)
+
+    def monitor(self):
+        """Called every mainloop iteration: at most every MONITOR_INTERVAL_S,
+        while a step is active and the loop is not paused, post its progress
+        if it changed.  Never raises."""
+        try:
+            if self.active is None or self.enabled is False:
+                return False
+            now = self.clock()
+            if now - self._last_monitor < MONITOR_INTERVAL_S:
+                return False
+            self._last_monitor = now
+            return self.report_progress(only_if_changed=True)
+        except Exception as exc:                       # noqa: BLE001 -- never into the mainloop
+            self._progress_error(exc)
+            return False
+
+    def report_progress(self, only_if_changed=False, reply=None, note=None):
+        """Collect and post the active step's progress; `note` is the message
+        when the state gives none.  Never raises."""
+        try:
+            if self.active is None:
+                return False
+            report = self.collect_progress(self.active, reply=reply)
+            if note and not report.get("message"):
+                report["message"] = note
+            if only_if_changed and not self._changed(report):
+                return False
+        except Exception as exc:                       # noqa: BLE001
+            self._progress_error(exc)
+            return False
+        self._last_monitor_error = None
+        return self.report(report)
+
+    def _progress_error(self, exc):
+        # once per distinct error, not every 10 s
+        text = "Tuning: progress report failed: %s" % exc
+        if text != self._last_monitor_error:
+            self._last_monitor_error = text
+            self.message(text)
+
+    def _changed(self, report):
+        if _report_key(report) != self._last_key:
+            return True
+        events = report.get("events") or {}
+        sent, requested = events.get("sent"), events.get("requested")
+        if sent is None or not requested:
+            return False
+        if self._last_events is None:
+            return True
+        return abs(sent - self._last_events) >= EVENTS_STEP * requested
+
+    def report(self, report):
+        """Post one DAQ report; remembers it when the service took it.
+        Reports without a proposal id are not sent.  Never raises."""
+        try:
+            if not report.get("proposal_id"):
+                return False
+            if not self.mt.PostDaq(report):
+                return False
+        except Exception as exc:                       # noqa: BLE001
+            self.message("Tuning: DAQ report not sent: %s" % exc)
+            return False
+        self._last_key = _report_key(report)
+        self._last_events = (report.get("events") or {}).get("sent")
+        if report.get("stage") != "paused":
+            self._last_report = dict(report)
+        return True
+
+    def _report_final(self, step, stage, message):
+        """`posted` or `failed` for `step`, with its runs when they can be read."""
+        try:
+            report = self.collect_progress(step)
+        except Exception:                              # noqa: BLE001
+            report = daq_report(step["proposal_id"], stage, step=step,
+                                seq_id=step.get("seq_id"), sent_utc=utc_now(self.clock))
+        report["stage"] = stage
+        report["message"] = message
+        report["events"] = None
+        self.report(report)
+
+    def _report_paused(self, step=None):
+        """One `paused` report, with the runs and subruns of `step` (default
+        the active step) when there is one."""
+        step = step or self.active or {"proposal_id": self.mt.last_proposal_id}
+        report = None
+        if step.get("seq_id"):
+            try:
+                report = self.collect_progress(step)
+            except Exception:                          # noqa: BLE001 -- bare report instead
+                report = None
+        if report is None:
+            report = daq_report(step.get("proposal_id") or 0, "paused", step=step,
+                                seq_id=step.get("seq_id"), sent_utc=utc_now(self.clock))
+        report["stage"] = "paused"
+        report["events"] = None
+        report["message"] = "MiniTwin enable is off: not polling for proposals"
+        self.report(report)
+
+    def _report_resumed(self):
+        # the monitor posts the step's state at its next look; without a step
+        # repeat the last report, so the page stops showing `paused`
+        self._last_key = None
+        self._last_monitor = 0.0
+        if self.active is None and self._last_report is not None:
+            report = dict(self._last_report)
+            report["message"] = "loop resumed"
+            report["sent_utc"] = utc_now(self.clock)
+            self.report(report)
+
+
+def _report_key(report):
+    return (report.get("stage"),
+            tuple((r.get("run_db_id"), r.get("status")) for r in report.get("runs") or []),
+            tuple(sorted((report.get("subruns") or {}).items())))
+
+
+# ---------------------------------------------------------------------------
+# manual path: python -m pioneer.nearline.tuning {schedule,post}
+# ---------------------------------------------------------------------------
+
+class MemoryOdb:
+    """Stand-in ODB for --no-odb: the defaults plus what the command line
+    gives, kept in memory and forgotten at exit."""
+
+    def __init__(self, values=None):
+        self.values = dict(values or {})
+
+    def odb_exists(self, path):
+        return path in self.values
+
+    def odb_get(self, path):
+        return self.values[path]
+
+    def odb_set(self, path, value):
+        self.values[path] = value
+
+
+def _parser():
+    import argparse
+    import os
+
+    # the same options on both commands, after the command name
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--url", default=None,
+                        help="beam-tuning service (default: /Nearline/config/MiniTwin URL)")
+    common.add_argument("--dry-run", action="store_true",
+                        help="print what would be scheduled or sent; write and send nothing")
+    common.add_argument("--no-odb", action="store_true",
+                        help="do not connect to MIDAS: ODB defaults, nothing remembered")
+    common.add_argument("--output-path", default=None,
+                        help="nearline output tree (default: /Nearline/config/Output path)")
+    common.add_argument("--midas-host", default=os.environ.get("MIDAS_SERVER_HOST", "localhost"))
+    common.add_argument("--midas-expt", default=os.environ.get("MIDAS_EXPT_NAME"))
+
+    parser = argparse.ArgumentParser(
+        prog="python -m pioneer.nearline.tuning",
+        description="Drive the tuning loop by hand, exactly as the nearline daemon does.")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sched = sub.add_parser("schedule", parents=[common],
+                           help="take the current proposal once and write its run")
+    sched.add_argument("--since", type=int, default=None,
+                       help="proposal id to ask past (default: /Nearline/MiniTwin/Last proposal id); "
+                            "one less than a proposal id retakes that proposal")
+    sched.add_argument("--force", action="store_true",
+                       help="schedule even though MiniTwin enable is on (the daemon may take "
+                            "the same proposal)")
+    post = sub.add_parser("post", parents=[common],
+                          help="post run N's histogram files as a context")
+    post.add_argument("--run", type=int, required=True, help="MIDAS run number")
+    return parser
+
+
+def _connect_odb(args):
+    if args.no_odb:
+        values = {ODB_CONFIG + "/" + k: v for k, v in CONFIG_DEFAULTS.items()}
+        values.update({ODB_STATE + "/" + k: v for k, v in STATE_DEFAULTS.items()})
+        return MemoryOdb(values), None
+    import midas.client
+    client = midas.client.MidasClient("NearlineTuning", host_name=args.midas_host,
+                                      expt_name=args.midas_expt)
+    return client, client
+
+
+def _print_json(obj):
+    import json
+    print(json.dumps(obj, indent=2, default=str))
+
+
+def main(argv=None, db=None, odb=None, http=None, header_reader=None, maps_reader=None):
+    """The command line.  `db`, `odb`, `http` and `header_reader` replace the
+    real run database, MIDAS client, service client and ROOT header reader
+    (the tests use them)."""
+    from pioneer.nearline.beamtune_client import DEFAULT_URL
+    from pioneer.nearline.miniTwinInterface import miniTwinInterface
+
+    args = _parser().parse_args(argv)
+    client = None
+    if odb is None:
+        odb, client = _connect_odb(args)
+    try:
+        if db is None:
+            import pioneer.rundb.interface
+            db = pioneer.rundb.interface.interface(user="bot", password="bot")
+        if not args.dry_run and not args.no_odb:
+            ensure_odb_keys(odb)
+
+        url = args.url or odb_value(odb, ODB_CONFIG + "/MiniTwin URL", DEFAULT_URL)
+        table = odb_value(odb, ODB_CONFIG + "/MiniTwin updates", "pim1_epics")
+        mt = miniTwinInterface(base_url=url, config_type=table,
+                               logger=lambda m: print("[beamtune] " + m))
+        if http is not None:
+            mt.client = http
+
+        def message(text, is_error=False):
+            print(("ERROR: " if is_error else "") + text)
+
+        loop = TuningLoop(db, mt, odb, message=message,
+                          header_reader=header_reader or read_beamline_header,
+                          maps_reader=maps_reader or read_inline_maps)
+        # a one-off override, not written to the ODB
+        loop.output_override = args.output_path
+        loop.restore()
+
+        if args.command == "schedule":
+            return _cmd_schedule(args, loop, odb, url)
+        return _cmd_post(args, loop, db)
+    finally:
+        if client is not None:
+            client.disconnect()
+
+
+def _cmd_schedule(args, loop, odb, url):
+    if args.since is not None:
+        loop.mt.last_proposal_id = args.since
+    if not args.dry_run and odb_value(odb, ODB_CONFIG + "/MiniTwin enable", False):
+        if not args.force:
+            print("ERROR: /Nearline/config/MiniTwin enable is on, so the daemon is polling the "
+                  "service too and could take the same proposal. Set it to n first, or pass --force.")
+            return 2
+        print("note: --force with MiniTwin enable on: the daemon polls the service too")
+    since = loop.mt.last_proposal_id
+    try:
+        scheduled = loop.poll_and_schedule(dry_run=args.dry_run)
+    except ScheduleError as exc:
+        print("ERROR: %s" % exc)
+        return 2
+    if not scheduled:
+        print("no proposal newer than %d from %s" % (since, url))
+        return 1
+    if args.dry_run:
+        print("dry run: would schedule (nothing written)")
+    _print_json(scheduled)
+    return 0
+
+
+def _cmd_post(args, loop, db):
+    run_id = db.get_run_id(args.run)
+    if run_id is None:
+        print("ERROR: MIDAS run %d is not in the run database" % args.run)
+        return 2
+    step = loop.step_for_run(run_id)
+    if step is None:
+        print("run %d is not the active step's run: posting without responds_to/step_id" % args.run)
+    # With the step, its sequence is set DONE on delivery, so the daemon does
+    # not post it again -- but only from a state the run database does not
+    # move on from by itself; a sequence still RUNNING would be bounced back
+    # by its trigger and then posted by the daemon a second time, without
+    # the step.
+    seq_id = step.get("seq_id") if step else None
+    if seq_id:
+        entry = db.get_sequence_entry(seq_id)
+        if entry is None or entry.get("status") not in ("RUNSDONE", "CLAIMED", "FAILED"):
+            print("sequence %s is %s: left as it is" % (seq_id, (entry or {}).get("status")))
+            seq_id = None
+    try:
+        if args.dry_run:
+            context = loop.build_context([run_id], step=step)
+            print("dry run: would send (nothing sent)")
+            _print_json(context)
+            return 0
+        context = loop.post_runs([run_id], step=step, require_delivery=True, seq_id=seq_id)
+    except Exception as exc:                           # noqa: BLE001 -- a shifter reads this
+        print("ERROR: run %d not posted: %s" % (args.run, exc))
+        return 2
+    print("posted context %s with %d file(s)" % (context["context_id"],
+                                                   len(context["measurement"]["files"])))
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())
