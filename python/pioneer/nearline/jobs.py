@@ -8,14 +8,20 @@ from pioneer.rundb.interface import interface as db_interface
 
 from pioneer.nearline.render import render_job
 
-# This flag is set if the list of input files shall be determined
-# by using glob. Otherwise, an explicit list is used.
-glob_input_files = False
-
 # Set this flag to True for debugging purpose only. It will
 # print the shell command instead of executing it and execute
 # a sleep command instead.
 dry_run_all_jobs = False
+
+def assert_list(obj) -> list:
+    if isinstance(obj, list):
+        return obj
+    elif isinstance(obj, (str, bytes)):
+        return [obj]
+    try:
+        return list(obj)
+    except TypeError:
+        return [obj]
 
 class BaseJob:
     """
@@ -30,6 +36,7 @@ class BaseJob:
         self.proc = None
         self.rc = None
         self.table = config.get("table", "postproc_job")
+        self.infile = self.db.find_job_file(config['job_id'])
 
     def build_command(self):
         # This function should be overwritten by the actual job description
@@ -76,7 +83,7 @@ class BaseJob:
         return status
 
     def raw_midas_files(self, include_sidecars = False):
-        parent_path = Path(self.config['input'])
+        parent_path = Path(self.config['online_path'])
         run_id = self.config['run_id']
         file_list = self.db.find_files(run_id, "mid.lz4")
         files = list()
@@ -88,6 +95,38 @@ class BaseJob:
                     parent_path / f"{aFile['filebase']}.mid.lz4.crc32c",
                 ])
         return files
+
+    def get_files(self, include_sidecars = True):
+        if self.infile is None:
+            return self.raw_midas_files(include_sidecars = include_sidecars)
+
+        producer = self.infile.get("producer", None)
+        file_list = [
+            f"{self.infile['filebase']}.{self.infile['fileext']}"
+        ]
+
+        if producer is None:
+            raise ValueError(f"No producer for file {self.infile['filebase']}.{self.infile['fileext']} registered")
+        if producer == "nearline":
+            base_path = Path(self.config['nearline_path'])/f"run{self.config['midas_run_number']:05d}"
+            if include_sidecars:
+                file_list.extend([
+                    # list sidecar files here
+                    f"{self.infile['filebase']}.py",
+                    f"{self.infile['filebase']}_hists.{self.infile['fileext']}"
+                ])
+        elif producer.startswith("logger"):
+            base_path = Path(self.config['online_path'])
+            if include_sidecars:
+                file_list.extend([
+                    # list sidecar files here
+                    f"{self.infile['filebase']}.mid.crc32c",
+                    f"{self.infile['filebase']}.mid.lz4.crc32c"
+                ])
+        else:
+            raise ValueError(f"Unknown producer {producer}")
+        return [base_path  / f for f in file_list]
+
 
     @property
     def job_type(self):
@@ -109,7 +148,13 @@ class RsyncJob(BaseJob):
     that SSH keys are configured for remote transfers.
     """
     def build_command(self):
-        return ['rsync', '-av', *self.raw_midas_files(include_sidecars = True), self.config[self.config['job_type'].lower()]]
+        if self.config['job_type'] == 'remote':
+            destination = self.config['remote_path']
+        elif self.config['job_type'] == 'backup':
+            destination = self.config['backup_path']
+        else:
+            raise ValueError(f"Invalid rsync job type: {self.config['job_type']}")
+        return ['rsync', '-av', *self.get_files(), destination]
 
 class GaudiJob(BaseJob):
     """
@@ -118,7 +163,6 @@ class GaudiJob(BaseJob):
     """
     def __init__(self, config, iface):
         super().__init__(config, iface)
-        self.infile = self.db.find_job_file(config['job_id'])
         self.out_file_id = None
 
     def format_config_file(self) -> Path:
@@ -131,9 +175,9 @@ class GaudiJob(BaseJob):
         if self.infile is None:
             raise RuntimeError("input file not found in database")
 
-        input_file_path  = Path(self.config['input'])  / f"{self.infile['filebase']}.{self.infile['fileext']}"
-        out_file_name = f"{self.infile['filebase']}.root"
-        output_file_path = Path(self.config['output']) / out_file_name
+        input_file_path  = Path(self.config['online_path'])  / f"{self.infile['filebase']}.{self.infile['fileext']}"
+        out_file_name    = f"{self.infile['filebase']}.root"
+        output_file_path = Path(self.config['nearline_path']) / f"run{self.config['midas_run_number']:05d}" / out_file_name
 
         return render_job(input_file_path, output_file_path,
                           job_id = self.config['job_id'],
@@ -153,6 +197,10 @@ class GaudiJob(BaseJob):
     def finalise(self):
         status = super().finalise()
         self.db.update_file_status(self.out_file_id, status)
+        if status == 'DONE':
+            # Job succeeded.
+            self.db.schedule_postproc_job_on_file(self.out_file_id, "remote")
+            self.db.schedule_postproc_job_on_file(self.out_file_id, "backup")
         return status
 
 class CleanJob(BaseJob):
@@ -162,8 +210,7 @@ class CleanJob(BaseJob):
     completed and the raw data was backed up to HDD and remote locations.
     """
     def build_command(self):
-        input_files = self.raw_midas_files(include_sidecars = True)
-        return ['rm', '-rf', *input_files]
+        return ['rm', '-rf', *self.get_files()]
 
 
 class MergeJob(BaseJob):
@@ -174,17 +221,22 @@ class MergeJob(BaseJob):
 
     def build_job_description_file(self):
         print(self.config)
-        input_path = Path(self.config["input"])
-        outfile = self.config["output"] /f"seq{self.config['id']:05d}.root"
+        nearline_path = Path(self.config["nearline_path"])
+        out_path =  nearline_path / f"seq{self.config['id']:05d}"
+        out_path.mkdir(parents=True, exist_ok=True)
+        outfile = out_path / f"seq{self.config['id']:05d}.root"
         self.config['output_file'] = outfile
         config = {
-                "output" : str(outfile),
+            "output" : str(outfile),
             "runs"   : {
-                f"{run_id}" : [str(input_path / f"run{self.db.get_midas_run_number(run_id):05d}/{f['filebase']}_hists.root") for f in self.db.find_files([run_id], "root")]
-                for run_id in self.config['midas_run_ids']
-            }
+                f"{run_id}" :
+                    [
+                        str(nearline_path / f"run{self.db.get_midas_run_number(run_id):05d}/{f['filebase']}_hists.root")
+                        for f in self.db.find_files([run_id], "root")
+                    ] for run_id in self.config['midas_run_ids']
+                }
         }
-        cfg_file_path = Path(self.config['cfg_file'])
+        cfg_file_path = out_path / f"seq{self.config['id']:05d}.json"
         with cfg_file_path.open("w") as f:
             json.dump(config, f, indent = 2)
 

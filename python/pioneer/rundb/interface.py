@@ -616,7 +616,7 @@ class interface:
             cursor.execute(
                     """
                     WITH claimed AS (
-                        SELECT ppj.id, ppj.midas_run_id, mr.midas_run_number
+                        SELECT ppj.id, ppj.midas_run_id, ppj.file_id, mr.midas_run_number
                         FROM state.postproc_job AS ppj
                         JOIN state.midas_run AS mr ON ppj.midas_run_id = mr.id
                         WHERE ppj.status = 'PENDING'
@@ -632,6 +632,7 @@ class interface:
                     RETURNING
                         claimed.id as job_id,
                         claimed.midas_run_id as run_id,
+                        claimed.file_id as file_id,
                         claimed.midas_run_number as midas_run_number
                     """, (job_type, max_jobs,))
             results = cursor.fetchall()

@@ -172,10 +172,10 @@ class NearlineDaemon:
 
     def dispatch_job(self, queue : NearlineQueue, job_cfg):
         job_cfg['job_type'] = queue.name
-        job_cfg['input']    = self.midas_logger_path
-        job_cfg['backup']   = self.backup_path
-        job_cfg['remote']   = self.remote_path
-        job_cfg['output']   = self.nearline_output_path / f"run{job_cfg['midas_run_number']:05d}"
+        job_cfg['online_path']     = self.midas_logger_path
+        job_cfg['backup_path']     = self.backup_path
+        job_cfg['remote_path']     = self.remote_path
+        job_cfg['nearline_path']   = self.nearline_output_path
 
         theJob = nl_jobs.create_job(job_cfg, self.db_interface)
         try:
@@ -189,9 +189,7 @@ class NearlineDaemon:
     def build_and_dispatch_seq(self, seq_cfg : dict):
         on_complete = seq_cfg['on_complete'].split()
         if "merge" in on_complete:
-            seq_cfg['input'] = self.nearline_output_path
-            seq_cfg['output'] = self.nearline_output_path / f"seq{seq_cfg['id']:05d}"
-            seq_cfg['cfg_file'] = seq_cfg['output'] / f"seq{seq_cfg['id']:05d}.json"
+            seq_cfg['nearline_path'] = self.nearline_output_path
             seq_cfg['job_type'] = "merge"
             seq_cfg['job_id'] = seq_cfg['id']
             seq_cfg['table'] = 'run_sequence'
