@@ -316,9 +316,9 @@ class interface:
             self.schedule_postproc_job(run_id, 'backup')
             self.schedule_postproc_job(run_id, 'remote')
 
-            # Create the cleanup job. This one does feature dependencies
-            # Hence a more complex fill than the typical schedule_postproc_job
             with conn.cursor() as cursor:
+                # Create the cleanup job. This one does feature dependencies
+                # Hence a more complex fill than the typical schedule_postproc_job
                 cursor.execute(
                     """
                     WITH new_job AS (
@@ -336,6 +336,23 @@ class interface:
                     WHERE ppj.id <> new_job.id;
                     """,
                     (run_id,),
+                )
+
+                # Schedule offline job. To be executed on the analysis machine
+                cursor.execute(
+                    """
+                    WITH new_job AS (
+                        INSERT INTO state.postproc_job (midas_run_id, job_type, status)
+                        VALUES (%s, 'offline', 'PENDING') ON CONFLICT DO NOTHING
+                        RETURNING id, midas_run_id
+                    )
+                    INSERT INTO state.postproc_depends (pp_job_id, depends_on)
+                    SELECT new_job.id, ppj.id
+                    FROM new_job JOIN state.postproc_job AS ppj
+                    ON ppj.midas_run_id = new_job.midas_run_id
+                    WHERE ppj.job_type = 'remote';
+                    """,
+                    (run_id, )
                 )
 
         conn.commit()
