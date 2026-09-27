@@ -826,6 +826,13 @@ BEFORE INSERT ON logs.slow_control
 FOR EACH ROW
 EXECUTE FUNCTION logs.filter_slow_control_insert();
 
+CREATE TABLE IF NOT EXISTS logs.run_annotations (
+    id BIGSERIAL PRIMARY KEY NOT NULL,
+    run_id INT REFERENCES state.midas_run(id),
+    author TEXT NOT NULL,
+    log_time TIMESTAMPTZ NOT NULL DEFAULT now(),
+    note TEXT NOT NULL
+);
 
 -- =========================================================
 -- role specific permissions on selected tables
