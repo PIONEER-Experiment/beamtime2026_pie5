@@ -2,7 +2,7 @@ from midas.client import MidasClient
 from pioneer.rundb.interface import interface
 
 
-def write_epics(client : MidasClient, table : str):
+def write_epics(client : MidasClient, table : str, comment : str):
     writeable_device_types = [
         1, # Magnets
         4, # Separator
@@ -30,4 +30,20 @@ def write_epics(client : MidasClient, table : str):
         aConfig[this_name] = demand_vals[ch_index]
 
     iface = interface(user = "bot", password = "bot")
-    return iface.add_new_configuration(table = table, values = aConfig)
+    return iface.add_new_configuration(table = table, values = aConfig, comment = comment)
+
+def write_degrader(client: MidasClient, table : str, comment : str):
+    aConfig = {
+        "xpos" : client.odb_get("/Equipment/Degrader/Variables/Demand"),
+        "comment" : comment
+    }
+    iface = interface(user = "bot", password = "bot")
+    return iface.add_new_configuration(table = table, values = aConfig, comment = comment)
+
+
+def write_config(client : MidasClient, table : str, comment :str):
+    if table in ('pim1_epics', 'pie5_epics'):
+        return write_epics(client = client, table = table, comment= comment)
+    elif table == 'degrader_position':
+        return write_degrader(client = client, table = table, comment= comment)
+    

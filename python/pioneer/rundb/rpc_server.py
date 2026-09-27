@@ -41,6 +41,7 @@ import midas.client
 
 from pioneer.rundb import commands, pg
 from pioneer.rundb.view import RunDbView
+from pioneer.rundb import midas_commands as mcmd
 
 # Where the page's settings live.  Not under /Custom: mhttpd turns every
 # subdirectory of /Custom into an entry in the side menu.
@@ -124,43 +125,49 @@ class Server:
         cmd = str(cmd or "").strip()
         self.calls += 1
         self.last_cmd = cmd
-        allowed = actions_allowed(client) if cmd in commands.ACTION_COMMANDS else False
-        try:
-            envelope, reply = commands.dispatch_envelope(
-                self.view, self.actions, cmd, args,
-                max_len=max_len, actions_allowed=allowed,
-            )
-        except Exception as exc:  # noqa: BLE001 - the page must get JSON whatever happens
-            envelope = commands.error_envelope(
-                str(cmd), "internal", f"{exc.__class__.__name__}: {exc}")
-            reply = commands.encode_within(envelope, max_len)
+        if cmd in mcmd.MidasCommands:
+            # Catch commands that require the midas client to answer properly,
+            # e.g. for ODB access or extra messages
+            reply = mcmd.call(client = client, cmd = cmd, args = args)
 
-        if cmd in commands.ACTION_COMMANDS:
-            # Every attempt leaves a line in the MIDAS message log, whether it
-            # was carried out or not: the run database is shared, and "who
-            # scheduled these runs" has to be answerable from the Messages
-            # page -- as does "I pressed the button and nothing happened",
-            # which is what a shifter sees when the gates are closed.  A
-            # refusal is not an error condition, so it is not highlighted.
-            # Both gates, the same way the command layer reads them: the ODB
-            # flag can be true on a client that has no action module at all.
-            if allowed and self.actions is not None:
-                worked = bool(envelope.get("ok"))
-                line = (f"{self.view.client_name}: action {cmd} "
-                        f"{'accepted' if worked else 'refused'}: {args}")
-                if worked:
-                    # What it created, in the log, so the Messages page answers
-                    # "which runs are these?" without anybody opening psql.
-                    data = envelope.get("data") or {}
-                    line += (f" -> sequence {data.get('sequence_id')}, "
-                             f"runs {data.get('run_ids')}")
-                client.msg(line, is_error=False)
-            else:
-                reason = ("actions not built into this client"
-                          if self.actions is None
-                          else f"actions disabled in {ROOT}/Allow actions")
-                client.msg(f"{self.view.client_name}: refused action {cmd} "
-                           f"({reason}): {args}", is_error=False)
+        else:
+            allowed = actions_allowed(client) if cmd in commands.ACTION_COMMANDS else False
+            try:
+                envelope, reply = commands.dispatch_envelope(
+                    self.view, self.actions, cmd, args,
+                    max_len=max_len, actions_allowed=allowed,
+                )
+            except Exception as exc:  # noqa: BLE001 - the page must get JSON whatever happens
+                envelope = commands.error_envelope(
+                    str(cmd), "internal", f"{exc.__class__.__name__}: {exc}")
+                reply = commands.encode_within(envelope, max_len)
+
+            if cmd in commands.ACTION_COMMANDS:
+                # Every attempt leaves a line in the MIDAS message log, whether it
+                # was carried out or not: the run database is shared, and "who
+                # scheduled these runs" has to be answerable from the Messages
+                # page -- as does "I pressed the button and nothing happened",
+                # which is what a shifter sees when the gates are closed.  A
+                # refusal is not an error condition, so it is not highlighted.
+                # Both gates, the same way the command layer reads them: the ODB
+                # flag can be true on a client that has no action module at all.
+                if allowed and self.actions is not None:
+                    worked = bool(envelope.get("ok"))
+                    line = (f"{self.view.client_name}: action {cmd} "
+                            f"{'accepted' if worked else 'refused'}: {args}")
+                    if worked:
+                        # What it created, in the log, so the Messages page answers
+                        # "which runs are these?" without anybody opening psql.
+                        data = envelope.get("data") or {}
+                        line += (f" -> sequence {data.get('sequence_id')}, "
+                                f"runs {data.get('run_ids')}")
+                    client.msg(line, is_error=False)
+                else:
+                    reason = ("actions not built into this client"
+                            if self.actions is None
+                            else f"actions disabled in {ROOT}/Allow actions")
+                    client.msg(f"{self.view.client_name}: refused action {cmd} "
+                            f"({reason}): {args}", is_error=False)
 
         return midas.status_codes["SUCCESS"], reply
 

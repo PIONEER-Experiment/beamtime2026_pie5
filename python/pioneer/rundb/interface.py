@@ -285,13 +285,14 @@ class interface:
         conn.close()
         return True
 
-    def add_new_configuration(self, table : str, values : dict) -> int | None:
+    def add_new_configuration(self, table : str, values : dict, comment : str = "Mystery Configuration") -> int | None:
         """
         Insert a new configuration to the database.
 
         Arguments:
         - table: table name it shall be inserted to.
         - values: dict of config values to be inserted,
+        - comment: Some description of the configuration
 
         Returns:
         Configuration ID created.
@@ -307,8 +308,8 @@ class interface:
                 # Create the parent table entry first
                 table_ident = psycopg.sql.Identifier(table)
                 cursor.execute(
-                    "INSERT INTO config.configuration (config_type) VALUES (%s) RETURNING id",
-                    (table, )
+                    "INSERT INTO config.configuration (config_type, comment) VALUES (%s, %s) RETURNING id",
+                    (table, comment)
                 )
                 values['id'] = cursor.fetchone()[0]
 

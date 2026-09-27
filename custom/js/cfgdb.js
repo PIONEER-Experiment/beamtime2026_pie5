@@ -95,7 +95,7 @@ const state = {
    status: null,             // data of the last good `status`
    queue: null,              // data of the last good `queue`
    sequences: null,          // rows of the last good `sequences`
-   configurations : null,
+   configuration_tables : {'target_positions' : [], 'degrader_positions' : [], 'beamline_settings' : []},
    runs: {},                 // runlog rows by database id, newest first when sorted
    nextBeforeId: null,       // paging cursor from the last runlog reply
    haveRunlog: false,
@@ -288,7 +288,7 @@ function configTableHtml(configuration_tables) {
    const target_body = configuration_tables.target_positions.map(function(row) {
       const do_not_use_cell = row.do_not_use
             ? " --- " : '<input type="checkbox" class="config-ckbx-target" value="' + row.config_type + ":" + row.config_id + '">';
-      return "<tr>" +
+      return "<tr id=cfg_row" + row.config_id + ">" +
               "<td>" + row.config_id + "</td>" +
               "<td>" + (row.comment ? row.comment : " --- ") + "</td>" +
               "<td>" + do_not_use_cell + "</td>" +
@@ -304,7 +304,7 @@ function configTableHtml(configuration_tables) {
    const degrader_body = configuration_tables.degrader_positions.map(function(row) {
       const do_not_use_cell = row.do_not_use
             ? " --- " : '<input type="checkbox" class="config-ckbx-degrader"  value="' + row.config_type + ":" + row.config_id + '">';
-       return "<tr>" +
+       return "<tr id=cfg_row" + row.config_id + ">" +
               "<td>" + row.config_id + "</td>" +
               "<td>" + (row.comment ? row.comment : " --- ") + "</td>" +
               "<td>" + do_not_use_cell + "</td>" +
@@ -318,7 +318,7 @@ function configTableHtml(configuration_tables) {
    const beamline_body   = configuration_tables.beamline_settings.map(function(row) {
       const do_not_use_cell = row.do_not_use
             ? " --- " : '<input type="checkbox" class="config-ckbx-beam"  value="' + row.config_type + ":" + row.config_id + '">';
-       return "<tr>" +
+       return "<tr id=cfg_row" + row.config_id + ">" +
               "<td>" + row.config_id + "</td>" +
               "<td>" + do_not_use_cell + "</td>" +
               "<td>" + (row.values ? row.values.seq_id : " ---" ) + "</td>" +
@@ -336,23 +336,26 @@ function configTableHtml(configuration_tables) {
          '<tr><td>Schedule the Runs</td><td><button id="submit_config"> schedule </button></td></tr>' +
          '</table>';
 
-   return '<h3 class="rundb-h"> Target Positions </h3>' +
+   return '<h3 class="rundb-h"><a href="http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FXYTable%2FVariables"> Target Positions </a></h3>' +
           '<table class="mtable rundb-table">' +
           target_header +
           target_body.join("") +
           "</table>" +
+          '<div id="target_add_line"></div>' +
 
-         '<h3 class="rundb-h"> Degrader Positions </h3>'+
+         '<h3 class="rundb-h"><a href="http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FDegrader%2FVariables"> Degrader Positions </a></h3>'+
          '<table class="mtable rundb-table">' +
          degrader_header +
          degrader_body.join("") +
          "</table>" +
+         '<div id="degrader_add_line"></div>' +
 
-         '<h3 class="rundb-h">' + configuration_tables.beamline.name + ' Beamline </h3>'+
+         '<h3 class="rundb-h"><a href="http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FEPICS">' + configuration_tables.beamline.name + ' Beamline </a></h3>'+
          '<table class="mtable rundb-table">' +
          beamline_header +
          beamline_body.join("") +
          "</table>" +
+         '<div id="beam_add_line"></div>' +
 
          '<table class="mtable rundb-table">' +
          '<h3 class="rundb-h"> Submit new Sequences </h3>'+
@@ -493,7 +496,7 @@ function updateNumRuns() {
 // renderConfigurations is only called asyncronously upon loading the page.
 // Updates are going to be rare enough such that reloading the page is acceptable.
 async function renderConfigurations() {
-   await pollOdb()
+   await pollOdb() // Poll ODB first to load configuration required here
    const beamline = state.odb.beamline
    let beamtable = null;
    if (beamline == "PiM1") {
@@ -504,13 +507,13 @@ async function renderConfigurations() {
    const target_positions   = await R.call("config", {"id" : "target_position"}, maxBytes());
    const degrader_positions = await R.call("config", {"id" : "degrader_position"}, maxBytes());
    const beamline_settings = await R.call("config", {"id" : beamtable}, maxBytes());
-   state.config_tables = {
+   state.configuration_tables = {
       "target_positions" : target_positions.data,
       "degrader_positions" : degrader_positions.data,
       "beamline_settings" : beamline_settings.data,
       "beamline" : {"name" : beamline, "table" : beamtable }
    };
-   put("rundb-configs", configTableHtml(state.config_tables))
+   put("rundb-configs", configTableHtml(state.configuration_tables))
 
    document.querySelectorAll( ".config-ckbx-target, .config-ckbx-degrader, .config-ckbx-beam" ).forEach(function(checkbox) {
       checkbox.addEventListener("change", updateNumRuns);
@@ -543,6 +546,7 @@ async function renderConfigurations() {
       }
 
    });
+   await pollOdb() // Poll ODB again to check against RPC loaded configurations.
 }
 
 function renderFooter() {
@@ -555,6 +559,50 @@ function renderFooter() {
 
 // ---- the three loops ----
 
+async function check_xy_table() {
+   const xydemand = await R.odb(["/Equipment/XYTable/Variables/Demand"])
+   let found_match = false
+   for (let index = 0; index < state.configuration_tables.target_positions.length; index++) {
+      const element = state.configuration_tables.target_positions[index];
+      const row = document.getElementById("cfg_row" + element.config_id);
+      if (element.values &&
+          element.values.xpos == xydemand[0][0] &&
+          element.values.ypos == xydemand[0][1] &&
+          element.do_not_use == false)
+      {
+         if (row) {
+            row.classList.add('marked-row');
+            found_match = true
+         }
+      } else {
+         if (row) {
+            row.classList.remove('marked-row');
+         }
+      }
+   }
+   if (found_match == false) {
+      put("target-add-line", "test")
+   }
+}
+
+
+async function check_degrader() {
+   const demand = await R.odb(["/Equipment/Degrader/Variables/Demand"])
+   for (let index = 0; index < state.configuration_tables.degrader_positions.length; index++) {
+      const element = state.configuration_tables.degrader_positions[index];
+      const row = document.getElementById("cfg_row" + element.config_id);
+      if (element.values && element.values.xpos == demand[0] && element.do_not_use == false) {
+         if (row) {
+            row.classList.add('marked-row');
+         }
+      } else {
+         if (row) {
+            row.classList.remove('marked-row');
+         }
+      }
+   }
+}
+
 async function pollOdb() {
    const values = await R.odb(ODB_PATHS);
    state.odb = odbFromValues(values);
@@ -562,7 +610,9 @@ async function pollOdb() {
    R.setClientName(state.config["Client name"]);
    renderStrip();
    renderAlerts();
-   renderFooter();          // it names the database and the client, both from the ODB
+   renderFooter();
+   check_xy_table();
+   check_degrader();
 }
 
 /**

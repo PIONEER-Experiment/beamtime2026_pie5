@@ -28,10 +28,6 @@ import re
 import time
 from datetime import datetime
 
-
-from pioneer.nearline.run import midas_run_sequence
-from pioneer.rundb.interface import interface as db_iface
-
 # Views that only read.  The command-line tool offers exactly these.
 #
 # `preview_five_point` is here rather than beside the action it previews: it
@@ -320,38 +316,8 @@ def _call(view, actions, cmd: str, args: dict, actions_allowed: bool):
                      "/RunDBView/Allow actions to true",
             )
         return getattr(actions, cmd)(**args)
-
-    if cmd == "generate_sequence":
-        print(f"generate_sequence called with {args}")
-        return schedule_configuration(args)
     raise CommandError("unknown_command", f"unknown command {cmd!r}",
                        hint="known commands: " + ", ".join(known_commands()))
-
-
-def schedule_configuration(config):
-    iface = db_iface(user = "shifter", password = config.get("password"))
-    num_ev = config.get("events", 10000)
-    mrs_target = midas_run_sequence(iface, num_ev = num_ev)
-    mrs_degrad = midas_run_sequence(iface, num_ev = num_ev)
-    mrs_beam = midas_run_sequence(iface, num_ev = num_ev)
-
-    for row in config['config']:
-        table, id = row.split(":")
-        print(row, table, id)
-        if table == "target_position":
-            mrs_target.add_config_id(table, id)
-        elif table == "degrader_position":
-            mrs_degrad.add_config_id(table, id)
-        elif table in ('pim1_epics', 'pie5_epics'):
-            mrs_beam.add_config_id(table, id)
-        else:
-            raise CommandError("unknown_table", f"Unknown table {table} in config, skipping.")
-
-    mrs_degrad.set_subsequence(mrs_target)
-    mrs_beam.set_subsequence(mrs_degrad)
-    
-    return {"runs": mrs_beam.schedule()}
-
 
 def dispatch(view, actions, cmd: str, args=None, max_len: int | None = None,
              actions_allowed: bool = False) -> str:
