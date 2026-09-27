@@ -341,14 +341,14 @@ function configTableHtml(configuration_tables) {
           target_header +
           target_body.join("") +
           "</table>" +
-          '<div id="target_add_line"></div>' +
+          '<div id="target-add-line"></div>' +
 
          '<h3 class="rundb-h"><a href="http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FDegrader%2FVariables"> Degrader Positions </a></h3>'+
          '<table class="mtable rundb-table">' +
          degrader_header +
          degrader_body.join("") +
          "</table>" +
-         '<div id="degrader_add_line"></div>' +
+         '<div id="degrader-add-line"></div>' +
 
          '<h3 class="rundb-h"><a href="http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FEPICS">' + configuration_tables.beamline.name + ' Beamline </a></h3>'+
          '<table class="mtable rundb-table">' +
@@ -561,7 +561,7 @@ function renderFooter() {
 
 async function check_xy_table() {
    const xydemand = await R.odb(["/Equipment/XYTable/Variables/Demand"])
-   let found_match = false
+   let found_match = null
    for (let index = 0; index < state.configuration_tables.target_positions.length; index++) {
       const element = state.configuration_tables.target_positions[index];
       const row = document.getElementById("cfg_row" + element.config_id);
@@ -572,7 +572,7 @@ async function check_xy_table() {
       {
          if (row) {
             row.classList.add('marked-row');
-            found_match = true
+            found_match = element.config_id;
          }
       } else {
          if (row) {
@@ -580,26 +580,35 @@ async function check_xy_table() {
          }
       }
    }
-   if (found_match == false) {
-      put("target-add-line", "test")
+   if (found_match) {
+      put("target-add-line", "Currently in ODB: " + found_match)
+   } else {
+      put("target-add-line", "The option to add a line should appear here")
    }
 }
 
 
 async function check_degrader() {
    const demand = await R.odb(["/Equipment/Degrader/Variables/Demand"])
+   let found_match = null;
    for (let index = 0; index < state.configuration_tables.degrader_positions.length; index++) {
       const element = state.configuration_tables.degrader_positions[index];
       const row = document.getElementById("cfg_row" + element.config_id);
       if (element.values && element.values.xpos == demand[0] && element.do_not_use == false) {
          if (row) {
             row.classList.add('marked-row');
+            found_match = element.config_id;
          }
       } else {
          if (row) {
             row.classList.remove('marked-row');
          }
       }
+   }
+   if (found_match) {
+      put("degrader-add-line", "Currently in ODB: " + found_match)
+   } else {
+      put("degrader-add-line", "The option to add a line should appear here")
    }
 }
 
