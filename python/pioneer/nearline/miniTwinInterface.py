@@ -277,6 +277,7 @@ class miniTwinInterface:
         stop the polling (and a successful poll is what lets that context's
         failures count, see _count_failure).
         """
+        comment = ""
         try:
             if self._muted():
                 return []
@@ -316,27 +317,31 @@ class miniTwinInterface:
         self.column_map_error = None
         self._last_id = proposal_id
         reply = payload.get("in_reply_to")
+        comment += f"In Reply to: {reply}"
         self._last_reply = dict(reply) if isinstance(reply, dict) else None
 
         if payload.get("done"):
             self._log("strategy reports done at proposal %d; not scheduling" % proposal_id)
             return []
-        if not currents:
+        elif currents:
+            # Remember what we asked for: the daemon hands us files later, not
+            # settings, so this is how a context knows which currents produced it.
+            self._last_run = dict(payload["run"]) if isinstance(payload.get("run"), dict) else None
+            msg = "proposal %d -> %s%s%s" % (
+                proposal_id, currents,
+                " (clamped: %s)" % payload["clamped"] if payload.get("clamped") else "",
+                " [step %s]" % self._last_run.get("step_id")
+                if self._last_run and self._last_run.get("step_id") else "")
+            self._log(msg)
+            comment += msg + "\n"
+            return [{
+                "type" : "iter",
+                "comment" : comment,
+                "currents" : [self._row(currents)]
+                }
+                ]
+        else:
             return []
-
-        # Remember what we asked for: the daemon hands us files later, not
-        # settings, so this is how a context knows which currents produced it.
-        self._last_run = dict(payload["run"]) if isinstance(payload.get("run"), dict) else None
-        self._log("proposal %d -> %s%s%s" % (
-            proposal_id, currents,
-            " (clamped: %s)" % payload["clamped"] if payload.get("clamped") else "",
-            " [step %s]" % self._last_run.get("step_id")
-            if self._last_run and self._last_run.get("step_id") else ""))
-        return [{
-            "type" : "iter",
-            "currents" : [self._row(currents)]
-            }
-            ]
 
     def NextRunPlan(self):                             # noqa: N802 -- daemon's API
         """``NextConfiguration()`` plus how to take the run.

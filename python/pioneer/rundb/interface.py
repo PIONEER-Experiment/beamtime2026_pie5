@@ -138,12 +138,21 @@ class interface:
             configs = cursor.fetchall()
         return configs
 
-    def register_run(self, status : str) -> int:
+    def register_run(self, status : str, author : str, note : str) -> int:
         conn = connect(self.user, self.password)
         with conn.cursor() as cursor:
             cursor.execute(
-                "INSERT INTO state.midas_run (status) VALUES (%s) RETURNING id",
-                (status, )
+                """
+                WITH new_run AS (
+                    INSERT INTO state.midas_run (status)
+                    VALUES (%s) RETURNING id
+                )
+                INSERT INTO logs.run_annotations (run_id, author, note)
+                SELECT new_run.id, %s, %s
+                FROM new_run
+                RETURNING run_id;
+                """,
+                (status, author, note)
             )
             run_id = cursor.fetchone()[0]
         conn.commit()
@@ -397,7 +406,35 @@ class interface:
             conn.close()
         return inserted_id
 
-    def schedule_new_run(self, num_ev :int,  configs : list) -> int:
+    def annotate_run_id(self, run_id : int, author : str, note : str):
+        conn = connect(self.user, self.password)
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO logs.run_annotations (run_id, author, note) VALUES (%s, %s, %s)",
+                    (run_id, author, note)
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def annotate_run_number(self, run_number : int, author : str, note : str):
+        conn = connect(self.user, self.password)
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO logs.run_annotations (run_id, author, note)
+                    SELECT mr.id, %s, %s FROM state.midas_run AS mr
+                    WHERE mr.midas_run_number = %s LIMIT 1
+                    """,
+                    (author, note, run_number)
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def schedule_new_run(self, num_ev :int,  configs : list, author : str, note : str) -> int:
         """
         Schedule a new run in the midas_run table
 
@@ -428,11 +465,17 @@ class interface:
                 # registered. This is fine as it becomes visible only after committing down below.
                 cursor.execute(
                     """
-                    INSERT INTO state.midas_run (priority, status, requested_events)
-                    VALUES (%s, 'PENDING', %s)
-                    RETURNING id
+                    WITH new_run AS (
+                        INSERT INTO state.midas_run (priority, status, requested_events)
+                        VALUES (%s, 'PENDING', %s)
+                        RETURNING id
+                    )
+                    INSERT INTO logs.run_annotations (run_id, author, note)
+                    SELECT new_run.id, %s, %s
+                    FROM new_run
+                    RETURNING run_id;
                     """,
-                    (priority, num_ev)
+                    (priority, num_ev, author, note)
                 )
                 run_id = cursor.fetchone()[0]
 

@@ -328,12 +328,13 @@ function configTableHtml(configuration_tables) {
    });
 
    // submit area
-   //const submit_area = 'Number of Events: <input type="text" id="submit_events></input> <button id="submit_config"> schedule </button>';
    const submit_area = '<table  class="mtable rundb-table">'+
-         '<tr><td>Number of runs</td><td id="submit_num_runs"> 0 </td></tr>'+
+         '<tr><td>Number of runs</td><td id="submit_num_runs">0</td></tr>'+
+         '<tr><td>Description</td><td><textarea id="submit_description" cols="100" rows="10"></textarea></td></tr>' + 
          '<tr><td>Number of events</td><td><input type="text" id="submit_events"></td></tr>' +
-         '<tr><td>Confirm number of runs</td><td><input type="text" id="submit_confirm_runs"></input></td></tr>' +
-         '<tr><td>Schedule the Runs</td><td><button id="submit_config"> schedule </button></td></tr>' +
+         '<tr><td>Operator Name</td><td><input type="text" id= "submit_operator_name"></input></td></tr>' +
+         '<tr><td>Confirm number of runs</td><td><input type="text" id="submit_confirm_runs"></td></tr>' +
+         '<tr><td>Schedule the Runs</td><td><button class="dlgButtonDefault" id="submit_config"> schedule </button></td></tr>' +
          '</table>';
 
    return '<h3 class="rundb-h"><a href="http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FXYTable%2FVariables"> Target Positions </a></h3>' +
@@ -529,15 +530,36 @@ async function renderConfigurations() {
       // safety catch
       const numRuns = document.getElementById("submit_num_runs").textContent;
       const confirmedRuns = document.getElementById("submit_confirm_runs").value;
+      const operator = document.getElementById("submit_operator_name").value;
+      const description = document.getElementById("submit_description").value;
+      const numEv = document.getElementById("submit_events").value
 
-      if (String(numRuns) !== String(confirmedRuns)) {
+      // hard fail points, no recovery
+      if (numRuns == "0") {
+         dlgAlert("Can't schedule 0 runs. Select at least one configuration from each category to fully specify your runs")
+         return
+      } else if (String(numRuns) != String(confirmedRuns)) {
          dlgAlert("Number of runs does not match confirmation.");
+         return;
+      } else if (!Number.isFinite(Number(numEv)) || Number(numEv) < 1) {
+         dlgAlert("Number of events must be a positive number.");
+         return;
+      } else if (typeof operator !== "string" || operator.trim() === "") {
+         dlgAlert("Please specify operator")
+         return;
+      } else if (typeof description !== "string" || description.trim() === "") {
+         dlgAlert("Please provide a description")
          return;
       } else {
          dlgQuery("Confirm scheduling " + numRuns + " runs. Enter shifter password.</br></br> Password: ", "", async function(resp, param) {
             if (resp) {
                try {
-                  await R.call("generate_sequence", {"config" : selected, "events" : document.getElementById("submit_events").value, "password" : resp})
+                  await R.call("generate_sequence", {
+                     "config" : selected,
+                     "events" : numEv,
+                     "operator" : operator,
+                     "description" : description,
+                     "password" : resp})
                } catch(err) {
                   console.error(err);
                }

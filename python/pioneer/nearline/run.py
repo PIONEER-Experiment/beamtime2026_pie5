@@ -4,12 +4,19 @@ import itertools
 from pioneer.rundb.interface import interface as db_interface
 
 class midas_run_sequence:
-    def __init__(self, iface : db_interface, num_ev : int | None = None):
+    def __init__(self,
+                iface : db_interface,
+                author : str,
+                description : str,
+                num_ev : int | None = None):
         self.this_sequence = dict()
         self.the_sub_sequence = None
         self.on_complete = None
         self.iface = iface
         self.num_ev = num_ev
+        self.authors = {author}
+        self.my_description = description
+        self.parent_description = None
         # id of the sequence the last schedule() registered
         self.seq_id = None
 
@@ -48,23 +55,42 @@ class midas_run_sequence:
     def schedule(self):
         key_list = self.this_sequence.keys()
         run_list = list()
-        for it in itertools.product(*[self.this_sequence[k] for k in key_list]):
+        for index, it in enumerate(itertools.product(*[self.this_sequence[k] for k in key_list])):
+            if self.parent_description:
+                descr =  f"{self.parent_description} / {self.my_description}[{index}]"
+            else:
+                descr = f"{self.my_description}[{index}]"
             if self.the_sub_sequence is None:
-                this_run = midas_run(self.iface, cfg = dict(zip(key_list, it)), num_ev = self.num_ev)
+                this_run = midas_run(self.iface,
+                                    author = ", ".join([a for a in sorted(self.authors)]),
+                                    description = descr,
+                                    cfg = dict(zip(key_list, it)),
+                                    num_ev = self.num_ev
+                                )
                 run_list.append(this_run.schedule())
             else:
                 for k, v in zip(key_list, it):
                     if (self.the_sub_sequence.num_ev is None):
                         self.the_sub_sequence.num_ev = self.num_ev;
+                    self.the_sub_sequence.parent_description = descr
+                    self.the_sub_sequence.authors.update(self.authors)
                     self.the_sub_sequence.set_config_list(k, [v])
                 run_list.extend(self.the_sub_sequence.schedule())
         self.seq_id = self.iface.register_sequence(run_list, self.on_complete)
         return run_list
 
 class midas_run:
-    def __init__(self, iface : db_interface, from_existing_run  : None | int = None, cfg : None | dict = None, num_ev : int = 1e6):
+    def __init__(self,
+                 iface : db_interface,
+                 author : str,
+                 description : str,
+                 from_existing_run  : None | int = None,
+                 cfg : None | dict = None,
+                 num_ev : int = 1e6):
         self.this_configuration = dict()
         self.num_ev = num_ev
+        self.author = author
+        self.description = description
         self.iface = iface
 
         if (from_existing_run is not None):
@@ -97,28 +123,20 @@ class midas_run:
         # Call write config first - this will guarantee that each configuration has
         # an ID assigned and exists in the config tables.
         self.write_config()
-        print(self.this_configuration)
-        return self.iface.schedule_new_run(num_ev = self.num_ev, configs = [c['id'] for c in self.this_configuration.values()])
+        return self.iface.schedule_new_run(
+            num_ev = self.num_ev,
+            configs = [c['id'] for c in self.this_configuration.values()],
+            author = self.author,
+            note = self.description
+            )
 
 
-def five_point_sequence(iface : db_interface):
-    mrs = midas_run_sequence(iface)
+def five_point_sequence(iface : db_interface, author, descr, num_ev = 1e6):
+    mrs = midas_run_sequence(iface, author, descr, num_ev)
     mrs.set_config_seq("target_position", 2) # Default 5 point sequence is marked with sequence number 2 in the runDB
     return mrs
 
-def degrader_scan(iface : db_interface):
-    mrs = midas_run_sequence(iface)
+def degrader_scan(iface : db_interface, author, descr, num_ev = 1e6):
+    mrs = midas_run_sequence(iface, author, descr, num_ev)
     mrs.set_config_seq("degrader_position", 1) # Default degrader scan is marked with sequence number 1 in the runDB
     return mrs
-
-if __name__ == "__main__":
-    iface = db_interface("bot", "bot")
-
-    dscan = degrader_scan(iface)
-    dscan.set_subsequence(five_point_sequence(iface))
-
-    mrs2 = midas_run_sequence(iface)
-    mrs2.set_config_seq("pim1_epics", 0)
-    mrs2.set_subsequence(dscan)
-
-    mrs2.schedule()
