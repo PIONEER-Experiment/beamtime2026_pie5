@@ -60,7 +60,6 @@ const ODB_PATHS = [
    "/PySequencer/State/Running",
    "/PySequencer/State/Finished",
    "/PySequencer/State/SFilename",
-   "/PySequencer/Param/Value/nEv",
    CONFIG_ROOT + "/Client name",
    CONFIG_ROOT + "/Poll seconds",
    CONFIG_ROOT + "/Runlog rows",
@@ -292,9 +291,6 @@ function stripHtml(odb, health, counts, queueCounts) {
       esc(seqWord) + (script ? " &mdash; " + esc(script) : ""),
       "/PySequencer/State"));
 
-   chips.push(chip("gray", "sequencer parameter nEv",
-      odb.nEv === null || odb.nEv === undefined ? NO : esc(odb.nEv),
-      "/PySequencer/Param/Value/nEv -- a wait time in the sequencer script, not a number of events"));
 
    // What is waiting and what has gone wrong, from the counts the status reply
    // already carries. A shifter should see a failed nearline job without having
@@ -912,15 +908,14 @@ function odbFromValues(values) {
       seqRunning: values[3],
       seqFinished: values[4],
       seqFile: values[5],
-      nEv: values[6],
-      clientName: values[7],
-      pollSeconds: values[8],
-      runlogRows: values[9],
-      runlogRefreshSeconds: values[10],
-      maxReplyKb: values[11],
-      staleSeconds: values[12],
-      allowActions: values[13],
-      database: values[14]
+      clientName: values[6],
+      pollSeconds: values[7],
+      runlogRows: values[8],
+      runlogRefreshSeconds: values[9],
+      maxReplyKb: values[10],
+      staleSeconds: values[11],
+      allowActions: values[12],
+      database: values[13]
    };
 }
 

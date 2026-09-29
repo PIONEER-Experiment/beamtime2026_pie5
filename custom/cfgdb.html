@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html class="mcss" lang="en">
+<head>
+   <meta charset="UTF-8">
+   <link rel="stylesheet" href="midas.css">
+   <script src="controls.js"></script>
+   <script src="midas.js"></script>
+   <script src="mhttpd.js"></script>
+   <title>CfgDB</title>
+
+   <!-- Ours. The ?v= is not decoration: mhttpd stamps Expires:+24h on anything
+        served through send_fp(), with no ETag and no Last-Modified, so without a
+        version token an edit to these files is invisible for a day. Bump it when
+        you change them. (The page itself is exempt: its /Custom key has no dot,
+        so it routes through show_custom_page(), which sets no cache headers.)
+
+        The names are flat -- rundb.css, not css/rundb.css -- because mhttpd
+        serves a /Custom asset under its *key name*: the ODB keys are
+        /Custom/rundb.css!, /Custom/rundb-rpc.js! and /Custom/rundb.js!, each
+        pointing at the file wherever it actually lives. See custom/README.md. -->
+   <link rel="stylesheet" href="rundb.css">
+   <script src="rundb-rpc.js"></script>
+   <script src="cfgdb.js"></script>
+</head>
+
+<body class="mcss" onload="mhttpd_init('CfgDB'); CFGDB.init();">
+
+<!-- mhttpd_init() fills these two. -->
+<div id="mheader"></div>
+<div id="msidenav"></div>
+
+<div id="mmain">
+
+   <div class="rundb-panel">
+      <h2 class="rundb-h">Configurations</h2>
+      <div id="rundb-configs"></div>
+   </div>
+
+   <div class="rundb-footnote"><span id="cfgdb-lastread"></span></div>
+   <div class="rundb-footnote" id="cfgdb-footer"></div>
+
+</div>
+</body>
+</html>

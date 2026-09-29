@@ -61,6 +61,9 @@ table.rundb-table th          { font-weight: 600; white-space: nowrap; }
 table.rundb-table td.rundb-num{ text-align: right; }
 table.rundb-table td.rundb-config { font-size: 92%; max-width: 22em; }
 
+
+.marked-row td {font-weight: bold;}
+
 /* A status is printed under the name the run database stores, so the page and
    psql say the same thing; only the colour comes from the utils.status flags. */
 .rundb-word       { font-weight: 600; }

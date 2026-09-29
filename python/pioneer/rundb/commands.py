@@ -67,7 +67,7 @@ _ARGUMENTS = {
     "queue": {"limit": ("rows", DEFAULT_QUEUE_ROWS)},
     "run": {"id": ("required_id", None)},
     "sequences": {"limit": ("rows", DEFAULT_SEQUENCE_ROWS)},
-    "config": {"id": ("required_id", None)},
+    "config": {"id": ("id_or_string", None)},
     "schedule_five_point": {
         "config_ids": ("required_id_list", None),
         "requested_events": ("events", 1_000_000),
@@ -78,6 +78,7 @@ _ARGUMENTS = {
         "config_ids": ("required_id_list", None),
         "requested_events": ("events", 1_000_000),
     },
+    "generate_sequence" : {"config": ("", None), "events": ("events", 10000), "password": ("", None)},
 }
 
 # Anything that looks like a password is removed before a message is sent on.
@@ -174,6 +175,14 @@ def parse_args(cmd: str, args) -> dict:
             if value is None:
                 raise CommandError("usage", f"{cmd} needs {name}")
             out[name] = _as_int(name, value)
+        elif kind == "id_or_string":
+            if value is None:
+                raise CommandError("usage", f"{cmd} needs {name}")
+            try:
+                value = int(value)
+                out[name] = _as_int(name, value)
+            except (TypeError, ValueError):
+                out[name] = value
         elif kind == "required_id_list":
             if value is None:
                 raise CommandError("usage", f"{cmd} needs {name}")
@@ -182,6 +191,8 @@ def parse_args(cmd: str, args) -> dict:
             out[name] = [_as_int(name, item) for item in value]
         elif kind == "events":
             out[name] = default if value is None else _as_int(name, value)
+        else:
+            out[name] = value
     return out
 
 
@@ -280,7 +291,11 @@ def _call(view, actions, cmd: str, args: dict, actions_allowed: bool):
     if cmd == "sequences":
         return view.sequences(limit=args["limit"])
     if cmd == "config":
-        return view.config(args["id"])
+        this_id = args.get("id")
+        if isinstance(this_id, int):
+            return view.config(this_id)
+        else:
+            return view.config_list(this_id)
     if cmd == "preview_five_point":
         # One gate, not two: this only reads, so the ODB flag does not come
         # into it.  What it needs is the action module, which is where the
@@ -303,7 +318,6 @@ def _call(view, actions, cmd: str, args: dict, actions_allowed: bool):
         return getattr(actions, cmd)(**args)
     raise CommandError("unknown_command", f"unknown command {cmd!r}",
                        hint="known commands: " + ", ".join(known_commands()))
-
 
 def dispatch(view, actions, cmd: str, args=None, max_len: int | None = None,
              actions_allowed: bool = False) -> str:

@@ -1,8 +1,8 @@
-from midas.sequencer import SequenceClient
+from midas.client import MidasClient
 from pioneer.rundb.interface import interface
 
 
-def write_epics(seq : SequenceClient):
+def write_epics(client : MidasClient, table : str, comment : str):
     writeable_device_types = [
         1, # Magnets
         4, # Separator
@@ -14,10 +14,10 @@ def write_epics(seq : SequenceClient):
     # 3 (PSA) and 6 (Value) are not considerd writable
 
     odb_path    = "/Equipment/EPICS"
-    ca_names    = seq.odb_get(odb_path + "/Settings/CA Name")
-    ca_demand   = seq.odb_get(odb_path + "/Settings/CA Demand")
-    dev_type    = seq.odb_get(odb_path + "/Settings/Device type")
-    demand_vals = seq.odb_get(odb_path + "/Variables/Demand")
+    ca_names    = client.odb_get(odb_path + "/Settings/CA Name")
+    ca_demand   = client.odb_get(odb_path + "/Settings/CA Demand")
+    dev_type    = client.odb_get(odb_path + "/Settings/Device type")
+    demand_vals = client.odb_get(odb_path + "/Variables/Demand")
     ch_names = [f"{cn}{cd}" for cn, cd in zip(ca_names, ca_demand)]
     aConfig = {}
 
@@ -30,4 +30,20 @@ def write_epics(seq : SequenceClient):
         aConfig[this_name] = demand_vals[ch_index]
 
     iface = interface(user = "bot", password = "bot")
-    return iface.add_new_configuration(table = seq.get_param("table"), values = aConfig)
+    return iface.add_new_configuration(table = table, values = aConfig, comment = comment)
+
+def write_degrader(client: MidasClient, table : str, comment : str):
+    aConfig = {
+        "xpos" : client.odb_get("/Equipment/Degrader/Variables/Demand"),
+        "comment" : comment
+    }
+    iface = interface(user = "bot", password = "bot")
+    return iface.add_new_configuration(table = table, values = aConfig, comment = comment)
+
+
+def write_config(client : MidasClient, table : str, comment :str):
+    if table in ('pim1_epics', 'pie5_epics'):
+        return write_epics(client = client, table = table, comment= comment)
+    elif table == 'degrader_position':
+        return write_degrader(client = client, table = table, comment= comment)
+    

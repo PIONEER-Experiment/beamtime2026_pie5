@@ -45,3 +45,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+*.pdf
+root_output_files
