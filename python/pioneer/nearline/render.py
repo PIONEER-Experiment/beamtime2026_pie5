@@ -63,7 +63,7 @@ def _job_git(job_source: Path) -> str:
 
 
 def render_job(in_file, out_file, *, evt_max=-1, job_id="", run_id="",
-               job_source=None, target=None) -> Path:
+               job_source=None, target=None, hist_only = False) -> Path:
     """Write the rendered job for one file and return the path it was written to.
 
     in_file and out_file are resolved to absolute paths, because the rendered
@@ -97,6 +97,7 @@ def render_job(in_file, out_file, *, evt_max=-1, job_id="", run_id="",
         "job_git": _job_git(job_source),
         "job_id": str(job_id),
         "run_id": str(run_id),
+        "hist_only" : str(hist_only)
     }
 
     source = job_source.read_text()

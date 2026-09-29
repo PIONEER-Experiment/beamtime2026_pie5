@@ -2,8 +2,11 @@
 import pioneer.nearline.jobs as nl_jobs
 
 class NearlineQueue:
-    def __init__(self, name : str = None, maxJobs : int = 1):
-        self.name : str  = name
+    def __init__(self, job_types : str | list[str] = None, maxJobs : int = 1):
+        if isinstance(job_types, str):
+            self.job_types : list[str] = [job_types]
+        else:
+            self.job_types :list[str] = job_types
         self.maxJobs :int = maxJobs
         self.active : list[nl_jobs.BaseJob] = list()
 

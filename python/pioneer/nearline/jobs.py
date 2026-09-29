@@ -112,7 +112,7 @@ class BaseJob:
 
         if producer is None:
             raise ValueError(f"No producer for file {self.infile['filebase']}.{self.infile['fileext']} registered")
-        if producer == "nearline":
+        if producer in ("nearline", "farline"):
             if include_sidecars:
                 file_list.extend([
                     # list sidecar files here
@@ -154,7 +154,7 @@ class RsyncJob(BaseJob):
 
 class GaudiJob(BaseJob):
     """
-    This launches nearline processing on a midas file and represents
+    This launches nearline/farline processing on a midas file and represents
     the backbone of the nearline software.
     """
     def __init__(self, config, iface):
@@ -173,10 +173,12 @@ class GaudiJob(BaseJob):
 
         input_file_path  = self.source / f"{self.infile['filebase']}.{self.infile['fileext']}"
         output_file_path = Path(self.destination) / f"{self.infile['filebase']}.root"
+        hist_only = (self.job_type == 'nearline')
 
         return render_job(input_file_path, output_file_path,
                           job_id = self.config['job_id'],
-                          run_id = self.config['run_id'])
+                          run_id = self.config['run_id'],
+                          hist_only = hist_only)
 
     def build_command(self):
         opt_file = self.format_config_file()
@@ -187,7 +189,7 @@ class GaudiJob(BaseJob):
         # if job start throws, the file is not entered to the database.
         Path(self.destination).mkdir(parents=True, exist_ok=True)
         result = super().start()
-        self.out_file_id = self.db.open_file('nearline', self.config['run_id'], f"{self.infile['filebase']}.root")
+        self.out_file_id = self.db.open_file(self.job_type, self.config['run_id'], f"{self.infile['filebase']}.root")
         return result
 
     def finalise(self):
@@ -262,6 +264,7 @@ def create_job(config, iface) -> BaseJob:
         "remote"  : RsyncJob,
         "backup"  : RsyncJob,
         "gaudi"   : GaudiJob,
+        "farline" : GaudiJob,
         "nearline": GaudiJob,
         "cleanup" : CleanJob,
         "merge"   : MergeJob

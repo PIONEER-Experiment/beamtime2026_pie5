@@ -58,16 +58,22 @@ class NearlineDaemon:
         # this is technically not required but considered a neat feature.
         self.client = midas.client.MidasClient(args.midas_client, host_name = args.midas_host, expt_name = args.midas_expt)
 
-        invoking_call = [
-            sys.executable,
-            os.path.realpath(sys.argv[0]),
-            "--midas-client", args.midas_client,
-            "--midas-host", args.midas_host,
-            "--midas-expt", args.midas_expt
-        ]
+        odb_start_cmd_path = f"/Programs/{args.midas_client}/Start command"
+        if not self.client.odb_exists(odb_start_cmd_path):
+            invoking_call = [
+                "tmux", "new-session",
+                "-d",
+                "-s", "pioneer-nearline",
+                "--",
+                sys.executable,
+                "-m", "pioneer.nearline.daemon",
+                "--midas-client", args.midas_client,
+                "--midas-host", args.midas_host,
+                "--midas-expt", args.midas_expt
+            ]
 
-        start_cmd = " ".join(shlex.quote(arg) for arg in invoking_call)
-        self.client.odb_set(f"/Programs/{args.midas_client}/Start command", start_cmd)
+            start_cmd = " ".join(shlex.quote(arg) for arg in invoking_call)
+            self.client.odb_set(odb_start_cmd_path, start_cmd)
         if not self.client.odb_exists("/Nearline"):
             self.client.odb_set("/Nearline", {
                 "config" : {
@@ -148,21 +154,21 @@ class NearlineDaemon:
             # todo: get slack hook and set it up
 
     def dispatch_job(self, queue : NearlineQueue, job_cfg):
-        job_cfg['job_type']        = queue.name
-        if queue.name == "nearline":
-            job_cfg['source_path']      = self.midas_logger_path
+        job_type = job_cfg['job_type']
+        if job_type == "nearline":
+            job_cfg['source_path'] = self.midas_logger_path
             job_cfg['destination_path'] = str(self.nearline_output_path / f"run{job_cfg['midas_run_number']:05d}")
-        elif queue.name in ("backup", "remote", "cleanup"):
+        elif job_type in ("backup", "remote", "cleanup"):
             if (job_cfg.get('producer', None) == "nearline"):
                 job_cfg['source_path'] = self.nearline_output_path / f"run{job_cfg['midas_run_number']:05d}"
             else:
                 job_cfg['source_path'] = self.midas_logger_path
 
-            if queue.name == "backup":
+            if job_type == "backup":
                 job_cfg['destination_path'] = str(self.backup_path)
-            elif queue.name == "remote":
+            elif job_type == "remote":
                 job_cfg['destination_path'] = str(self.remote_path)
-            elif queue.name == "cleanup":
+            elif job_type == "cleanup":
                 job_cfg['destination_path'] = None
 
         job_cfg['log_path'] = self.nearline_output_path / f"run{job_cfg['midas_run_number']:05d}"
@@ -224,7 +230,7 @@ class NearlineDaemon:
             # Step 2.2: Dispatch new jobs should there be open slots.
             numOpen = aQueue.getOpenSlots()
             if (numOpen > 0):
-                newConfigs = self.db_interface.find_pending_postproc_jobs(job_type = aQueue.name, max_jobs = numOpen)
+                newConfigs = self.db_interface.find_pending_postproc_jobs(job_type = aQueue.job_types, client = 'nearline', max_jobs = numOpen)
                 for aConfig in newConfigs:
                     self.dispatch_job(aQueue, aConfig)
 

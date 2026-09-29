@@ -234,38 +234,109 @@ class interface:
             conn.close()
         return out
 
-    def schedule_postproc_job(self, run_id : int, task : str):
+    def schedule_postproc_job(self, run_id : int, task : str, client : str, dependencies : str | list[int] | None = None):
         conn = connect(self.user, self.password)
         with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO state.postproc_job (midas_run_id, job_type, status)
-                VALUES (%s, %s, 'PENDING') ON CONFLICT DO NOTHING RETURNING id
-                """, (run_id, task)
-            )
-            result = cursor.fetchone()
-            if result is not None:
-                job_id = result[0]
+            if not dependencies:
+                # No dependencies, plain insert
+                cursor.execute(
+                    """
+                    INSERT INTO state.postproc_job (midas_run_id, client, job_type, status)
+                    VALUES (%s, %s, %s, 'PENDING')
+                    ON CONFLICT DO NOTHING
+                    RETURNING id
+                    """, (run_id, client, task)
+                )
+            elif dependencies == "all":
+                # This shall depend on all already scheduled jobs for the same midas run
+                cursor.execute(
+                    """
+                    WITH new_job AS (
+                        INSERT INTO state.postproc_job (midas_run_id, client, job_type, status)
+                        VALUES (%s, %s, %s, 'PENDING') ON CONFLICT DO NOTHING
+                        RETURNING id, midas_run_id
+                    )
+                    INSERT INTO state.postproc_depends (pp_job_id, depends_on)
+                    SELECT
+                        new_job.id,
+                        ppj.id
+                    FROM new_job
+                    JOIN state.postproc_job AS ppj
+                    ON ppj.midas_run_id = new_job.midas_run_id
+                    WHERE ppj.id <> new_job.id
+                    RETURNING pp_job_id
+                    """,
+                    (run_id, client, task)
+                )
+            elif isinstance(dependencies, (list, tuple)) and all(isinstance(x, int) for x in dependencies):
+                # WE got a list of dependencies
+                cursor.execute(
+                    """
+                    WITH new_job AS (
+                        INSERT INTO state.postproc_job (midas_run_id, client, job_type, status)
+                        VALUES (%s, %s, %s, 'PENDING')
+                        ON CONFLICT DO NOTHING
+                        RETURNING id
+                    )
+                    INSERT INTO state.postproc_depends (pp_job_id, depends_on)
+                    SELECT
+                        new_job.id,
+                        ppj.id
+                    FROM new_job
+                    JOIN state.postproc_job AS ppj
+                        ON ppj.id = ANY(%s)
+                    RETURNING pp_job_id
+                    """, (run_id, client, task, dependencies)
+                )
             else:
-                job_id = -1
+                # An option I have not yet thought of.
+                raise RuntimeError("Either you mistyped the dependency or I forgot to implement it.")
+            result = cursor.fetchone()
+            if result is None:
+                conn.rollback()
+                return None
+
+            job_id = result[0]
         conn.commit()
         conn.close()
         return job_id
 
-    def schedule_postproc_job_on_file(self, file_id : int, task : str):
+    def schedule_postproc_job_on_file(self, file_id : int, task : str, client : str, dependencies : str | list[int] | None = None):
         conn = connect(self.user, self.password)
         with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO
-                    state.postproc_job (midas_run_id, file_id, job_type, status)
-                SELECT fl.run_id, fl.id, %s, 'PENDING'
-                FROM state.file_list AS fl
-                WHERE fl.id = %s
-                ON CONFLICT DO NOTHING
-                RETURNING id
-                """, (task, file_id)
-            )
+            if not dependencies:
+                cursor.execute(
+                    """
+                    INSERT INTO state.postproc_job
+                        (midas_run_id, file_id, client, job_type, status)
+                    SELECT fl.run_id, fl.id, %s, %s, 'PENDING'
+                    FROM state.file_list AS fl
+                    WHERE fl.id = %s
+                    ON CONFLICT DO NOTHING
+                    RETURNING id
+                    """, (client, task, file_id)
+                )
+            elif isinstance(dependencies, (list, tuple)) and all(isinstance(x, int) for x in dependencies):
+                cursor.execute(
+                    """
+                    WITH new_job AS (
+                        INSERT INTO state.postproc_job
+                            (midas_run_id, file_id, client, job_type, status)
+                        SELECT fl.run_id, fl.id, %s, %s, 'PENDING'
+                        FROM state.file_list AS fl
+                        WHERE fl.id = %s
+                        ON CONFLICT DO NOTHING
+                        RETURNING id
+                    )
+                    INSERT INTO state.postproc_depends (pp_job_id, depends_on)
+                    SELECT new_job.id, ppj.id
+                    FROM new_job
+                    JOIN state.postproc_job AS ppj ON ppj.id = ANY(%s)
+                    RETURNING pp_job_id
+                    """, (client, task, file_id, list(dependencies))
+                )
+            else:
+                raise RuntimeError("Either you mistyped the dependency or I forgot to implement it.")
             result = cursor.fetchone()
             if result is not None:
                 job_id = result[0]
@@ -313,50 +384,19 @@ class interface:
 
         if (schedule_post_processing):
             # Schedule the backup jobs.
-            self.schedule_postproc_job(run_id, 'backup')
-            self.schedule_postproc_job(run_id, 'remote')
+            if self.schedule_postproc_job(run_id, 'backup', 'nearline') is None:
+                return False
+            remote_job_id = self.schedule_postproc_job(run_id, 'remote', 'nearline')
+            if remote_job_id is None:
+                return False
+            if self.schedule_postproc_job(run_id, 'cleanup', 'nearline', 'all') is None:
+                return False
 
-            with conn.cursor() as cursor:
-                # Create the cleanup job. This one does feature dependencies
-                # Hence a more complex fill than the typical schedule_postproc_job
-                cursor.execute(
-                    """
-                    WITH new_job AS (
-                        INSERT INTO state.postproc_job (midas_run_id, job_type, status)
-                        VALUES (%s, 'cleanup', 'PENDING') ON CONFLICT DO NOTHING
-                        RETURNING id, midas_run_id
-                    )
-                    INSERT INTO state.postproc_depends (pp_job_id, depends_on)
-                    SELECT
-                        new_job.id,
-                        ppj.id
-                    FROM new_job
-                    JOIN state.postproc_job AS ppj
-                    ON ppj.midas_run_id = new_job.midas_run_id
-                    WHERE ppj.id <> new_job.id;
-                    """,
-                    (run_id,),
-                )
+            # List all registered files
+            all_files = self.find_files(run_ids = [run_id], extensions = ['mid.lz4'])
+            for f in all_files:
+                self.schedule_postproc_job_on_file(f, 'farline', 'farline', [remote_job_id])
 
-                # Schedule offline job. To be executed on the analysis machine
-                cursor.execute(
-                    """
-                    WITH new_job AS (
-                        INSERT INTO state.postproc_job (midas_run_id, job_type, status)
-                        VALUES (%s, 'offline', 'PENDING') ON CONFLICT DO NOTHING
-                        RETURNING id, midas_run_id
-                    )
-                    INSERT INTO state.postproc_depends (pp_job_id, depends_on)
-                    SELECT new_job.id, ppj.id
-                    FROM new_job JOIN state.postproc_job AS ppj
-                    ON ppj.midas_run_id = new_job.midas_run_id
-                    WHERE ppj.job_type = 'remote';
-                    """,
-                    (run_id, )
-                )
-
-        conn.commit()
-        conn.close()
         return True
 
     def add_new_configuration(self, table : str, values : dict, comment : str = "Mystery Configuration") -> int | None:
@@ -612,7 +652,7 @@ class interface:
         conn.close()
         return retVal
 
-    def find_pending_postproc_jobs(self, job_type : str, max_jobs : int = 1) -> list:
+    def find_pending_postproc_jobs(self, job_type : str | list[str], client : str, max_jobs : int = 1) -> list:
         """
         Find jobs in the `state.postproc_job` table
 
@@ -627,34 +667,43 @@ class interface:
         Database entries shall be picked based on `priority` where highest
         priorities are denoted by smallest values.
         """
+        if isinstance(job_type, str):
+            job_type = [job_type]
         conn = connect(user = self.user, password = self.password)
         conn.autocommit = True
         with conn.cursor(row_factory = psycopg.rows.dict_row) as cursor:
             cursor.execute(
                     """
                     WITH claimed AS (
-                        SELECT ppj.id, ppj.midas_run_id, ppj.file_id, mr.midas_run_number
+                        SELECT
+                            ppj.id,
+                            ppj.midas_run_id,
+                            ppj.file_id,
+                            mr.midas_run_number,
+                            fl.producer
                         FROM state.postproc_job AS ppj
-                        JOIN state.midas_run AS mr ON ppj.midas_run_id = mr.id
+                        JOIN state.midas_run AS mr
+                            ON ppj.midas_run_id = mr.id
+                        LEFT JOIN state.file_list AS fl
+                            ON fl.id = ppj.file_id
                         WHERE ppj.status = 'PENDING'
-                        AND ppj.job_type = %s
+                        AND ppj.job_type = ANY(%s)
+                        AND ppj.client = %s
                         ORDER BY ppj.priority ASC
                         LIMIT %s
-                        FOR UPDATE SKIP LOCKED
+                        FOR UPDATE OF ppj SKIP LOCKED
                     )
-                    UPDATE state.postproc_job s
+                    UPDATE state.postproc_job AS s
                     SET status = 'CLAIMED'
                     FROM claimed
-                    LEFT JOIN state.file_list AS fl
-                        ON fl.id = claimed.file_id
                     WHERE s.id = claimed.id
                     RETURNING
                         claimed.id AS job_id,
                         claimed.midas_run_id AS run_id,
                         claimed.file_id AS file_id,
-                        claimed.midas_run_number AS midas_run_number
-                        fl.producer AS producer
-                    """, (job_type, max_jobs,))
+                        claimed.midas_run_number AS midas_run_number,
+                        claimed.producer AS producer
+                    """, (job_type, client, max_jobs,))
             results = cursor.fetchall()
         conn.close()
 

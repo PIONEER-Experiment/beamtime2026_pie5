@@ -475,7 +475,8 @@ CREATE TABLE IF NOT EXISTS state.postproc_job (
     id SERIAL PRIMARY KEY,
     midas_run_id INT REFERENCES state.midas_run(id),
     file_id INT REFERENCES state.file_list(id),
-    job_type TEXT,
+    client TEXT NOT NULL,
+    job_type TEXT NOT NULL,
     priority INT,
     status TEXT REFERENCES utils.status(name)
 );

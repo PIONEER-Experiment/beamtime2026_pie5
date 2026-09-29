@@ -101,11 +101,18 @@ from reco_testbeam.pi_psmalg_expConf import (PIPSMComputeWeight, PIPSMDelayedCoi
 # anywhere else in this file survives verbatim and can never break the daemon. Doubling one
 # is what makes the render step collapse it to a single character.
 _RENDERED = {
-    "in_file": "${in_file}", "out_file": "${out_file}", "evt_max": "${evt_max}",
-    "conditions_dir": "${conditions_dir}", "pg": "${pg}",
-    "rendered_at": "${rendered_at}", "rendered_by": "${rendered_by}",
-    "job_source": "${job_source}", "job_git": "${job_git}",
-    "job_id": "${job_id}", "run_id": "${run_id}",
+    "in_file": "${in_file}",
+    "out_file": "${out_file}",
+    "evt_max": "${evt_max}",
+    "conditions_dir": "${conditions_dir}",
+    "pg": "${pg}",
+    "rendered_at": "${rendered_at}",
+    "rendered_by": "${rendered_by}",
+    "job_source": "${job_source}",
+    "job_git": "${job_git}",
+    "job_id": "${job_id}",
+    "run_id": "${run_id}",
+    "hist_only" : "${hist_only}"
 }
 # Which of the two ways in this file is. rendered_at is the field the renderer always
 # fills, and an unsubstituted placeholder still begins with the dollar sign that opens
@@ -583,6 +590,8 @@ if RENDERED:
     # fold one in, so NL_OVERRIDES set while rendering has no effect at all -- a
     # variant job is made by editing the settings block, or the rendered copy.
     NL_OVERRIDES = ""
+
+    HIST_ONLY = str(_RENDERED["hist_only"]).strip().lower() in ("1", "true", "yes", "on")
 else:
     # A variant job reassigns a few settings in a small file instead of editing
     # this one. Unknown names are not rejected; the banner prints the path.
@@ -597,6 +606,10 @@ else:
         EVT_MAX = int(os.environ["NL_EVTMAX"])
     if os.environ.get("NL_PG"):
         PG_CONNECTIONS = [c for c in os.environ["NL_PG"].split(os.pathsep) if c]
+    HIST_ONLY = False
+
+# Keep histogram-producing algorithms enabled, but suppress PIAOutputStream.
+WRITE_NTUPLE = bool(WRITE_NTUPLE and not HIST_ONLY)
 
 # Measured, not guessed: 501 is ZSTD-1, about 40% less CPU than ROOT's default
 # ZSTD-5 for about 8% more disk, and reusing one entry for the whole job saves
