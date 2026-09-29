@@ -13,9 +13,9 @@ pass.
 
 | file | what it is |
 |---|---|
-| `nearline_job.py` | **the edit-me file *and* the template.** A Gaudi options file: settings block, then linear assembly. `gaudirun.py` execs it; it is not a module and must not be imported. It carries eleven `${name}` placeholders, all inside string literals, so it is valid Python and runs unrendered |
+| `nearline_job.py` | **the edit-me file *and* the template.** A Gaudi options file: settings block, then linear assembly. `gaudirun.py` execs it; it is not a module and must not be imported. It carries twelve `${name}` placeholders, all inside string literals, so it is valid Python and runs unrendered |
 | `render.py` | fills those placeholders and writes the complete job next to the outputs as `<filebase>.py`. `render_job()` is what both callers use; `python -m pioneer.nearline.render IN OUT` renders and stops |
-| `process.py` | **process one file by hand**: `python -m pioneer.nearline.process <midas file> [--out-dir DIR]` renders the job and runs `gaudirun.py` on it. Standard library plus `render` only, so it imports where `jobs.py` cannot |
+| `process.py` | **process one file by hand**: `python -m pioneer.nearline.process <midas file> [--out-dir DIR] [--light]` renders the job and runs `gaudirun.py` on it. Standard library plus `render` only, so it imports where `jobs.py` cannot |
 | `jobs.py` | job classes the daemon schedules: `GaudiJob` (this job), `RsyncJob`, `CleanJob`, `MergeJob`, `DummyJob` |
 | `daemon.py` | the long-running process: MIDAS client, per-resource queues, dispatch and status write-back to the run database |
 | `run.py` | run-sequence definitions (`midas_run_sequence`, `midas_run`) written into the run database |
@@ -169,6 +169,7 @@ resolved against `CONDITIONS_DIR`; an absolute path is honoured unchanged.
 | setting | default | what goes wrong if it is wrong |
 |---|---|---|
 | `EVT_MAX` | `-1` | `-1` is the whole file. A few thousand while tuning turns minutes into seconds. `NL_EVTMAX` in the environment wins |
+| `LIGHT` | `False` | The light job, meant for pinky and not yet switched on there (see *Light mode (pinky)* below): on, it forces `WRITE_NTUPLE`, `PSM_TIMEWALK`, `PSM_SMA_WIDE_DT` and `PSM_SMA_DIAGNOSTICS` to `False` after the block, the overrides file and the environment have been read, so nothing else can turn them back on. Leave it `False` in the block: the daemon's `--light` and `process.py`'s `--light` render it into the job, and `NL_LIGHT=1` sets it for an unrendered run. Anything but a bool is rejected by `check()` |
 | `OUTPUT_LEVEL` | `"INFO"` | `INFO` is what the shift log wants; `DEBUG` makes the decoder print per event and the job crawl |
 | `WD_ENABLED` | `True` | Off drops the whole WaveDREAM chain (waveforms → features → RF → hits). Nothing downstream announces the missing collections |
 | `PSM_DECODE` | `True` | Off leaves the `H000` banks undecoded, so `/Event/muquad`, `/Event/mutrig` and `/Event/rf` never exist |
@@ -471,6 +472,7 @@ parked id in the map and this number has to follow it.
 | `PSM_SMA_HITS_PER_EVENT_MAX` | `20000` | Top of the per-counter hits-per-event axis; everything above it lands in the last bin. 20,000 is the H000 bank cap, so nothing a frame can hold is clipped; a busy counter exceeds a few hundred hits per frame |
 | `PSM_SMA_DEGENERATE_TOT_SHARE` | `0.95` | Share of a cabled counter's hits at its commonest ToT value above which `finalize()` calls it degenerate. One value repeated is a pulser or a stuck field, not a spectrum. Lower it and a genuinely narrow spectrum starts warning |
 | `PSM_SMA_MARKER_TOT_SHARE` | `0.5` | Share at ToT 0 or 255 above which a cabled counter is called marker-dominated. Those two values are the idle FEB's own words, so a counter made mostly of them is not seeing its TOT box |
+| `PSM_SMA_WIDE_DT` | `True` | Fills `dt_to_s1_wide`: every counter hit minus every S1 hit within ±2^18 ns in 1024 ns bins, the view in which a counter time off by a whole 2^16 or 2^17 ns (a flipped fine-time bit) shows up. The pairs grow as S1 hits times other hits, so a busy run makes it expensive. `False` sets the monitor's `MaxWidePairsPerFrame` to 0: the histogram is still booked but stays **empty**, and bin 2 of `pattern_counters` ("left out of wide dt") then counts every frame paired to S1 that has at least one wide pair (a frame with none passes the cap of 0 and is not counted). The narrow `dt_to_s1` is unaffected. Anything but a bool is rejected by `check()`. `LIGHT` switches it off |
 
 Both shares are judgements about **cabled** counters only. The parked index is
 expected to be all 0 and 255 and is never reported for it.
@@ -646,8 +648,9 @@ python -m pioneer.nearline.process /workdir/scratch/online/run00175.mid.lz4 \
 That is the daemon's flow without the daemon or the run database, and it is
 what to reach for when a run has to be processed by hand. It renders
 `nearline_job.py` for that one file and runs `gaudirun.py` on the result, so it
-leaves the **same three artefacts the daemon leaves**, named after the part of
-the file name before the first dot:
+leaves the **same three artefacts the daemon leaves** (two with `--light`,
+which writes no RNTuple), named after the part of the file name before the
+first dot:
 
 ```
 /workdir/scratch/nearline/run00175.py           the complete job that ran
@@ -662,8 +665,9 @@ L pairs (`PSM_L_CLUSTER_DIST_MM`) included: this is the way to remake them for
 one subrun file by hand.
 
 `--evt-max N` truncates, `--render-only` writes the `.py` and stops so you can
-edit it before running it, and `--job PATH` renders some other copy of the job
-file. If `gaudirun.py` is not on `PATH` it exits 2 and prints the three
+edit it before running it, `--job PATH` renders some other copy of the job
+file, and `--light` renders the light job, the one a daemon started with
+`--light` runs (next section). If `gaudirun.py` is not on `PATH` it exits 2 and prints the three
 `source` lines above instead of a Gaudi import traceback.
 
 **Reproducing a run is running its `.py`:** `gaudirun.py run00175.py`. The
@@ -676,6 +680,57 @@ host-dependent variables are the exception that proves it: `NL_CONDITIONS_DIR`
 and `NL_PG` **of the shell that renders** are baked into the file at that
 moment, exactly as the daemon bakes in its own, so set them before the
 `process` command rather than before the `gaudirun.py` that re-runs it.
+
+### Light mode (pinky)
+
+Light mode is a **light** nearline job for pinky, so that it keeps up with the
+data: on one beam subrun the full job took 14.8 s of CPU and the light job 5.1 s,
+about a third. Light mode is the `LIGHT` setting, and it switches off four things:
+
+| setting forced to `False` | what a light run does not have |
+|---|---|
+| `WRITE_NTUPLE` | the RNTuple: a light run writes the `.py` and the `_hists.root` only |
+| `PSM_TIMEWALK` | the timewalk histograms: `PIPSMMuPixMonitor/tw_*`, `PIPSMAllTrackReco/tw_*` and the correction layer's `twc_dt_vs_tot_*`. The timewalk **correction** itself still runs (`PSM_TIMEWALK_CORRECTION` is not touched), so `/Event/muquad_twc` and everything read from it are the same as in the full job |
+| `PSM_SMA_WIDE_DT` | the wide SMA dt plot: `PIPSMSMAMonitor/dt_to_s1_wide` is booked but empty |
+| `PSM_SMA_DIAGNOSTICS` | the decoder's SMA raw-word diagnostics, `histograms/musip/sma_*` |
+
+Everything else — the WaveDREAM chain, the MuPix and SMA monitors, the tracklet
+reco and the phase-space histograms the tuning loop and the merge read — is
+the same as in the full job. A light histogram file is therefore a valid input
+to the merge and to the tuning loop.
+
+How it is selected:
+
+* **the daemon** — `daemon.py --light`. The flag is per daemon process: every
+  nearline job that daemon starts is rendered light. It is written into the
+  daemon's `/Programs/<client>/Start command`, so a restart from the MIDAS
+  Programs page keeps it; the first time, start the daemon by hand with
+  `--light` so that the Start command it writes carries it. At startup the
+  daemon sends a MIDAS message saying which job it runs.
+* **by hand** — `python -m pioneer.nearline.process <midas file> --out-dir DIR
+  --light` renders and runs exactly what the light daemon would.
+* **unrendered** — `NL_LIGHT=1` with the environment form below.
+
+A rendered file records the choice in its `light` field (`"1"` or `"0"`) and
+ignores `NL_LIGHT`, like every other `NL_*` variable, and the banner prints
+`[nearline] light on, switched off: ...` or `[nearline] light off`.
+
+In the run database a light job registers `<filebase>_hists.root` instead of
+`<filebase>.root` (the RNTuple it does not write); see *Via the daemon*.
+
+**Do not switch light mode on at pinky yet.** Today pinky is the only host that
+runs nearline jobs. piana runs none: its RNTuples are pinky's, copied over by
+`scripts/sync-from-daq.sh` in psm-nearline-website-2026. Several things read
+what light mode drops — the website's run header digest, `/api/runs/{run}/odb`
+(which the runplan quick scans use) and the conditions views read the RNTuple,
+and the timewalk refit reads the timewalk histograms — so a light pinky leaves
+them with nothing for every subrun it processes. Light mode can go on at pinky
+only once piana, or another host, runs the full job for every subrun.
+
+How that host gets its jobs is still to be designed. A second daemon on piana
+claiming from the same nearline queue is **not** a way to do it: both daemons
+would claim from one queue, so each subrun would go to one of them, and the
+ones pinky took would still have no RNTuple.
 
 ### Masking hot pixels
 
@@ -827,6 +882,14 @@ updating a machine, pull and rebuild reco_testbeam (the library and its
 `conditions/`, which must carry `mupix_pixel_mask` and `mupix_timewalk`)
 **before** pulling beamtime2026_pie5.
 
+Restart the nearline daemon right after pulling beamtime2026_pie5. A running
+daemon keeps the `render.py`, `jobs.py` and `daemon.py` it started with, but reads
+`nearline_job.py` from disk for every job, so until the restart it renders the
+new job file with the old code. The job file is written to survive that where it
+can — a daemon from before light mode leaves the `light` placeholder unfilled,
+and the job reads that as the full job — but an old daemon does not know
+`--light`, and the next change may not be as forgiving.
+
 ### A quick look, or a variant job
 
 The environment form runs the checked-in file *unrendered*, which is the fast
@@ -858,15 +921,19 @@ NL_MIDAS=/workdir/midas_files/fake_run00913_mutrig.mid NL_OUT=/tmp/run00913.root
 | `NL_MIDAS` | yes | the input `.mid` / `.mid.lz4` |
 | `NL_OUT` | yes | the RNTuple path; the histogram file is the same name with `.root` replaced by `_hists.root` |
 | `NL_EVTMAX` | no | overrides `EVT_MAX` |
+| `NL_LIGHT` | no | `1` sets `LIGHT` (the light job), `0` clears it; anything else is rejected by `check()` |
 | `NL_PG` | no | `os.pathsep`-separated conninfo strings, overriding `PG_CONNECTIONS` |
 | `NL_CONDITIONS_DIR` | no | overrides `CONDITIONS_DIR` |
 | `NL_OVERRIDES` | no | a small Python file `exec`'d over the settings, for a variant job |
 
 **Every variable in that table is read only by an unrendered job file.** A
-rendered one ignores all six — including `NL_OVERRIDES`, which the renderer
+rendered one ignores all seven — including `NL_OVERRIDES`, which the renderer
 does not fold in either — so an overrides file is an interactive mechanism and
 nothing else. A variant that has to be reproducible is made by editing the
-settings block, or by editing a rendered copy and running that.
+settings block, or by editing a rendered copy and running that. Light mode is
+the exception in a rendered copy: what counts there is the `light` field of
+`_RENDERED` (`"1"` or `"0"`), which is applied after the settings block, so
+editing `LIGHT` in the copy's settings block has no effect.
 
 **Anything you find yourself setting more than once belongs in the settings
 block, not in the environment.** The environment is for the one-off; the block
@@ -932,7 +999,7 @@ paused), or pass `--force`. `--dry-run` only reads and always runs.
 writes the result into the **output** directory as `<filebase>.py`;
 `build_command()` is then just `gaudirun.py <that file>`. The rendered file is
 not a shim around the job — it *is* the job, every setting and every line of
-assembly included, with the eleven placeholders filled:
+assembly included, with the twelve placeholders filled:
 
 | field | what the daemon puts there |
 |---|---|
@@ -941,6 +1008,7 @@ assembly included, with the eleven placeholders filled:
 | `rendered_at`, `rendered_by` | UTC timestamp to the second, and `user@host` |
 | `job_source`, `job_git` | the job file it was rendered from, and `git describe --always --dirty` of it — so a file says which version of the job made it, dirty tree included |
 | `job_id`, `run_id` | the run database's own ids for this piece of work |
+| `light` | `"1"` when the daemon was started with `--light`, else `"0"` (see *Light mode (pinky)*) |
 
 The last three rows are also printed by the banner at startup — `[nearline]
 rendered <when> by <who> job=<id> run=<id>` and `[nearline] source <path> @
@@ -949,6 +1017,31 @@ Because the rendered file reads nothing from the environment, it stays valid
 after the daemon is restarted, after the conditions tree moves, and on a
 machine that never had the daemon's variables set: it is the record of what
 processed that run, and re-running it is `gaudirun.py run00175.py`.
+
+The file the daemon registers in the run database's `state.file_list` for
+each job is the one the job writes: `<filebase>.root` (the RNTuple) for the
+full job, `<filebase>_hists.root` for the light one. The database splits a name
+on its first dot, so both rows have `fileext` `root` and differ in `filebase`
+(`runNNNNN_SSSSS` against `runNNNNN_SSSSS_hists`). The merge job and the tuning
+loop read both kinds: a filebase already ending in `_hists` names the histogram
+file itself (`hists_file_name()` in `render.py`).
+
+The daemon's options:
+
+| option | default | what it does |
+|---|---|---|
+| `--midas-client` | `NearlineDaemon` | MIDAS client name; also the `/Programs/<client>` entry the Start command is written to |
+| `--midas-host` | `$MIDAS_SERVER_HOST` or `localhost` | MIDAS server |
+| `--midas-expt` | `$MIDAS_EXPT_NAME`, or the only experiment in `$MIDAS_EXPTAB` | MIDAS experiment |
+| `-j`, `--jobs` | none | nearline jobs in parallel, written to `/Nearline/config/Num parallel jobs` when given. Without it the ODB value stands; the first start, which creates `/Nearline/config`, writes `3` |
+| `--light` | off | run the light job (pinky); see *Light mode (pinky)*. Recorded in the Start command |
+
+The Start command carries `--midas-client`, `--midas-host`, `--midas-expt` and,
+when given, `--light`, but never `-j`. The number of parallel jobs is
+`/Nearline/config/Num parallel jobs`, and the daemon writes it only on the first
+start (`-j`, or `3` without it) and whenever it is started by hand with `-j`. A
+restart from the MIDAS Programs page, or by hand without `-j`, keeps whatever
+the ODB says, so set it there to change it for good.
 
 **`dry_run_all_jobs = True` at `jobs.py:18`** means every job today only prints
 its command and sleeps. It has to be flipped to `False` for an end-to-end test.
@@ -988,7 +1081,7 @@ daemon calls it and the command line above runs the same functions.
    context at once (after `MiniTwin post delay` seconds when that is set
    above 0, to let the service's file mirror catch up; the daemon keeps
    working meanwhile). The context lists every subrun's
-   `run<N>/<filebase>_hists.root`,
+   `run<N>/<filebase>_hists.root` (a light job's row already names that file),
    with `MiniTwin local prefix` replaced by `MiniTwin remote prefix` (the
    service reads piana's mirror of the output tree), role `hist_root`; the
    three MuPix maps (`miniTwinInterface.miniTwin_histograms`: x-x', y-y',
@@ -1142,7 +1235,7 @@ problem it finds in one message, rather than the first:
 19. `PSM_TIMEWALK_CORRECTION_TAG` neither `None` nor a non-empty string: it names a tag of `mupix_timewalk`.
 20. `PSM_TWC_NTUPLE` not one of `"both"`, `"corrected"`, `"raw"`.
 21. `PSM_SMA_CAL_NTUPLE` not one of `"both"`, `"calibrated"`, `"raw"`.
-22. `PSM_PIXEL_MASK`, `PSM_TIMEWALK` or `PSM_TIMEWALK_CORRECTION` not a bool: a string such as `"False"` is true in Python and would switch the setting on.
+22. `LIGHT`, `PSM_PIXEL_MASK`, `PSM_TIMEWALK`, `PSM_TIMEWALK_CORRECTION` or `PSM_SMA_WIDE_DT` not a bool (`NL_LIGHT` or a rendered `light` other than `1`/`0` ends up here): a string such as `"False"` is true in Python and would switch the setting on.
 23. `PSM_TIMEWALK` on and `PSM_TIMEWALK_DT_MIN`/`_MAX`/`_BINS` not an axis: max not above min, or bins not an integer 1-8192.
 24. `PSM_RF_CHANNEL` not an integer, outside 0-15, or equal to `PSM_CURRENT_CHANNEL`: the SMA word's channel field is 4 bits, and the decoder takes the RF channel first, so the current pulses would become RF pulses.
 25. A `GEOCOND` base with an empty `PSM_GEOMETRY_FILES`: nothing supplies the table it names.
@@ -1209,6 +1302,12 @@ run with no current pulses) it prints one warning and every run stays raw
 counts (factor 1), so the runs remain comparable with each other but not per
 current pulse. `MergeJob` feeds it the `<filebase>_hists.root` files
 (`jobs.py`), and the loop adding runs together handles any number of runs.
+It builds that list from the run's nearline `root` rows in the run database,
+which a full job registers as `<filebase>.root` and a light job as
+`<filebase>_hists.root`; both map to the same histogram file
+(`merge_input_files()` in `jobs.py`), and a file named by more than one row —
+a subrun processed again, or by both kinds of job — is listed once, because
+the merge adds up what it is given.
 
 ## Output size
 
@@ -1219,7 +1318,8 @@ and writing it dominates the job's time. `WD_CHANNELS` is not a lever on that:
 the waveforms are persisted either way, and widening it from 6 to 16 channels
 adds about 1 % to the file.
 `WRITE_NTUPLE = False` is a pure monitoring pass and the right
-setting for a shift display; the histogram file is unaffected.
+setting for a shift display; the histogram file is unaffected. The light job
+(`LIGHT`) is that pass plus three histogram sets switched off.
 The histogram file is small but no longer negligible on a PSM run: the six
 320-bin phase-space TH2Ds are 7.4 MB uncompressed between them, and 3000 events
 of `fake_run00913_mutrig.mid` measured 172 kB on disk (33 kB before they were

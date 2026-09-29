@@ -17,6 +17,7 @@ from __future__ import annotations
 import time
 
 from pioneer.nearline.beamtune_client import DAQ_SCHEMA
+from pioneer.nearline.render import hists_file_name
 
 ODB_CONFIG = "/Nearline/config"
 
@@ -337,9 +338,16 @@ def hist_files(db, run_ids, output_path):
 
     One entry per state.file_list 'root' row with status DONE, in filebase
     order: ``{"run_db_id", "run_number", "local"}``, where ``local`` is
-    ``<output_path>/run<N>/<filebase>_hists.root`` as jobs.py writes it.
+    ``<output_path>/run<N>/<filebase>_hists.root`` as jobs.py writes it; a
+    light job's row (filebase ending in ``_hists``) names that file itself.
     Rows in any other status are left out and listed in ``skipped`` as
     ``(local, status, run number)``.
+
+    A file is listed once however many DONE rows name it, as in
+    jobs.merge_input_files: a subrun processed again, or once by each kind of
+    job, has more than one row, and the maps summed over ``found`` would count
+    it twice. A row that is not DONE is not reported for a file some other row
+    finished, since that file is in ``found`` all the same.
     """
     numbers = {}
     for run_id in run_ids:
@@ -347,14 +355,19 @@ def hist_files(db, run_ids, output_path):
         if number is None:
             raise ContextError("run %d has no MIDAS run number (never started?)" % run_id)
         numbers[run_id] = int(number)
-    found, skipped = [], []
+    found, skipped, seen = [], [], set()
     for row in db.find_files(list(run_ids), "root"):
         number = numbers[row["run_id"]]
-        local = "%s/run%05d/%s_hists.root" % (str(output_path).rstrip("/"), number, row["filebase"])
+        local = "%s/run%05d/%s" % (str(output_path).rstrip("/"), number,
+                                   hists_file_name(row["filebase"]))
         if row.get("status", "DONE") != "DONE":
             skipped.append((local, row.get("status"), number))
             continue
+        if local in seen:
+            continue
+        seen.add(local)
         found.append({"run_db_id": row["run_id"], "run_number": number, "local": local})
+    skipped = [s for s in skipped if s[0] not in seen]
     return found, skipped, [numbers[r] for r in run_ids]
 
 

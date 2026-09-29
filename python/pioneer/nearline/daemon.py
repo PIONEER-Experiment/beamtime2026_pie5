@@ -37,6 +37,58 @@ kDefaultNumJobs  = 3
 kDbUser = "bot"
 kDbPwd  = "bot"
 
+def build_parser() -> argparse.ArgumentParser:
+    """The daemon's command line; start_command() writes it back into the ODB."""
+    parser = argparse.ArgumentParser(description="Good Luck Have Fun - I did not yet write documentation for this")
+    parser.add_argument("--midas-client", default=kMidasClientName, help="Midas client name")
+    parser.add_argument("--midas-host", default=kMidasHostName, help="Midas host name")
+    parser.add_argument("--midas-expt", default=kMidasExptName, help="Midas experiment name")
+    # No default here: /Nearline/config/Num parallel jobs is the setting, and -j
+    # only overwrites it when given (see num_jobs_to_write).
+    parser.add_argument("-j", "--jobs", default=None, type = int,
+                        help="Number of nearline analysis processes to run in parallel. Written "
+                             "to /Nearline/config/Num parallel jobs, which is what the daemon "
+                             f"uses; without -j the ODB value stands ({kDefaultNumJobs} when "
+                             "the daemon creates /Nearline)")
+    parser.add_argument("--light", action="store_true",
+                        help="run the light nearline job: histograms only, no RNTuple, "
+                             "no timewalk histograms, no wide SMA dt plot, no SMA raw-word "
+                             "diagnostics. Without it the full job runs. Not for pinky until "
+                             "another host runs the full job for every subrun (see the README)")
+    return parser
+
+
+def num_jobs_to_write(jobs, config_exists: bool):
+    """What to write into /Nearline/config/Num parallel jobs at start-up, or None
+    to leave the ODB as it is.
+
+    The ODB value is the setting. The first start, which creates /Nearline/config,
+    writes -j or kDefaultNumJobs; a later start writes only a -j given on its
+    command line. The Start command the daemon registers for itself carries no -j,
+    so a restart from the MIDAS Programs page keeps whatever the ODB says.
+    """
+    if not config_exists:
+        return jobs if jobs is not None else kDefaultNumJobs
+    return jobs
+
+
+def start_command(args, executable = None, script = None) -> str:
+    """The command line /Programs/<client>/Start command gets, so that a
+    restart from the MIDAS Programs page brings the daemon back as it is now.
+    --light is part of it: a light host restarted without it would quietly
+    switch to the full job."""
+    invoking_call = [
+        executable or sys.executable,
+        script or os.path.realpath(sys.argv[0]),
+        "--midas-client", args.midas_client,
+        "--midas-host", args.midas_host,
+        "--midas-expt", args.midas_expt
+    ]
+    if getattr(args, "light", False):
+        invoking_call.append("--light")
+    return " ".join(shlex.quote(arg) for arg in invoking_call)
+
+
 class NearlineQueue:
     def __init__(self, name : str = None, maxJobs : int = 1):
         self.name : str  = name
@@ -63,13 +115,9 @@ class NearlineQueue:
 
 class NearlineDaemon:
     def __init__(self, args):
-        if (args.jobs):
-            njobs = args.jobs
-        else:
-            njobs = kDefaultNumJobs
-
+        # replaced by the ODB value once /Nearline/config is in place, below
         self.queues = {
-            "nearline": NearlineQueue("nearline", njobs),
+            "nearline": NearlineQueue("nearline", kDefaultNumJobs),
             "backup"  : NearlineQueue("backup",   1),
             "remote"  : NearlineQueue("remote",   1),
             "cleanup" : NearlineQueue("cleanup",  1)
@@ -81,17 +129,17 @@ class NearlineDaemon:
         # this is technically not required but considered a neat feature.
         self.client = midas.client.MidasClient(args.midas_client, host_name = args.midas_host, expt_name = args.midas_expt)
 
-        invoking_call = [
-            sys.executable,
-            os.path.realpath(sys.argv[0]),
-            "--midas-client", args.midas_client,
-            "--midas-host", args.midas_host,
-            "--midas-expt", args.midas_expt
-        ]
+        # Light or full nearline job, for every GaudiJob this process starts.
+        self.light = bool(getattr(args, "light", False))
+        self.message("Nearline daemon: " + ("LIGHT nearline job (histograms only, no RNTuple, "
+                                            "no timewalk, no wide SMA dt, no SMA diagnostics)"
+                                            if self.light else "full nearline job"))
 
-        start_cmd = " ".join(shlex.quote(arg) for arg in invoking_call)
+        start_cmd = start_command(args)
         self.client.odb_set(f"/Programs/{args.midas_client}/Start command", start_cmd)
-        if not self.client.odb_exists("/Nearline"):
+        config_exists = self.client.odb_exists("/Nearline")
+        njobs = num_jobs_to_write(args.jobs, config_exists)
+        if not config_exists:
             self.client.odb_set("/Nearline", {
                 "config" : {
                     "Backup path" : os.environ.get("NEARLINE_BACKUP_DIR", "/home/pinky/backup/pim1_epics"),
@@ -103,7 +151,7 @@ class NearlineDaemon:
                     "MiniTwin enable" : True
                     }
             })
-        elif (args.jobs):
+        elif njobs is not None:
             self.client.odb_set("/Nearline/config/Num parallel jobs", njobs)
         # keys of the tuning loop, created with their defaults when missing
         nl_tuning.ensure_odb_keys(self.client)
@@ -176,6 +224,8 @@ class NearlineDaemon:
         job_cfg['backup']   = self.backup_path
         job_cfg['remote']   = self.remote_path
         job_cfg['output']   = self.nearline_output_path / f"run{job_cfg['midas_run_number']:05d}"
+        # read by GaudiJob only; the other job types ignore it
+        job_cfg['light']    = self.light
 
         theJob = nl_jobs.create_job(job_cfg, self.db_interface)
         try:
@@ -369,12 +419,6 @@ class NearlineDaemon:
                 self.client.msg(f"Nearline Error {e}", is_error= True)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Good Luck Have Fun - I did not yet write documentation for this")
-    parser.add_argument("--midas-client", default=kMidasClientName, help="Midas client name")
-    parser.add_argument("--midas-host", default=kMidasHostName, help="Midas host name")
-    parser.add_argument("--midas-expt", default=kMidasExptName, help="Midas experiment name")
-    parser.add_argument("-j", "--jobs", default=kDefaultNumJobs, type = int, help="Number of nearline analysis processes to run in parallel")
-
-    NLD = NearlineDaemon(parser.parse_args())
+    NLD = NearlineDaemon(build_parser().parse_args())
     NLD.mainloop()
 

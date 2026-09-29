@@ -105,7 +105,7 @@ from reco_testbeam.pi_psmalg_expConf import (PIPSMComputeWeight, PIPSMDelayedCoi
 #
 # Every placeholder sits inside a string literal, so the checked-in file is valid Python and
 # runs unrendered. The render step substitutes safely and then refuses to write unless all
-# eleven names below are gone, so only these eleven are special: a dollar sign written
+# twelve names below are gone, so only these twelve are special: a dollar sign written
 # anywhere else in this file survives verbatim and can never break the daemon. Doubling one
 # is what makes the render step collapse it to a single character.
 _RENDERED = {
@@ -113,12 +113,12 @@ _RENDERED = {
     "conditions_dir": "${conditions_dir}", "pg": "${pg}",
     "rendered_at": "${rendered_at}", "rendered_by": "${rendered_by}",
     "job_source": "${job_source}", "job_git": "${job_git}",
-    "job_id": "${job_id}", "run_id": "${run_id}",
+    "job_id": "${job_id}", "run_id": "${run_id}", "light": "${light}",
 }
 # Which of the two ways in this file is. rendered_at is the field the renderer always
 # fills, and an unsubstituted placeholder still begins with the dollar sign that opens
 # it, so that one character decides. chr(36) IS that dollar sign, written that way so
-# that the only dollar signs in the unrendered file are the eleven placeholders above.
+# that the only dollar signs in the unrendered file are the twelve placeholders above.
 RENDERED = not _RENDERED["rendered_at"].startswith(chr(36))
 
 # Where conditions containers live when nobody says otherwise. This is the bind mount
@@ -130,6 +130,14 @@ _DEFAULT_CONDITIONS_DIR = os.path.join(os.environ.get("PIONEERSYS"), "reco_testb
 # --- Job -------------------------------------------------------------------
 # Events to process; -1 is the whole file. NL_EVTMAX in the environment wins.
 EVT_MAX = -1
+# The light job, about a third of the CPU of the full one: histograms only. Meant for
+# pinky once another host runs the full job (README, "Light mode"). On, it switches
+# off WRITE_NTUPLE, PSM_TIMEWALK,
+# PSM_SMA_WIDE_DT and PSM_SMA_DIAGNOSTICS after everything else has been read, so it
+# wins over the block below and over an overrides file. The MuPix timewalk
+# CORRECTION is not touched. The daemon's --light and process.py's --light render it
+# in; NL_LIGHT=1 in the environment sets it for an interactive run.
+LIGHT = False
 # Gaudi verbosity for the whole job: "DEBUG", "INFO", "WARNING" or "ERROR".
 OUTPUT_LEVEL = "INFO"
 # Master switch for the WaveDREAM half: waveforms -> features -> RF -> hits.
@@ -438,6 +446,12 @@ PSM_SMA_DEGENERATE_TOT_SHARE = 0.95
 # marker-dominated. Those two values are the idle FEB's own words, so a counter
 # made mostly of them is not seeing its TOT box.
 PSM_SMA_MARKER_TOT_SHARE = 0.5
+# Fill dt_to_s1_wide, every counter hit minus every S1 hit within +-2^18 ns in
+# 1024 ns bins: the plot in which a counter time off by a whole 2^16 or 2^17 ns (a
+# flipped fine-time bit) shows up. Its pairs grow as S1 hits times other hits, so
+# on a busy run it is not cheap. False leaves the histogram booked and empty, and
+# bin 2 of pattern_counters then counts every frame as left out of it.
+PSM_SMA_WIDE_DT = True
 # --- PSM reco --------------------------------------------------------------
 # Container holding the data-side channel map the tracklet reco reads.
 PSM_CHANNEL_MAP_FILE = "bt2026_psm_channel_map.json"
@@ -587,8 +601,13 @@ PSM_TWC_NTUPLE = "corrected"
 PSM_SMA_CAL_NTUPLE = "raw"
 # ===== END OF SETTINGS =====
 
-# Where the input, the output, the event limit and the two host-dependent settings
-# come from. This runs before the container lists below, which resolve against
+# The spellings of LIGHT in a rendered file and in NL_LIGHT, and the settings light
+# mode switches off.
+_LIGHT_VALUES = {"1": True, "0": False}
+_LIGHT_SWITCHES = ("WRITE_NTUPLE", "PSM_TIMEWALK", "PSM_SMA_WIDE_DT", "PSM_SMA_DIAGNOSTICS")
+
+# Where the input, the output, the event limit, light mode and the two host-dependent
+# settings come from. This runs before the container lists below, which resolve against
 # CONDITIONS_DIR, and before check(), which reports on all of them.
 if RENDERED:
     # A rendered file is a record, so it reads nothing from the environment: no
@@ -598,6 +617,15 @@ if RENDERED:
     NL_MIDAS = _RENDERED["in_file"]
     NL_OUT = _RENDERED["out_file"]
     EVT_MAX = int(_RENDERED["evt_max"])
+    # The renderer writes "1" or "0"; anything else stays a string for check() to reject.
+    # One exception: a daemon started before light mode existed keeps its old
+    # renderer in memory, which fills every field but this one, while it reads this
+    # file from disk for each job. Its jobs arrive with the light placeholder still
+    # in them, and for that renderer every job is the full one, so that reads as "0".
+    _light = _RENDERED["light"]
+    if _light.startswith(chr(36)):
+        _light = "0"
+    LIGHT = _LIGHT_VALUES.get(_light, _light)
     # Empty means the renderer had no NL_CONDITIONS_DIR, so the default stands. The
     # rendered file must still name one directory, because a run reprocessed against
     # a different conditions tree is a different run.
@@ -624,6 +652,21 @@ else:
         EVT_MAX = int(os.environ["NL_EVTMAX"])
     if os.environ.get("NL_PG"):
         PG_CONNECTIONS = [c for c in os.environ["NL_PG"].split(os.pathsep) if c]
+    # "1" or "0"; anything else is kept as the string it is, and check() rejects it.
+    if os.environ.get("NL_LIGHT"):
+        LIGHT = _LIGHT_VALUES.get(os.environ["NL_LIGHT"], os.environ["NL_LIGHT"])
+
+# Light mode, applied here: after the block, the overrides file and the environment
+# have all had their say, and before anything below derives from these settings.
+# Each is forced off, not toggled, so a light job is the same job whatever the block
+# says about them. _LIGHT_OFF names the ones that were on, for the banner.
+_LIGHT_OFF = []
+if LIGHT is True:
+    _LIGHT_OFF = [name for name in _LIGHT_SWITCHES if globals()[name] is True]
+    WRITE_NTUPLE = False
+    PSM_TIMEWALK = False
+    PSM_SMA_WIDE_DT = False
+    PSM_SMA_DIAGNOSTICS = False
 
 # Measured, not guessed: 501 is ZSTD-1, about 40% less CPU than ROOT's default
 # ZSTD-5 for about 8% more disk, and reusing one entry for the whole job saves
@@ -783,8 +826,10 @@ def check():
         problems.append(f"PSM_SMA_CAL_NTUPLE is {PSM_SMA_CAL_NTUPLE!r}: it must be one of "
                         f"{', '.join(repr(k) for k in _SMA_CAL_NTUPLE_DROP)} (which SMA hit "
                         "collections the RNTuple keeps).")
-    for name, value in (("PSM_PIXEL_MASK", PSM_PIXEL_MASK), ("PSM_TIMEWALK", PSM_TIMEWALK),
-                        ("PSM_TIMEWALK_CORRECTION", PSM_TIMEWALK_CORRECTION)):
+    for name, value in (("LIGHT", LIGHT), ("PSM_PIXEL_MASK", PSM_PIXEL_MASK),
+                        ("PSM_TIMEWALK", PSM_TIMEWALK),
+                        ("PSM_TIMEWALK_CORRECTION", PSM_TIMEWALK_CORRECTION),
+                        ("PSM_SMA_WIDE_DT", PSM_SMA_WIDE_DT)):
         if not isinstance(value, bool):
             problems.append(f"{name} is {value!r}: it must be True or False (a string such as "
                             "'False' is true in Python and would switch it on).")
@@ -1142,6 +1187,11 @@ if PSM_SMA_MONITOR:
         MarkerTotShare=float(PSM_SMA_MARKER_TOT_SHARE))
     if PSM_RF_CHANNEL is not None:
         sma_monitor.RFInput = _TES_RF
+    # A frame is left out of dt_to_s1_wide when its wide pairs exceed this cap, so a
+    # cap of 0 leaves every frame out; the property's own default (a million pairs)
+    # stands otherwise.
+    if not PSM_SMA_WIDE_DT:
+        sma_monitor.MaxWidePairsPerFrame = 0
     algorithms.append(Gaudi__Sequencer("PSMSMASeq", RequireObjects=[_TES_MUTRIG_CAL],
                                        Members=[sma_monitor]))
 
@@ -1232,6 +1282,9 @@ if RENDERED:
           f" job={_RENDERED['job_id']} run={_RENDERED['run_id']}")
     print(f"[nearline] source     {_RENDERED['job_source']} @ {_RENDERED['job_git']}")
 print(f"[nearline] input      {NL_MIDAS}")
+print("[nearline] light      "
+      + ("on, switched off: " + (" ".join(_LIGHT_OFF) or "nothing (all already off)")
+         if LIGHT is True else "off"))
 print(f"[nearline] rntuple    {NL_OUT if WRITE_NTUPLE else 'no RNTuple'}")
 print(f"[nearline] histograms {hist_file(NL_OUT)}")
 print(f"[nearline] conditions {CONDITIONS_DIR}")
@@ -1243,7 +1296,8 @@ if NL_OVERRIDES:
 print(f"[nearline] halves     WD={WD_ENABLED} WD_SCALER_MONITOR={WD_SCALER_MONITOR}"
       f" PSM_DECODE={PSM_DECODE} PSM_RECO={PSM_RECO} PSM_MUPIX_MONITOR={PSM_MUPIX_MONITOR}"
       f" PSM_SMA_MONITOR={PSM_SMA_MONITOR} PSM_TIMEWALK={PSM_TIMEWALK}"
-      f" PSM_TIMEWALK_CORRECTION={PSM_TIMEWALK_CORRECTION}")
+      f" PSM_TIMEWALK_CORRECTION={PSM_TIMEWALK_CORRECTION}"
+      f" PSM_SMA_WIDE_DT={PSM_SMA_WIDE_DT} PSM_SMA_DIAGNOSTICS={PSM_SMA_DIAGNOSTICS}")
 print(f"[nearline] layers     "
       + (f"PIPSMSMACalibration {_TES_MUTRIG}->{_TES_MUTRIG_CAL}"
          f" PIPSMMuPixTimewalkCorrection {_TES_MUQUAD}->{_TES_MUQUAD_TWC}"

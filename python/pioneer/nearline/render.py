@@ -1,10 +1,11 @@
 """Render nearline_job.py into the complete, standalone job for one MIDAS file.
 
-nearline_job.py is both the file to edit and the template: it carries eleven
+nearline_job.py is both the file to edit and the template: it carries twelve
 ${name} placeholders inside string literals, so it is valid Python unrendered
 and takes its input from the environment then. Filling the placeholders turns
-it into a job that names its own input, output, event limit, conditions
-directory and database connections, and therefore ignores every NL_* variable.
+it into a job that names its own input, output, event limit, light mode,
+conditions directory and database connections, and therefore ignores every NL_*
+variable.
 That rendered copy is written next to the outputs as <filebase>.py and is the
 record of what processed the run: `gaudirun.py run00175.py` reproduces it.
 
@@ -31,7 +32,37 @@ from string import Template
 # the worst case, so it is caught here instead.
 PLACEHOLDERS = ("in_file", "out_file", "evt_max", "conditions_dir", "pg",
                 "rendered_at", "rendered_by", "job_source", "job_git",
-                "job_id", "run_id")
+                "job_id", "run_id", "light")
+
+
+# What the job appends to its output's stem for the histogram file:
+# run00175.root -> run00175_hists.root (hist_file() in nearline_job.py).
+HISTS_SUFFIX = "_hists"
+
+
+def registered_file_name(filebase: str, light: bool = False) -> str:
+    """The output a nearline job registers in the run database for one input.
+
+    The full job registers its RNTuple, <filebase>.root. The light job writes
+    no RNTuple, so it registers the file it does write, <filebase>_hists.root.
+    The run database splits a name on its FIRST dot, so both rows have fileext
+    "root" and differ in filebase: runNNNNN_SSSSS against runNNNNN_SSSSS_hists.
+    """
+    return f"{filebase}{HISTS_SUFFIX}.root" if light else f"{filebase}.root"
+
+
+def hists_file_name(filebase: str) -> str:
+    """The histogram file behind one nearline "root" row of the run database.
+
+    Takes the row's filebase of either kind (see registered_file_name):
+    runNNNNN_SSSSS and runNNNNN_SSSSS_hists both give runNNNNN_SSSSS_hists.root.
+    Everything that reads histograms back from the database rows (the merge job,
+    the tuning loop) goes through here, so it is right for a full and a light
+    host alike.
+    """
+    if filebase.endswith(HISTS_SUFFIX):
+        return f"{filebase}.root"
+    return f"{filebase}{HISTS_SUFFIX}.root"
 
 
 def _placeholder(name: str) -> str:
@@ -63,12 +94,18 @@ def _job_git(job_source: Path) -> str:
 
 
 def render_job(in_file, out_file, *, evt_max=-1, job_id="", run_id="",
-               job_source=None, target=None) -> Path:
+               light=False, job_source=None, target=None) -> Path:
     """Write the rendered job for one file and return the path it was written to.
 
     in_file and out_file are resolved to absolute paths, because the rendered
     file is run from wherever the caller happens to be and a relative path in
     it would point somewhere else the second time.
+
+    light renders the job's LIGHT setting on ("1") or off ("0"): the light job
+    writes histograms only (see LIGHT in nearline_job.py). It is an argument, not
+    an environment variable, because it is the caller's choice per job -- the
+    daemon's --light, process.py's --light -- and a stray NL_LIGHT in the
+    daemon's environment must not change what it produces.
 
     conditions_dir and pg are baked in from NL_CONDITIONS_DIR and NL_PG in the
     CALLER's environment, which is where a host-local conditions tree (pinky
@@ -97,11 +134,12 @@ def render_job(in_file, out_file, *, evt_max=-1, job_id="", run_id="",
         "job_git": _job_git(job_source),
         "job_id": str(job_id),
         "run_id": str(run_id),
+        "light": "1" if light else "0",
     }
 
     source = job_source.read_text()
 
-    # The job file and this module have to agree on all eleven names, in both
+    # The job file and this module have to agree on all twelve names, in both
     # directions. A name missing from the file means the job's _RENDERED dict
     # has lost a key and the job will die on the KeyError; a name still there
     # after substitution means the file asks for something this module does not
@@ -118,7 +156,7 @@ def render_job(in_file, out_file, *, evt_max=-1, job_id="", run_id="",
     # safe_substitute, not substitute: a dollar sign someone puts in a comment
     # in the job file is then kept verbatim instead of raising, so an edit to
     # nearline_job.py can never stop the daemon from processing runs. The
-    # eleven names that DO matter were just checked, and are checked again now
+    # twelve names that DO matter were just checked, and are checked again now
     # that they should all be gone.
     rendered = Template(source).safe_substitute(mapping)
 
@@ -151,6 +189,10 @@ def main(argv=None) -> int:
     parser.add_argument("out_file", help="the RNTuple the rendered job writes (x.root)")
     parser.add_argument("--evt-max", type=int, default=-1,
                         help="events to process; -1 (default) is the whole file")
+    parser.add_argument("--light", action="store_true",
+                        help="render the light job: histograms only, no RNTuple, "
+                             "no timewalk histograms, no wide SMA dt plot, no SMA "
+                             "raw-word diagnostics")
     parser.add_argument("--target", default=None,
                         help="where to write the rendered job "
                              "(default: <out_file directory>/<out_file stem>.py)")
@@ -159,7 +201,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     written = render_job(args.in_file, args.out_file, evt_max=args.evt_max,
-                         job_source=args.job, target=args.target)
+                         light=args.light, job_source=args.job, target=args.target)
     print(written)
     return 0
 

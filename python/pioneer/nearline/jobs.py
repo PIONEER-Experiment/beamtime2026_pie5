@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pioneer.rundb.interface import interface as db_interface
 
-from pioneer.nearline.render import render_job
+from pioneer.nearline.render import hists_file_name, registered_file_name, render_job
 
 # This flag is set if the list of input files shall be determined
 # by using glob. Otherwise, an explicit list is used.
@@ -16,6 +16,24 @@ glob_input_files = False
 # print the shell command instead of executing it and execute
 # a sleep command instead.
 dry_run_all_jobs = False
+
+def merge_input_files(run_dir, filebases) -> list[str]:
+    """The histogram files of one run's nearline "root" rows, for the merge.
+
+    run_dir is the run's output directory (<output path>/run<N>) and filebases
+    the rows' filebase column, full-job rows (runNNNNN_SSSSS) and light-job
+    rows (runNNNNN_SSSSS_hists) alike: each becomes <run_dir>/<...>_hists.root.
+    A file is listed once however many rows name it -- a subrun processed again,
+    or once by each kind of job, has more than one row -- because the merge
+    adds up what it is given and would count it twice. The order is the rows'.
+    """
+    paths = []
+    for filebase in filebases:
+        path = str(Path(run_dir) / hists_file_name(filebase))
+        if path not in paths:
+            paths.append(path)
+    return paths
+
 
 class BaseJob:
     """
@@ -120,6 +138,9 @@ class GaudiJob(BaseJob):
         super().__init__(config, iface)
         self.infile = self.db.find_job_file(config['job_id'])
         self.out_file_id = None
+        # The daemon's --light: histograms only, no RNTuple (see LIGHT in
+        # nearline_job.py). Per daemon process, so every job it starts agrees.
+        self.light = bool(self.config.get('light', False))
 
     def format_config_file(self) -> Path:
         # `nearline_job.py` is itself the template: rendering it writes the
@@ -137,7 +158,8 @@ class GaudiJob(BaseJob):
 
         return render_job(input_file_path, output_file_path,
                           job_id = self.config['job_id'],
-                          run_id = self.config['run_id'])
+                          run_id = self.config['run_id'],
+                          light = self.light)
 
     def build_command(self):
         opt_file = self.format_config_file()
@@ -147,7 +169,10 @@ class GaudiJob(BaseJob):
         # start job first, then register the file to the database.
         # if job start throws, the file is not entered to the database.
         result = super().start()
-        self.out_file_id = self.db.open_file('nearline', self.config['run_id'], f"{self.infile['filebase']}.root")
+        # The file the job actually writes: <filebase>.root (the RNTuple) for the
+        # full job, <filebase>_hists.root for the light one, which has no RNTuple.
+        self.out_file_id = self.db.open_file('nearline', self.config['run_id'],
+                                             registered_file_name(self.infile['filebase'], self.light))
         return result
 
     def finalise(self):
@@ -180,7 +205,8 @@ class MergeJob(BaseJob):
         config = {
                 "output" : str(outfile),
             "runs"   : {
-                f"{run_id}" : [str(input_path / f"run{self.db.get_midas_run_number(run_id):05d}/{f['filebase']}_hists.root") for f in self.db.find_files([run_id], "root")]
+                f"{run_id}" : merge_input_files(input_path / f"run{self.db.get_midas_run_number(run_id):05d}",
+                                                [f['filebase'] for f in self.db.find_files([run_id], "root")])
                 for run_id in self.config['midas_run_ids']
             }
         }
