@@ -159,7 +159,7 @@ class GaudiJob(BaseJob):
     """
     def __init__(self, config, iface):
         super().__init__(config, iface)
-        self.out_file_id = None
+        self.out_file_ids = {}
 
     def format_config_file(self) -> Path:
         # `nearline_job.py` is itself the template: rendering it writes the
@@ -189,16 +189,37 @@ class GaudiJob(BaseJob):
         # if job start throws, the file is not entered to the database.
         Path(self.destination).mkdir(parents=True, exist_ok=True)
         result = super().start()
-        self.out_file_id = self.db.open_file(self.job_type, self.config['run_id'], f"{self.infile['filebase']}.root")
+        self.out_file_ids = {
+            "hist" : self.db.open_file(self.job_type, self.config['run_id'], f"{self.infile['filebase']}_hists.root")
+        }
+        if self.job_type == 'farline':
+            self.out_file_ids['tuple'] = self.db.open_file(self.job_type, self.config['run_id'], f"{self.infile['filebase']}.root")
         return result
 
     def finalise(self):
         status = super().finalise()
-        self.db.update_file_status(self.out_file_id, status)
-        if status == 'DONE':
-            # Job succeeded.
-            self.db.schedule_postproc_job_on_file(self.out_file_id, "remote")
-            self.db.schedule_postproc_job_on_file(self.out_file_id, "backup")
+        for key, out_file_id in self.out_file_ids.items():
+            self.db.update_file_status(out_file_id, status)
+            if status == 'DONE':
+                # Job succeeded.
+                job_id = self.db.schedule_postproc_job_on_file(
+                    file_id = out_file_id,
+                    task = "backup",
+                    client = self.job_type
+                )
+                if self.job_type == 'nearline':
+                    self.db.schedule_postproc_job_on_file(
+                        file_id = out_file_id,
+                        task = "remote",
+                        client = self.job_type,
+                        )
+                elif key == 'tuple':
+                    self.db.schedule_postproc_job_on_file(
+                        file_id = out_file_id,
+                        task = "cleanup",
+                        client = self.job_type,
+                        dependencies = [job_id]
+                    )
         return status
 
 class CleanJob(BaseJob):

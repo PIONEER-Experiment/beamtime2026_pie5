@@ -122,7 +122,6 @@ class FarlineDaemon:
                 self.client.communicate(self.sleep_time)
 
                 # Paths where things shall be going to
-
                 self.ssd_midas_path   = str(self.client.odb_get("/Farline/Config/SSD midas path"))
                 self.ssd_output_path  = str(self.client.odb_get("/Farline/Config/SSD output path"))
                 self.backup_mpath     = str(self.client.odb_get("/Farline/Config/Midas backup path"))
