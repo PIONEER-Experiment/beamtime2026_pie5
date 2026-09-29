@@ -563,7 +563,7 @@ ones carry Sumw2) and add little to the file, being mostly empty.
 |---|---|---|
 | `WRITE_NTUPLE` | `True` | Off is a pure monitoring pass; the histogram file is unaffected. See "Output size" |
 | `NTUPLE_RULES` | `[]` | Ordered `keep <glob>` / `drop <glob>` rules over TES paths, later rules winning. A path no rule matches is **kept**, so empty persists everything and a newly registered collection is never lost by omission |
-| `PSM_TWC_NTUPLE` | `"both"` | Which MuPix hit collections the RNTuple keeps: `"both"` (`_Event_muquad` and `_Event_muquad_twc`), `"corrected"` (appends `drop /Event/muquad` to the rules) or `"raw"` (appends `drop /Event/muquad_twc`). The rule goes last, so it wins over `NTUPLE_RULES`, and only with `PSM_DECODE` on (a rule matching nothing is warned about). Each collection is about 0.4 % of a beam subrun file, so `"both"` costs little; with the shipped empty constants the two are equal field for field and in the same order (with constants the corrected one is time-ordered on the corrected times, so its order can differ). Any other value is rejected by `check()` |
+| `PSM_TWC_NTUPLE` | `"corrected"` | Which MuPix hit collections the RNTuple keeps: `"both"` (`_Event_muquad` and `_Event_muquad_twc`), `"corrected"` (appends `drop /Event/muquad` to the rules) or `"raw"` (appends `drop /Event/muquad_twc`). The rule goes last, so it wins over `NTUPLE_RULES`, and only with `PSM_DECODE` on (a rule matching nothing is warned about). The default keeps the hits the track reco read; the raw times follow from them and the run's `mupix_timewalk` constants, or from reprocessing the MIDAS file. `"both"` costs about 25 % more file on a busy beam subrun (see *Output size*). With the shipped empty constants the two are equal field for field (and in the same order when the raw frame is time-ordered); with constants the corrected one is time-ordered on the corrected times, so its order can differ. Any other value is rejected by `check()` |
 | `PSM_SMA_CAL_NTUPLE` | `"raw"` | Which SMA hit collections the RNTuple keeps: `"both"` (`_Event_mutrig` and `_Event_mutrig_cal`), `"calibrated"` (appends `drop /Event/mutrig`) or `"raw"` (appends `drop /Event/mutrig_cal`). Appended after the `PSM_TWC_NTUPLE` rule, so it too wins over `NTUPLE_RULES`, and only with `PSM_DECODE` on. `"raw"` is the default because while `PIPSMSMACalibration` only puts the hits in time order, `/Event/mutrig_cal` holds nothing `/Event/mutrig` does not; `"calibrated"` drops the readout-order collection the raw-stream analyses need, so choose it only once the layer carries real calibrations and nobody needs that order. The TES always holds both. Any other value is rejected by `check()` |
 
 ## Conditions
@@ -1031,10 +1031,15 @@ slice of run 166 the whole histogram file went from 48 kB to 101 kB with the
 module on. The per-plane `L<n>_mult` axes account for most of the rest, and they
 run to 16383 hits per event on purpose — a MuPix readout frame is not one
 particle, and run 165 puts over 6000 L2 hits in a single frame.
-The MuPix hits are written twice by default, raw (`_Event_muquad`) and
-timewalk-corrected (`_Event_muquad_twc`); on a beam subrun of run 459 one copy
-is 223 kB of a 61 MB file, the waveforms 96.6 % of it, so the second copy is
-not worth dropping for size. `PSM_TWC_NTUPLE` drops either when it is.
+The MuPix hits are written once by default, timewalk-corrected
+(`_Event_muquad_twc`). How much they weigh depends on the MuPix rate: on a
+quiet subrun of run 459 one copy was 223 kB of a 61 MB file, on a busy one of
+run 790 about 34 MB of a 146 MB file. `PSM_TWC_NTUPLE = "both"` adds the raw
+`_Event_muquad`, and costs more than the copy's own pages suggest: RNTuple
+stores a page that repeats an earlier one byte for byte only once, which the two
+copies used to share for every column the correction does not touch, but the
+corrected copy is now time-ordered on the corrected times, so its pages no
+longer repeat the raw ones (+25 % file on that busy subrun).
 The SMA hits are written once by default, raw (`_Event_mutrig`):
 `PSM_SMA_CAL_NTUPLE = "both"` adds the time-ordered `_Event_mutrig_cal`, a
 second collection of the same hits and about the same size.

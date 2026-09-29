@@ -570,10 +570,13 @@ NTUPLE_RULES = []
 # Which MuPix hit collections the RNTuple keeps: "both" (/Event/muquad and the
 # corrected /Event/muquad_twc), "corrected" (drops /Event/muquad) or "raw"
 # (drops /Event/muquad_twc). Appended to NTUPLE_RULES as the last rule, so it
-# wins. Each copy is well under 1% of a beam subrun file, the waveforms most
-# of the rest, so "both" costs little; with no constants the two are equal
-# field for field, and in the same order whenever the raw frame is time-ordered.
-PSM_TWC_NTUPLE = "both"
+# wins. On a busy beam subrun each copy is about a quarter of the file, and
+# since the corrected copy is time-ordered its unchanged columns no longer
+# repeat the raw pages byte for byte, so the writer cannot store them once:
+# "both" costs about 25 % more file. The default keeps the hits the reco read;
+# the raw times follow from them and the run's mupix_timewalk constants, or
+# from reprocessing the MIDAS file.
+PSM_TWC_NTUPLE = "corrected"
 # Which SMA hit collections the RNTuple keeps: "both" (/Event/mutrig and the
 # calibrated /Event/mutrig_cal), "calibrated" (drops /Event/mutrig) or "raw"
 # (drops /Event/mutrig_cal). Appended to NTUPLE_RULES after PSM_TWC_NTUPLE, so
