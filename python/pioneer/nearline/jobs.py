@@ -114,10 +114,11 @@ class BaseJob:
             raise ValueError(f"No producer for file {self.infile['filebase']}.{self.infile['fileext']} registered")
         if producer in ("nearline", "farline"):
             if include_sidecars:
-                file_list.extend([
-                    # list sidecar files here
-                    f"{self.infile['filebase']}.py"
-                ])
+                fb = self.infile['filebase']
+                if fb.endswith("_hists"):
+                    file_list.extend([
+                        f"{fb[:-6]}.py" # for uniquiness, we assign the python config file as a sidecar to the histogram root file.
+                    ])
         elif producer.startswith("logger"):
             if include_sidecars:
                 file_list.extend([
