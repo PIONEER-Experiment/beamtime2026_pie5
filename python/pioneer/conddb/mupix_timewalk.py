@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Fit and fill the MuPix timewalk constants (conditions table mupix_timewalk).
 
-PIPSMMuPixTimewalkCorrection copies /Event/muquad to /Event/muquad_twc with
-every pixel time moved by the walk of its chip, t -> t - W(ToT). The
-constants are the run's interval of the conditions table ``mupix_timewalk``
-in ``bt2026_psm_readout_map.json``, which ships empty on [0, open), so the
-correction is a copy until this tool adds an interval:
+PIPSMMuPixTimewalkCorrection writes the hits of /Event/muquad to
+/Event/muquad_twc with every pixel time moved by the walk of its chip,
+t -> t - W(ToT), in time order of the corrected times. The constants are the
+run's interval of the conditions table ``mupix_timewalk`` in
+``bt2026_psm_readout_map.json``, which ships empty on [0, open), so the
+output equals the input until this tool adds an interval:
 
     # 1. fit: the layer's own raw histograms of some processed files
     python -m pioneer.conddb.mupix_timewalk fit out/run00459_000*_hists.root \\
