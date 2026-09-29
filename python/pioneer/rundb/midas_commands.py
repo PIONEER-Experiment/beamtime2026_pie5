@@ -14,9 +14,11 @@ MidasCommands = [
 def schedule_configuration(config):
     iface = db_iface(user = "shifter", password = config.get("password"))
     num_ev = config.get("events", 10000)
-    mrs_target = midas_run_sequence(iface, num_ev = num_ev)
-    mrs_degrad = midas_run_sequence(iface, num_ev = num_ev)
-    mrs_beam = midas_run_sequence(iface, num_ev = num_ev)
+    author = config.get("operator", "RPC Callback")
+    desc   = config.get("description", "RPC Callback")
+    mrs_target = midas_run_sequence(iface, num_ev = num_ev, author = author, description= "XY")
+    mrs_degrad = midas_run_sequence(iface, num_ev = num_ev, author = author, description= "Degrader")
+    mrs_beam = midas_run_sequence(iface, num_ev = num_ev, author = author, description = desc + "\nSequence: Beam")
 
     for row in config['config']:
         table, id = row.split(":")

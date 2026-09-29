@@ -526,33 +526,35 @@ def schedule_configs(db, configs, table, target_config, dry_run=False, iter_even
 
     scheduled = []
     for aConfig in configs:
+        description = ""
         if aConfig['type'] == 'iter':
-            centre = db.load_config("target_position", target_config)
-            if centre is None:
-                raise RuntimeError("target_position config id %s is not in the run database"
-                                   % target_config)
+            description += f"AutoTune Iteration\n"
+            description += aConfig['comment'] + '\n'
+            description += "Beam"
             entry = {
                 "type": "iter",
                 "config_type": table,
                 "rows": list(aConfig['currents']),
-                "target_position": dict(centre),
+                "target_position": target_config,
                 "num_ev": int(iter_events),
                 "on_complete": "mt_add",
                 "seq_id": None,
                 "run_ids": [],
             }
             if not dry_run:
-                mrs = nl_run.midas_run_sequence(db)
+                mrs = nl_run.midas_run_sequence(db, author = "AutoTune", description = description, num_ev = int(iter_events) )
                 mrs.set_config_list(table, aConfig['currents'])
-                centre_seq = nl_run.midas_run_sequence(db)
-                centre_seq.set_config_list("target_position", [centre])
+                centre_seq = nl_run.midas_run_sequence(db, author = "AutoTune", description = "Position")
+                centre_seq.set_config_seq("target_position", target_config)
                 centre_seq.set_on_complete("mt_add")
                 mrs.set_subsequence(centre_seq)
-                mrs.num_ev = int(iter_events)
                 entry["run_ids"] = mrs.schedule()
                 entry["seq_id"] = centre_seq.seq_id
             scheduled.append(entry)
         elif aConfig['type'] == 'final':
+            description += f"AutoTune Final Scan\n"
+            description += aConfig['comment'] + '\n'
+            description += "Beam"
             entry = {
                 "type": "final",
                 "config_type": table,
@@ -562,14 +564,13 @@ def schedule_configs(db, configs, table, target_config, dry_run=False, iter_even
                 "run_ids": [],
             }
             if not dry_run:
-                mrs = nl_run.midas_run_sequence(db)
+                mrs = nl_run.midas_run_sequence(db, author = "AutoTune", description = description, num_ev = FINAL_EVENTS)
                 mrs.set_config_list(table, aConfig['currents'])
-                fiveScan = nl_run.five_point_sequence(db)
+                fiveScan = nl_run.five_point_sequence(db, author = "AutoTune", description = "Position")
                 fiveScan.set_on_complete("merge") # it shall only merge and not submit to minitwin.
-                dscan = nl_run.degrader_scan(db)
+                dscan = nl_run.degrader_scan(db, author = "AutoTune", description = "Degrader")
                 dscan.set_subsequence(fiveScan)
                 mrs.set_subsequence(dscan)
-                mrs.num_ev = FINAL_EVENTS
                 entry["run_ids"] = mrs.schedule()
             scheduled.append(entry)
     return scheduled

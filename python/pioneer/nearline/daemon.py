@@ -290,14 +290,22 @@ class NearlineDaemon:
             # multiple subruns are produced.
             self.db_interface.schedule_postproc_job_on_file(i, 'nearline')
 
-    def start_of_run_callback(self, client, run_number):
+    def start_of_run_callback(self, client : midas.client.MidasClient , run_number):
         run_db_pk = 0
         if client.odb_exists("/Runinfo/Run DB PK"):
             run_db_pk = client.odb_get("/Runinfo/Run DB PK")
 
         if run_db_pk == 0:
             # if MIDAS is unaware of a run in the table, register a new run
-            run_db_pk = self.db_interface.register_run(status = "RUNNING")
+            # This is likely going to happen if someone started a run manually.
+            author      = client.odb_get("/Nearline/Info/Operator")
+            description = client.odb_get("/Nearline/Info/Description")
+            if not author or not description:
+                client.msg("Insufficient Run Description: Provide at least operator and description", is_error=True)
+                return 1, "Insufficient run description"
+            run_db_pk = self.db_interface.register_run(status = "RUNNING", author= author, note= description)
+            client.odb_set("/Nearline/Info/Operator", "")
+            client.odb_set("/Nearline/Info/Description", "")
             client.odb_set("/Runinfo/Run DB PK", run_db_pk)
 
         self.db_interface.start_of_midas_run(
