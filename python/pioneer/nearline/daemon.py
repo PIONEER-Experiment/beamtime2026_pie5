@@ -4,6 +4,7 @@ import pioneer.nearline.jobs as nl_jobs
 import pioneer.nearline.run as nl_run
 import pioneer.nearline.tuning as nl_tuning
 from pioneer.nearline.miniTwinInterface import miniTwinInterface as mt_iface
+from pioneer.nearline.queue import NearlineQueue
 
 import midas.client        # connect to MIDAS ODB
 import argparse            # parsing command line arguments
@@ -36,30 +37,6 @@ kDefaultNumJobs  = 3
 # define DB credentials
 kDbUser = "bot"
 kDbPwd  = "bot"
-
-class NearlineQueue:
-    def __init__(self, name : str = None, maxJobs : int = 1):
-        self.name : str  = name
-        self.maxJobs :int = maxJobs
-        self.active : list[nl_jobs.BaseJob] = list()
-
-    def get_finshed(self) -> list[nl_jobs.BaseJob]:
-        completed = list()
-        for aJob in self.active:
-            rc = aJob.poll()
-            if rc is None:
-                # This job is still running
-                continue
-            completed.append(aJob)
-        for j in completed:
-            self.active.remove(j)
-        return completed
-
-    def getOpenSlots(self) -> int:
-        return self.maxJobs - len(self.active)
-
-    def add(self, aJob : nl_jobs.BaseJob) -> None:
-        self.active.append(aJob)
 
 class NearlineDaemon:
     def __init__(self, args):
