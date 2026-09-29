@@ -32,6 +32,11 @@ class BaseJob:
     """
     def __init__(self, config, iface : db_interface):
         self.config = config
+        self.source = Path(config['source_path'])
+        self.logpath = Path(config['log_path'])
+
+        # Destinaion can either be a path or a remote location description for rsync.
+        self.destination = str(config['destination_path'])
         self.db = iface
         self.proc = None
         self.rc = None
@@ -50,16 +55,17 @@ class BaseJob:
         return "RUNNING"
 
     def start(self):
-        Path(self.config['output']).mkdir(parents = True, exist_ok = True)
+        self.logpath.mkdir(parents = True, exist_ok= True)
+
         cmd = self.build_command()
         if 'midas_run_number' in self.config.keys():
-            log_path = Path(self.config['output']) / f"run{self.config['midas_run_number']:05d}_{self.config['job_type']}.log"
+            log_name = self.logpath / f"run{self.config['midas_run_number']:05d}_{self.config['job_type']}.log"
         elif self.config.get("job_type", "") == "merge":
-            log_path = Path(self.config['output']) / f"seq{self.config['id']:05d}_{self.config['job_type']}.log"
+            log_name = self.logpath / f"seq{self.config['id']:05d}_{self.config['job_type']}.log"
         else:
-            log_path = Path(self.config['output']) / f"job{self.config['id']:05d}_{self.config['job_type']}.log"
+            log_name = self.logpath / f"job{self.config['id']:05d}_{self.config['job_type']}.log"
 
-        self.logfile = log_path.open("w")
+        self.logfile = log_name.open("w")
         if (dry_run_all_jobs):
             print(" ".join([str(c) for c in cmd]))
             self.proc = subprocess.Popen(['sleep', '2'])
@@ -83,16 +89,15 @@ class BaseJob:
         return status
 
     def raw_midas_files(self, include_sidecars = False):
-        parent_path = Path(self.config['online_path'])
         run_id = self.config['run_id']
         file_list = self.db.find_files(run_id, "mid.lz4")
         files = list()
         for aFile in file_list:
-            files.append(parent_path / f"{aFile['filebase']}.mid.lz4")
+            files.append(self.source / f"{aFile['filebase']}.mid.lz4")
             if include_sidecars:
                 files.extend([
-                    parent_path / f"{aFile['filebase']}.mid.crc32c",
-                    parent_path / f"{aFile['filebase']}.mid.lz4.crc32c",
+                    self.source / f"{aFile['filebase']}.mid.crc32c",
+                    self.source / f"{aFile['filebase']}.mid.lz4.crc32c",
                 ])
         return files
 
@@ -100,7 +105,7 @@ class BaseJob:
         if self.infile is None:
             return self.raw_midas_files(include_sidecars = include_sidecars)
 
-        producer = self.infile.get("producer", None)
+        producer = self.config.get("producer", None)
         file_list = [
             f"{self.infile['filebase']}.{self.infile['fileext']}"
         ]
@@ -108,15 +113,12 @@ class BaseJob:
         if producer is None:
             raise ValueError(f"No producer for file {self.infile['filebase']}.{self.infile['fileext']} registered")
         if producer == "nearline":
-            base_path = Path(self.config['nearline_path'])/f"run{self.config['midas_run_number']:05d}"
             if include_sidecars:
                 file_list.extend([
                     # list sidecar files here
-                    f"{self.infile['filebase']}.py",
-                    f"{self.infile['filebase']}_hists.{self.infile['fileext']}"
+                    f"{self.infile['filebase']}.py"
                 ])
         elif producer.startswith("logger"):
-            base_path = Path(self.config['online_path'])
             if include_sidecars:
                 file_list.extend([
                     # list sidecar files here
@@ -125,7 +127,7 @@ class BaseJob:
                 ])
         else:
             raise ValueError(f"Unknown producer {producer}")
-        return [base_path  / f for f in file_list]
+        return [self.source  / f for f in file_list]
 
 
     @property
@@ -148,13 +150,7 @@ class RsyncJob(BaseJob):
     that SSH keys are configured for remote transfers.
     """
     def build_command(self):
-        if self.config['job_type'] == 'remote':
-            destination = self.config['remote_path']
-        elif self.config['job_type'] == 'backup':
-            destination = self.config['backup_path']
-        else:
-            raise ValueError(f"Invalid rsync job type: {self.config['job_type']}")
-        return ['rsync', '-av', *self.get_files(), destination]
+        return ['rsync', '-av', *self.get_files(), self.destination]
 
 class GaudiJob(BaseJob):
     """
@@ -175,9 +171,8 @@ class GaudiJob(BaseJob):
         if self.infile is None:
             raise RuntimeError("input file not found in database")
 
-        input_file_path  = Path(self.config['online_path'])  / f"{self.infile['filebase']}.{self.infile['fileext']}"
-        out_file_name    = f"{self.infile['filebase']}.root"
-        output_file_path = Path(self.config['nearline_path']) / f"run{self.config['midas_run_number']:05d}" / out_file_name
+        input_file_path  = self.source / f"{self.infile['filebase']}.{self.infile['fileext']}"
+        output_file_path = Path(self.destination) / f"{self.infile['filebase']}.root"
 
         return render_job(input_file_path, output_file_path,
                           job_id = self.config['job_id'],
@@ -190,6 +185,7 @@ class GaudiJob(BaseJob):
     def start(self):
         # start job first, then register the file to the database.
         # if job start throws, the file is not entered to the database.
+        Path(self.destination).mkdir(parents=True, exist_ok=True)
         result = super().start()
         self.out_file_id = self.db.open_file('nearline', self.config['run_id'], f"{self.infile['filebase']}.root")
         return result
@@ -220,23 +216,21 @@ class MergeJob(BaseJob):
     """
 
     def build_job_description_file(self):
-        print(self.config)
-        nearline_path = Path(self.config["nearline_path"])
-        out_path =  nearline_path / f"seq{self.config['id']:05d}"
-        out_path.mkdir(parents=True, exist_ok=True)
-        outfile = out_path / f"seq{self.config['id']:05d}.root"
+        dest_path = Path(self.destination)
+        dest_path.mkdir(parents=True, exist_ok=True)
+        outfile = dest_path / f"seq{self.config['id']:05d}.root"
         self.config['output_file'] = outfile
         config = {
             "output" : str(outfile),
             "runs"   : {
                 f"{run_id}" :
                     [
-                        str(nearline_path / f"run{self.db.get_midas_run_number(run_id):05d}/{f['filebase']}_hists.root")
+                        str(self.source / f"run{self.db.get_midas_run_number(run_id):05d}/{f['filebase']}_hists.root")
                         for f in self.db.find_files([run_id], "root")
                     ] for run_id in self.config['midas_run_ids']
                 }
         }
-        cfg_file_path = out_path / f"seq{self.config['id']:05d}.json"
+        cfg_file_path = dest_path / f"seq{self.config['id']:05d}.json"
         with cfg_file_path.open("w") as f:
             json.dump(config, f, indent = 2)
 

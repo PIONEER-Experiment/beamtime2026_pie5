@@ -111,8 +111,8 @@ class NearlineDaemon:
         self.queues['nearline'].maxJobs = self.client.odb_get("/Nearline/config/Num parallel jobs")
         self.midas_logger_path     = pathlib.Path(self.client.odb_get("/Logger/Data dir"))
         self.backup_path           = pathlib.Path(self.client.odb_get("/Nearline/config/Backup path"))
-        self.remote_path           = pathlib.Path(self.client.odb_get("/Nearline/config/Remote path"))
         self.nearline_output_path  = pathlib.Path(self.client.odb_get("/Nearline/config/Output path"))
+        self.remote_path           = self.client.odb_get("/Nearline/config/Remote path")
         self.minitwin_update_table = self.client.odb_get("/Nearline/config/MiniTwin updates")
         self.minitwin_enabled      = self.client.odb_get("/Nearline/config/MiniTwin enable")
 
@@ -171,11 +171,25 @@ class NearlineDaemon:
             # todo: get slack hook and set it up
 
     def dispatch_job(self, queue : NearlineQueue, job_cfg):
-        job_cfg['job_type'] = queue.name
-        job_cfg['online_path']     = self.midas_logger_path
-        job_cfg['backup_path']     = self.backup_path
-        job_cfg['remote_path']     = self.remote_path
-        job_cfg['nearline_path']   = self.nearline_output_path
+        job_cfg['job_type']        = queue.name
+        if queue.name == "nearline":
+            job_cfg['source_path']      = self.midas_logger_path
+            job_cfg['destination_path'] = str(self.nearline_output_path / f"run{job_cfg['midas_run_number']:05d}")
+        elif queue.name in ("backup", "remote", "cleanup"):
+            if (job_cfg.get('producer', None) == "nearline"):
+                job_cfg['source_path'] = self.nearline_output_path / f"run{job_cfg['midas_run_number']:05d}"
+            else:
+                job_cfg['source_path'] = self.midas_logger_path
+
+            if queue.name == "backup":
+                job_cfg['destination_path'] = str(self.backup_path)
+            elif queue.name == "remote":
+                job_cfg['destination_path'] = str(self.remote_path)
+            elif queue.name == "cleanup":
+                job_cfg['destination_path'] = None
+
+        job_cfg['log_path'] = self.nearline_output_path / f"run{job_cfg['midas_run_number']:05d}"
+
 
         theJob = nl_jobs.create_job(job_cfg, self.db_interface)
         try:
@@ -189,7 +203,7 @@ class NearlineDaemon:
     def build_and_dispatch_seq(self, seq_cfg : dict):
         on_complete = seq_cfg['on_complete'].split()
         if "merge" in on_complete:
-            seq_cfg['nearline_path'] = self.nearline_output_path
+            seq_cfg['source_path'] = self.nearline_output_path
             seq_cfg['job_type'] = "merge"
             seq_cfg['job_id'] = seq_cfg['id']
             seq_cfg['table'] = 'run_sequence'
@@ -213,8 +227,8 @@ class NearlineDaemon:
                 # Paths where things shall be going to
                 self.midas_logger_path    = pathlib.Path(self.client.odb_get("/Logger/Data dir"))
                 self.backup_path          = pathlib.Path(self.client.odb_get("/Nearline/config/Backup path"))
-                self.remote_path          = pathlib.Path(self.client.odb_get("/Nearline/config/Remote path"))
                 self.nearline_output_path = pathlib.Path(self.client.odb_get("/Nearline/config/Output path"))
+                self.remote_path          = self.client.odb_get("/Nearline/config/Remote path")
 
                 # Update max number of jobs in nearline queue
                 self.queues['nearline'].maxJobs = self.client.odb_get("/Nearline/config/Num parallel jobs")

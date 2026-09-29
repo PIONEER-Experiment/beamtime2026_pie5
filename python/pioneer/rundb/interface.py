@@ -645,12 +645,15 @@ class interface:
                     UPDATE state.postproc_job s
                     SET status = 'CLAIMED'
                     FROM claimed
+                    LEFT JOIN state.file_list AS fl
+                        ON fl.id = claimed.file_id
                     WHERE s.id = claimed.id
                     RETURNING
-                        claimed.id as job_id,
-                        claimed.midas_run_id as run_id,
-                        claimed.file_id as file_id,
-                        claimed.midas_run_number as midas_run_number
+                        claimed.id AS job_id,
+                        claimed.midas_run_id AS run_id,
+                        claimed.file_id AS file_id,
+                        claimed.midas_run_number AS midas_run_number
+                        fl.producer AS producer
                     """, (job_type, max_jobs,))
             results = cursor.fetchall()
         conn.close()
