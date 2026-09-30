@@ -324,9 +324,12 @@ class driver and the device driver `scfe/iseg_nhq_fe.{h,cxx}` (device name
   ignored.
 * **Autostart guard.** The driver reads `A2` at every connect. If it is not
   0, the driver never reads `S2` (a read can restore a shut-off voltage by
-  itself), refuses every write, and sets the AUTOSTART status bit
-  (`scfe/iseg_nhq_fe.h:53-57`, `scfe/iseg_nhq_fe.cxx:1403`). Clear it with the
-  CLI (`set A 0`) while `scfe` is stopped, then restart `scfe`.
+  itself), refuses every write except switching off, and sets the AUTOSTART
+  status bit (`scfe/iseg_nhq_fe.h:53-59`, `scfe/iseg_nhq_fe.cxx:1424`).
+  Switching off (ChState 0, also one latched while the link was down) writes
+  `D2=0` only: with autostart (`A2=8`) the unit ramps to a new set point by
+  itself, so no `G2` is sent (`scfe/iseg_nhq_fe.cxx:1785`). Clear autostart
+  with the CLI (`set A 0`) while `scfe` is stopped, then restart `scfe`.
 * **Magnitudes and Polarity.** Every voltage and current in ODB is a
   magnitude. The sign is published in `Variables/Polarity` from the unit's
   `T2` polarity bit (`scfe/iseg_nhq_fe.h:176-187`). S5 is negative.
@@ -455,7 +458,7 @@ Under the row: `Unit: comm alarm ok` and `HV alarms enabled y`.
 |---|---|---|
 | grey | `no data` | nothing read yet, or the frontend is not running |
 | purple | `stale (...)` | the last read from the unit failed; the words in brackets are the last good status. Check the serial cable and `Unit: comm alarm` |
-| red | `AUTOSTART armed - frontend read-only` | the unit's autostart flag is set; MIDAS reads nothing and writes nothing. Stop `scfe`, use the CLI (`set A 0`), restart |
+| red | `AUTOSTART armed - frontend read-only` | the unit's autostart flag is set; MIDAS does not read the status word and refuses every change except switching off (untick On/Off still ramps S5 to 0 V). Stop `scfe`, use the CLI (`set A 0`), restart |
 | red | `TRIPPED (current trip)` | the unit shut the output off because IMON went above Trip |
 | red | `Vmax/Imax exceeded` | the unit's hard limit was hit |
 | red | `INHIBIT` | the INHIBIT input is or was active |

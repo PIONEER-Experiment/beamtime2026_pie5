@@ -52,7 +52,9 @@ namespace iseg_nhq {
       // --- driver-detected conditions ---
       /// A<n> (autostart / EEPROM flags) read nonzero at connect. While set
       /// the driver never reads S<n> (a read of S can restore a shut-off
-      /// voltage on its own when autostart is armed) and refuses every write.
+      /// voltage on its own when autostart is armed) and refuses every write
+      /// except ChState OFF: D<n>=0 (no G with the autostart bit set, since D
+      /// then ramps by itself), also for an OFF latched while the link was down.
       /// Cleared only by a reconnect or frontend restart that reads A<n> = 0.
       kStatAutostart = 24,
       /// the unit answered "?TOT" (timeout error, it re-initialises itself)
@@ -113,8 +115,10 @@ namespace iseg_nhq {
    /// The S text "ON" only means "output has reached the set voltage", which
    /// the NHQ also reports at D = 0. So: ramping (L2H or H2L), or ON with a
    /// nonzero set point (DSET). OFF, MAN, ERR, INH and TRP are separate S
-   /// texts and so are never "on". While S is not polled (autostart armed) no
-   /// S bit is set and this is FALSE. The stale bit is not looked at: the
+   /// texts and so are never "on". While S is not polled (AUTOSTART set) the
+   /// T byte decides: on = DSET and none of T_HVOFF, T_MAN, T_ERR, T_INH (with
+   /// autostart the output follows D unless one of those is set, NHQ manuals
+   /// "Auto start"). The stale bit is not looked at: the
    /// caller decides whether a stale word is usable.
    bool stat_is_on(DWORD stat);
 

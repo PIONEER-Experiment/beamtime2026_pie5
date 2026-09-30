@@ -49,7 +49,8 @@
                 * A<n> (autostart) is read at every connect; if it is nonzero
                   the driver stops reading S<n> (a read of S restores a
                   shut-off voltage by itself when autostart is armed) and
-                  refuses every write until a reconnect reads A<n> = 0;
+                  refuses every write except ChState OFF (D<n>=0, see
+                  iseg_off_under_autostart) until a reconnect reads A<n> = 0;
                 * the port is flock()ed like the CLI does, so the two can
                   never interleave echo handshakes on one line.
 
@@ -299,6 +300,10 @@ struct ISEG_NHQ_FE_INFO {
    /// @brief ChState 0 arrived while the link was down after the unit had
    ///        been linked before: executed (D=0, G) as soon as it answers
    bool pending_off{false};
+   /// @brief TRUE only inside iseg_off_under_autostart(): lets exactly
+   ///        "D<n>=0" (and "G<n>" when A<n> has no autostart bit) past the
+   ///        autostart guard in iseg_cmd()
+   bool autostart_off{false};
 
    /// @brief +1 / -1 / 0 unknown; written by the poll thread, read by the
    ///        main thread through iseg_nhq_polarity()
@@ -418,6 +423,13 @@ bool iseg_nhq::stat_is_ramping(DWORD stat)
 
 bool iseg_nhq::stat_is_on(DWORD stat)
 {
+   if (stat & (1u << kStatAutostart)) {
+      // S is not polled; with autostart the output follows D unless OFF, ERR,
+      // INH or MAN is set (NHQ manuals, "Auto start"), all visible in T
+      const DWORD blocked = (1u << kStatTHvOff) | (1u << kStatTMan) |
+                            (1u << kStatTErr) | (1u << kStatTInh);
+      return (stat & (1u << kStatDSet)) && !(stat & blocked);
+   }
    if (stat_is_ramping(stat)) {
       return true;
    }
@@ -1034,6 +1046,7 @@ static const char *iseg_rc_name(IsegRc rc)
 }
 
 static bool iseg_connect(ISEG_NHQ_FE_INFO *info);
+static std::string iseg_letter(const ISEG_NHQ_FE_INFO *info, char letter);
 static void iseg_follow_ceiling(ISEG_NHQ_FE_INFO *info);
 
 /// @brief make sure the port is open and the connect sequence has run
@@ -1074,11 +1087,18 @@ static IsegReply iseg_cmd(ISEG_NHQ_FE_INFO *info, const std::string &text,
    // The one place every command passes after the connect sequence (which
    // may just have found A<n> armed): with autostart armed nothing but the
    // genuine reads goes out. S<n> can restore a shut-off voltage by itself,
-   // G<n> starts a ramp, and every write moves the output at once.
+   // G<n> starts a ramp, and every write moves the output at once. The one
+   // exception is the switch-off (iseg_off_under_autostart): D<n>=0, plus G<n>
+   // only when the A<n> flags do not include autostart itself.
    if (info->autostart && (text.find('=') != std::string::npos ||
                            text[0] == 'S' || text[0] == 'G')) {
-      r.rc = IsegRc::Refused;
-      return r;
+      const bool off_d = text == iseg_letter(info, 'D') + "=0";
+      const bool off_g = text == iseg_letter(info, 'G') &&
+                         !(info->auto_flags & iseg_nhq::kAutostartBit);
+      if (!(info->autostart_off && (off_d || off_g))) {
+         r.rc = IsegRc::Refused;
+         return r;
+      }
    }
    r = iseg_raw_command(info, text);
    if (r.rc == IsegRc::Echo && retry_on_echo) {
@@ -1408,7 +1428,7 @@ static bool iseg_connect(ISEG_NHQ_FE_INFO *info)
       info->s_bits = 0;
       info->s_valid = false;
       if (!was_autostart || iseg_may_log(info, "autostart")) {
-         ISEG_MSG(MERROR, "A%d=%d%.12s: S%d not polled, writes refused. Stop scfe, CLI 'set A 0'",
+         ISEG_MSG(MERROR, "A%d=%d%.12s: S%d not polled, only ChState OFF allowed. Stop scfe, CLI 'set A 0'",
                   ch, a, (a & iseg_nhq::kAutostartBit) ? " autostart" : " flags", ch);
       }
    } else if (was_autostart) {
@@ -1756,14 +1776,42 @@ static bool iseg_refuse_nolink(ISEG_NHQ_FE_INFO *info, const char *what)
    return true;
 }
 
-/// @brief refuse any write while autostart is armed (decision 12)
+/// @brief ChState OFF while A<n> != 0 (user decision 2026-09-30: allowed)
+///
+/// With the autostart bit (A=8) set, both NHQ manuals say the output ramps to
+/// the set voltage after a D command without G ("G-command is not necessary
+/// after D-command", x2x v3.06 and x0x v2.04, "Auto start"), provided none of
+/// OFF, ERR, INH, MAN is set; with any of those the output is not driven by D
+/// anyway. So D<n>=0 alone ramps the channel down, and no G is sent: the
+/// manuals tie the autostart restore of a shut-off voltage to "Read status
+/// word", and whether the unit counts G's status reply as such is not
+/// documented. S<n> is still never read. With A<n> nonzero but without the
+/// autostart bit (EEPROM save flags only) D does not start a ramp, so G<n>
+/// follows; with D at 0 it can only ramp down.
+/// @return TRUE when D<n> reads back 0 (and G, if sent, was acknowledged)
+static bool iseg_off_under_autostart(ISEG_NHQ_FE_INFO *info)
+{
+   const int ch = iseg_hwch(info);
+   const bool send_g = !(info->auto_flags & iseg_nhq::kAutostartBit);
+   info->autostart_off = true;
+   const bool ok = iseg_write_d(info, 0.f, send_g);
+   info->autostart_off = false;
+   if (ok) {
+      ISEG_MSG(MINFO, "S5 OFF with autostart armed: D%d=0 sent%.8s; disarm autostart (A%d=0) with the CLI before switching on",
+               ch, send_g ? " + G" : "", ch);
+   }
+   return ok;
+}
+
+/// @brief refuse any write while autostart is armed (decision 12); every
+///        caller except ChState OFF, see iseg_off_under_autostart()
 static bool iseg_refuse_autostart(ISEG_NHQ_FE_INFO *info, const char *what)
 {
    if (!info->autostart) {
       return false;
    }
    if (iseg_may_log(info, "autostart_write")) {
-      ISEG_MSG(MERROR, "%.16s refused: A%d=%d (autostart) armed, frontend is read-only",
+      ISEG_MSG(MERROR, "%.16s refused: A%d=%d (autostart) armed, only ChState OFF allowed",
                what, iseg_hwch(info), info->auto_flags);
    }
    return true;
@@ -1781,15 +1829,12 @@ static void iseg_service_pending(ISEG_NHQ_FE_INFO *info)
       ISEG_MSG(MINFO, "latched ChState OFF: unit is back already off (D%d=0)", ch);
       return;
    }
-   if (iseg_refuse_autostart(info, "latched OFF")) {
-      return;
-   }
    const float keep = info->demand;
-   if (iseg_write_d(info, 0.f, true)) {
+   if (info->autostart ? iseg_off_under_autostart(info) : iseg_write_d(info, 0.f, true)) {
       info->on = false;
       info->demand = keep;
-      ISEG_MSG(MINFO, "latched ChState OFF executed: D%d=0, G%d; demand %.0f V kept",
-               ch, ch, (double) keep);
+      ISEG_MSG(MINFO, "latched ChState OFF executed: D%d=0; demand %.0f V kept",
+               ch, (double) keep);
    } else if (!info->linked) {
       info->pending_off = true;   // lost again on the way: try on the next link
    }
@@ -2163,8 +2208,7 @@ static INT iseg_set_chstate(ISEG_NHQ_FE_INFO *info, float value)
       if (!want_on && info->ever_linked) {
          // OFF is the safe direction: keep it and run it on the reconnect
          info->pending_off = true;
-         ISEG_MSG(MERROR, "ChState OFF latched: no link, D%d=0 + G%d go out when the unit answers",
-                  ch, ch);
+         ISEG_MSG(MERROR, "ChState OFF latched: no link, D%d=0 goes out when the unit answers", ch);
       } else if (iseg_may_log(info, "chstate_nolink")) {
          ISEG_MSG(MERROR, "ChState %d not applied: no link to the unit", want_on ? 1 : 0);
       }
@@ -2173,7 +2217,7 @@ static INT iseg_set_chstate(ISEG_NHQ_FE_INFO *info, float value)
    if (want_on == info->on) {
       return FE_SUCCESS;
    }
-   if (iseg_refuse_autostart(info, want_on ? "ChState ON" : "ChState OFF")) {
+   if (want_on && iseg_refuse_autostart(info, "ChState ON")) {
       return FE_ERR_HW;
    }
 
@@ -2205,6 +2249,15 @@ static INT iseg_set_chstate(ISEG_NHQ_FE_INFO *info, float value)
    }
 
    const float keep = info->demand;
+   if (info->autostart) {
+      // allowed despite autostart (user decision); D=0 only, no S read
+      if (!iseg_off_under_autostart(info)) {
+         return FE_ERR_HW;
+      }
+      info->on = false;
+      info->demand = keep;
+      return FE_SUCCESS;
+   }
    if (!iseg_write_d(info, 0.f, true)) {
       return FE_ERR_HW;
    }
