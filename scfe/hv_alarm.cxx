@@ -155,6 +155,11 @@ constexpr size_t kMaxStatTextLen = 24;
 ///        reported [s]. Long enough to ride out a ramp-up or a poll in flight.
 constexpr DWORD kOffMismatchSeconds = 5;
 
+/// @brief a |Variables/Demand| at or below this [V] counts as "0 V set": the
+///        "ChState ON but board says off" test is skipped then (same as
+///        cd_hv's default Zero Threshold)
+constexpr float kZeroDemandV = 0.5f;
+
 /// @brief full key set of an alarm class, in ALARM_CLASS order
 ///        (midas.h:1459-1471). al_trigger_class() reads every one of
 ///        "Write system message", "System message interval", "System message
@@ -756,12 +761,12 @@ void check_instance(instance_t &in)
    size = sizeof(DWORD) * n_ch;
    db_get_value(hDB, hKeyEq, "Variables/ChState", chstate.data(), &size, TID_DWORD, FALSE);
 
-   std::vector<float> demand;
-   if (in.drv.deviation_check) {
-      demand.assign(n_ch, (float) ss_nan());
-      size = sizeof(float) * n_ch;
-      db_get_value(hDB, hKeyEq, "Variables/Demand", demand.data(), &size, TID_FLOAT, FALSE);
-   }
+   /* read for every driver: the deviation check and the "board says off"
+      test (a channel on at a 0 V demand is consistent) both need it; NaN
+      when the key is missing means "unknown" */
+   std::vector<float> demand(n_ch, (float) ss_nan());
+   size = sizeof(float) * n_ch;
+   db_get_value(hDB, hKeyEq, "Variables/Demand", demand.data(), &size, TID_FLOAT, FALSE);
 
    std::vector<char> names(NAME_LENGTH * n_ch, 0);
    size = NAME_LENGTH * n_ch;
@@ -841,8 +846,14 @@ void check_instance(instance_t &in)
          answers CMD:OK to PAR:ON and does nothing; the descriptor's off_hint
          says what to check on each device. This is an operator-state problem,
          not a hardware fault, so it is a message and deliberately not a MIDAS
-         alarm. */
-      if (chstate[i] == 1 && stat_usable && !in.drv.is_on(stat[i])) {
+         alarm.
+         ChState ON with a demand of (about) 0 V is a consistent state, not a
+         mismatch: the iseg emulates "on" by its set point, so it reports "not
+         on" at D = 0, and a CAEN channel switched on at VSET 0 has nothing to
+         show either. So the test is skipped then; an unknown (NaN) demand
+         keeps it. */
+      const bool zero_demand = !std::isnan(demand[i]) && fabsf(demand[i]) <= kZeroDemandV;
+      if (chstate[i] == 1 && stat_usable && !zero_demand && !in.drv.is_on(stat[i])) {
          if (in.off_mismatch_since[i] == 0)
             in.off_mismatch_since[i] = t_now;
          if (!in.off_mismatch_logged[i] &&
@@ -851,10 +862,15 @@ void check_instance(instance_t &in)
             /* No separate "switch bits" clause: the switch bits are already
                named by the STAT text, and the message budget has no room for
                saying it twice. */
+            std::string st = stat_brief(in, stat[i]);
+            if (in.drv.off_stat_text != nullptr) {
+               st = in.drv.off_stat_text(stat[i]);
+               if (st.size() > kMaxStatTextLen)
+                  st = msprintf("0x%x", (unsigned) stat[i]);
+            }
             std::string m = msprintf(
                "%s: ChState ON but board says off (STAT %s)%s",
-               name[0] ? name : alarm_name.c_str(), stat_brief(in, stat[i]).c_str(),
-               in.drv.off_hint);
+               name[0] ? name : alarm_name.c_str(), st.c_str(), in.drv.off_hint);
             cm_msg(MERROR, "hv_alarm", "%s", clip(m, kMaxErrMsgLen));
          }
       } else {

@@ -400,7 +400,11 @@ The reason text of `IsegHV Ch0` lists what is wrong: `over current`,
 Separate from the alarms, `hv_alarm` posts one error message when `ChState`
 is 1 but the unit is not on for 5 s: `ChState ON but board says off (STAT
 ...) - check HV-ON/KILL switches, CONTROL on DAC`
-(`scfe/hv_alarm.cxx:845-861`, `scfe/scfe.cxx:112`).
+(`scfe/hv_alarm.cxx:845-861`, `scfe/scfe.cxx:112`). A switch-on that the
+driver refuses or that fails (Demand 0 or unknown, front panel, autostart,
+ceiling, no link) unticks the box itself within a poll and says why, so this
+message is left for a unit that went off by itself with the box ticked (see
+`iseg_on_refused` in `scfe/iseg_nhq_fe.cxx`).
 
 ### Running it
 

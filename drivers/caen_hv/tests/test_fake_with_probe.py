@@ -212,6 +212,29 @@ class FakeWithProbeTest(unittest.TestCase):
         with Fake("--stat-bits", "8") as fake, fake.client() as dev:
             self.assertIn("OVC", proto.decode_stat(dev.mon_int("STAT", 0)))
 
+    def test_stat_delay_postpones_on_and_off(self) -> None:
+        with Fake("--stat-delay", "1.0") as fake, fake.client() as dev:
+            dev.set("VSET", 0, "100")
+            dev.set("ON", 0)
+            time.sleep(0.3)
+            self.assertNotIn("ON", proto.decode_stat(dev.mon_int("STAT", 0)))
+            time.sleep(1.2)
+            self.assertIn("ON", proto.decode_stat(dev.mon_int("STAT", 0)))
+            dev.set("OFF", 0)
+            time.sleep(0.3)
+            self.assertIn("ON", proto.decode_stat(dev.mon_int("STAT", 0)))
+            time.sleep(1.2)
+            self.assertNotIn("ON", proto.decode_stat(dev.mon_int("STAT", 0)))
+
+    def test_kill_switch_refuses_on(self) -> None:
+        with Fake("--stat-bits", "0x800") as fake, fake.client() as dev:
+            dev.set("VSET", 0, "100")
+            dev.set("ON", 0)            # acknowledged ...
+            time.sleep(0.3)
+            bits = proto.decode_stat(dev.mon_int("STAT", 0))
+            self.assertIn("KILL", bits)
+            self.assertNotIn("ON", bits)  # ... but not executed
+
     def test_bad_channel_and_parameter(self) -> None:
         with Fake() as fake, fake.client() as dev:
             with self.assertRaises(probe.CaenHVError) as caught:

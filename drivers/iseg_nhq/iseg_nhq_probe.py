@@ -274,6 +274,11 @@ class IsegNHQ:
                         f"{self.port} would not take {len(view) - sent} "
                         f"more byte(s) of {bytes(view)!r}")
                 select.select([], [self.fd], [], 0.05)
+            except OSError as err:
+                # EIO/ENODEV when the adapter is unplugged or the pty's
+                # other end is gone, as in _read_some
+                raise IsegLinkError(
+                    f"{self.port} failed while writing: {err}") from err
         self._trace(">>>", data)
 
     def _read_some(self, deadline: float) -> bytes:

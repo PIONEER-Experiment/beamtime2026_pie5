@@ -1810,7 +1810,9 @@ static bool iseg_refuse_autostart(ISEG_NHQ_FE_INFO *info, const char *what)
    if (!info->autostart) {
       return false;
    }
-   if (iseg_may_log(info, "autostart_write")) {
+   // rate limited per kind of request, so a refused ChState ON always says
+   // why even right after a refused Demand
+   if (iseg_may_log(info, (std::string("autostart_") + what).c_str())) {
       ISEG_MSG(MERROR, "%.16s refused: A%d=%d (autostart) armed, only ChState OFF allowed",
                what, iseg_hwch(info), info->auto_flags);
    }
@@ -2168,6 +2170,34 @@ static INT iseg_nhq_fe_get_direct(ISEG_NHQ_FE_INFO *info, INT channel, float *pv
 
 /*---- set commands ------------------------------------------------*/
 
+/// @brief an ON that did not happen: put ODB's ChState back to 0
+///
+/// cd_hv never reads ChState back from the driver after init, so a refused
+/// or failed ON would leave the box ticked on a channel that is off (and
+/// hv_alarm then reports "ChState ON but board says off"). Written from
+/// sc_thread like the Voltage Limit (iseg_write_odb_limit); cd_hv's hotlink
+/// queues CMD_SET_CHSTATE(0) back to us, which the armed echo guard drops
+/// silently (no D/G, no message, no latched OFF). Nothing is written while
+/// the driver considers the unit on: then ChState 1 is the truth.
+/// @return FE_ERR_HW, so callers can "return iseg_on_refused(info);"
+static INT iseg_on_refused(ISEG_NHQ_FE_INFO *info)
+{
+   if (info->on) {
+      return FE_ERR_HW;
+   }
+   info->last_chstate = 0;
+   iseg_arm_echo(info->echo_chstate, 0.f);
+   if (!info->eq_path.empty()) {
+      HNDLE hCh;
+      const std::string path = info->eq_path + "/Variables/ChState";
+      if (db_find_key(info->hDB, 0, path.c_str(), &hCh) == DB_SUCCESS) {
+         DWORD zero = 0;
+         db_set_data_index(info->hDB, hCh, &zero, sizeof(zero), 0, TID_DWORD);
+      }
+   }
+   return FE_ERR_HW;
+}
+
 /// @brief CMD_SET_CHSTATE: ON = D<n>=demand + G<n>, OFF = D<n>=0 + G<n>
 ///
 /// hv_init() writes ChState from CMD_GET_CHSTATE and the hotlink echoes it
@@ -2197,7 +2227,7 @@ static INT iseg_set_chstate(ISEG_NHQ_FE_INFO *info, float value)
       if (iseg_may_log(info, "chstate_unknown")) {
          ISEG_MSG(MERROR, "ChState %d ignored: D%d never read from the unit", want_on ? 1 : 0, ch);
       }
-      return FE_ERR_HW;
+      return want_on ? iseg_on_refused(info) : FE_ERR_HW;
    }
    if (want_on == info->on) {
       return FE_SUCCESS;
@@ -2212,25 +2242,30 @@ static INT iseg_set_chstate(ISEG_NHQ_FE_INFO *info, float value)
       } else if (iseg_may_log(info, "chstate_nolink")) {
          ISEG_MSG(MERROR, "ChState %d not applied: no link to the unit", want_on ? 1 : 0);
       }
-      return FE_ERR_HW;
+      return want_on ? iseg_on_refused(info) : FE_ERR_HW;
    }
    if (want_on == info->on) {
       return FE_SUCCESS;
    }
    if (want_on && iseg_refuse_autostart(info, "ChState ON")) {
-      return FE_ERR_HW;
+      return iseg_on_refused(info);
    }
 
    if (want_on) {
       if (!info->demand_valid) {
          ISEG_MSG(MERROR, "ChState ON refused: no demand voltage known");
-         return FE_ERR_HW;
+         return iseg_on_refused(info);
+      }
+      if (info->demand <= 0.f) {
+         // D=0 + G would leave "on at 0 V", which is off in every respect
+         ISEG_MSG(MERROR, "ChState ON refused: Demand is 0 V, set Demand first");
+         return iseg_on_refused(info);
       }
       if (!iseg_front_panel_ok(info, "ChState ON", true)) {
-         return FE_ERR_HW;
+         return iseg_on_refused(info);
       }
       if (!iseg_check_ceiling(info, info->demand, true)) {
-         return FE_ERR_HW;
+         return iseg_on_refused(info);
       }
       if (!iseg_write_d(info, info->demand, true)) {
          // Keep D != 0 <=> on: if the set point went in but the switch-on
@@ -2240,7 +2275,7 @@ static INT iseg_set_chstate(ISEG_NHQ_FE_INFO *info, float value)
             ISEG_MSG(MERROR, "ChState ON failed after D%d was written: switching back off", ch);
             iseg_write_d(info, 0.f, true);
          }
-         return FE_ERR_HW;
+         return iseg_on_refused(info);
       }
       info->on = true;
       ISEG_MSG(MINFO, "S5 on: D%d=%.0f V, G%d -> %.12s", ch, (double) info->d_unit, ch,
