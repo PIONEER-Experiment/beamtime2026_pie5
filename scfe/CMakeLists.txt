@@ -13,6 +13,7 @@ add_executable(scfe
                 arcus_stage_fe.cxx
                 isel_fe.cxx
                 caen_hv_fe.cxx
+                iseg_nhq_fe.cxx
                 hv_alarm.cxx
                 ${MIDASSYS}/drivers/class/hv.cxx
             )
