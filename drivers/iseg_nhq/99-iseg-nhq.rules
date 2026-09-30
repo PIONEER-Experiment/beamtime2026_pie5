@@ -1,0 +1,10 @@
+# iseg NHQ 208L HV supply (RS232 via Keyspan USA-19H USB adapter) -> stable /dev/iseg_nhq0
+# Install: sudo cp 99-iseg-nhq.rules /etc/udev/rules.d/
+#          sudo udevadm control --reload-rules && sudo udevadm trigger
+# The DAQ user must be in the "dialout" group.
+# NOTE: 06cd:0121 is the generic Keyspan USA-19H id -- a second one of these
+# adapters on the same machine (e.g. pinky) would also match this rule. Pin
+# to a single physical unit with ATTRS{devpath}=="<port path>" (from
+# `udevadm info -a -p $(udevadm info -q path -n /dev/ttyUSBn)`) or, if the
+# adapter exposes one, ATTRS{serial}=="<serial>".
+SUBSYSTEM=="tty", ATTRS{idVendor}=="06cd", ATTRS{idProduct}=="0121", SYMLINK+="iseg_nhq%n", MODE="0660", GROUP="dialout"
