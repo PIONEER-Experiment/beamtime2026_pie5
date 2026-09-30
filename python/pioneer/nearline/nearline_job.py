@@ -360,11 +360,11 @@ PSM_MUPIX_PIXELS_PER_BIN = 1
 # splits the coincidence peak between two bins.
 PSM_MUPIX_DT_RANGE_NS = 204.0
 PSM_MUPIX_DT_BINS = 51
-# Half-width in mrad of this module's own x'/y' axes. 0 derives the full
-# geometric acceptance of the two planes at the measured lever arm, so nothing
-# a pair can produce lands in an overflow bin. Set it to
-# PSM_PHASE_SPACE_SLOPE_RANGE_MRAD to read these next to PIPSMAllTrackReco's
-# phase space instead, and expect the tails outside that window to pile up.
+# Half-width in mrad of the x'/y' axes of this module's xxp and yyp, rounded up
+# to whole bins (the monitor's TrackSlopeStepsPerBin slope steps, 18.67 mrad).
+# 0 derives the full geometric acceptance of the two planes at the measured
+# lever arm, so nothing a pair can produce lands in an overflow bin. The same
+# tracks on PIPSMAllTrackReco's phase-space window are xxp_mt / yyp_mt.
 PSM_MUPIX_SLOPE_RANGE_MRAD = 0.0
 # Half-width in mm of the fixed x/y axes of track_xy_expanded, xxp_central and
 # yyp_central. It covers the standard five-point scan (PSM_POSITIONS_MM, +-17 mm)
@@ -551,8 +551,10 @@ PSM_WEIGHT_MARGIN_MM = 2.0
 PSM_WEIGHT_STRATEGY = 1
 # Phase-space histogram axes: PIPSMDelayedCoincidence's tagged xy/xxp/yyp and
 # their weighted twins, PIPSMAllTrackReco's xy/xxp/yyp TH3s and their weighted
-# twins xy_w/xxp_w/yyp_w, and (on the MuPix monitor's own axes, not these
-# ranges) track_xy_expanded/xxp_central/yyp_central and their weighted twins
+# twins xy_w/xxp_w/yyp_w, the MuPix monitor's stage-weighted xy_mt/xxp_mt/yyp_mt
+# (the maps the beam-tuning feed reads, miniTwinInterface.miniTwin_histograms), and (on the
+# MuPix monitor's own axes, not these ranges) track_xy_expanded/xxp_central/
+# yyp_central and their weighted twins
 # track_xy_expanded_w/xxp_central_w/yyp_central_w. These are not free
 # monitoring knobs on the reco side, they are the minitwin det10 input
 # contract -- the histograms this job writes rebin onto the model's [3, 64, 64]
@@ -922,11 +924,12 @@ def check():
     if WD_RF_REFINE and int(WD_RF_REFINE_POINTS) < 2:
         problems.append(f"WD_RF_REFINE is on but WD_RF_REFINE_POINTS is "
                         f"{WD_RF_REFINE_POINTS}; a scan needs at least 2 points.")
-    if PSM_RECO and (int(PSM_PHASE_SPACE_BINS) <= 0 or int(PSM_PHASE_SPACE_BINS) % 64):
+    _phase_space_used = PSM_RECO or PSM_MUPIX_MONITOR
+    if _phase_space_used and (int(PSM_PHASE_SPACE_BINS) <= 0 or int(PSM_PHASE_SPACE_BINS) % 64):
         problems.append(f"PSM_PHASE_SPACE_BINS is {PSM_PHASE_SPACE_BINS}: it must be a "
                         "positive multiple of 64, or the phase-space histograms do not "
                         "rebin onto the 64-bin minitwin export exactly (320 = 5 x 64).")
-    if PSM_RECO and (float(PSM_PHASE_SPACE_POS_RANGE_MM) <= 0
+    if _phase_space_used and (float(PSM_PHASE_SPACE_POS_RANGE_MM) <= 0
                      or float(PSM_PHASE_SPACE_SLOPE_RANGE_MRAD) <= 0):
         problems.append(f"PSM_PHASE_SPACE_POS_RANGE_MM ({PSM_PHASE_SPACE_POS_RANGE_MM}) and "
                         f"PSM_PHASE_SPACE_SLOPE_RANGE_MRAD "
@@ -1144,6 +1147,25 @@ if PSM_MUPIX_MONITOR:
         WeightStrategy=min(int(PSM_WEIGHT_STRATEGY), 1),
         ConfigX=_PSM_CONFIG_X, ConfigY=_PSM_CONFIG_Y,
         Margin=float(PSM_WEIGHT_MARGIN_MM))
+    # xy_mt / xxp_mt / yyp_mt, the maps the beam-tuning feed reads, on the same
+    # minitwin grid as PIPSMDelayedCoincidence's phase space, stage-weighted with
+    # WeightStrategy / ConfigX / ConfigY / Margin above (sum of w, Sumw2). Set only when the
+    # installed reco_testbeam has the properties: this job pulled onto a host
+    # whose reco_testbeam was not rebuilt yet would otherwise die at option
+    # parsing, taking every nearline job on that host with it.
+    _mupix_minitwin = dict(MinitwinBins=int(PSM_PHASE_SPACE_BINS),
+                           MinitwinPosRange=float(PSM_PHASE_SPACE_POS_RANGE_MM),
+                           MinitwinSlopeRange=float(PSM_PHASE_SPACE_SLOPE_RANGE_MRAD))
+    _mupix_known = PIPSMMuPixMonitor.getDefaultProperties()
+    if all(k in _mupix_known for k in _mupix_minitwin):
+        for _k, _v in _mupix_minitwin.items():
+            setattr(mupix_monitor, _k, _v)
+    else:
+        print("[nearline] WARNING    the installed PIPSMMuPixMonitor has no Minitwin* "
+              "properties (reco_testbeam older than the *_mt maps): no "
+              "PIPSMMuPixMonitor/xy_mt, xxp_mt, yyp_mt are written, so the minitwin "
+              "feed and combine_files will fail on this job's files until "
+              "reco_testbeam is rebuilt")
     if _MUPIX_TIMEWALK:
         # The all-pairs timewalk reads the time-ordered SMA hits as an optional
         # input: the sequencer stays gated on the MuPix hits alone, and a frame

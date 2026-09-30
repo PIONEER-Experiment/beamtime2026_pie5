@@ -49,14 +49,19 @@ def knobs_from_header(header):
     return knobs, readback
 
 
-#: The maps sent to the service, in its order: x-x', y-y', x-y.  For now the
-#: unweighted 128x128 MuPix monitor maps; they have to be switched again (to
-#: the maps on the minitwin's window) before the minitwin runs on them.
-#: combine_files merges the same list.
+#: The maps sent to the service, in its order: x-x', y-y', x-y.  The MuPix
+#: monitor's L1/L2 coincidences on the minitwin's window
+#: (PSM_PHASE_SPACE_BINS over +-PSM_PHASE_SPACE_POS_RANGE_MM and
+#: +-PSM_PHASE_SPACE_SLOPE_RANGE_MRAD, the nearline job passes them): their
+#: own copies, so that the monitor's display maps (track_xy, xxp, yyp, binned
+#: on the pixel lattice) can change without touching the feed.  They are
+#: stage-weighted like the monitor's _w views (PSM_WEIGHT_STRATEGY, the
+#: PSM_POSITIONS_MM windows eroded by PSM_WEIGHT_MARGIN_MM): each bin holds a
+#: sum of weights with Sumw2, not a count.  combine_files merges the same list.
 miniTwin_histograms = [
-    "histograms/PIPSMMuPixMonitor/xxp",
-    "histograms/PIPSMMuPixMonitor/yyp",
-    "histograms/PIPSMMuPixMonitor/track_xy",
+    "histograms/PIPSMMuPixMonitor/xxp_mt",
+    "histograms/PIPSMMuPixMonitor/yyp_mt",
+    "histograms/PIPSMMuPixMonitor/xy_mt",
 ]
 
 #: bins per axis of an inline map

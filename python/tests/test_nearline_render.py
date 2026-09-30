@@ -74,8 +74,19 @@ def test_render_ignores_nl_light_in_the_callers_environment(tmp_path, monkeypatc
 
 # -- the rendered job, executed with stand-in Configurables -------------------
 
+class _EveryName:
+    """A property table that has every property, as an up-to-date build does."""
+
+    def __contains__(self, name):
+        return True
+
+
 class _Conf:
     """Records what the job file sets; an unset list property reads as []."""
+
+    @classmethod
+    def getDefaultProperties(cls):
+        return _EveryName()
 
     def __init__(self, *args, **kwargs):
         self.__dict__["_name"] = args[0] if args else type(self).__name__
