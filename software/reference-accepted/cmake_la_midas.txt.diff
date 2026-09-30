@@ -1,0 +1,4 @@
+92c92
+< OpenMP_gomp_LIBRARY:FILEPATH=/usr/lib/gcc/x86_64-redhat-linux/15/libgomp.so
+---
+> OpenMP_gomp_LIBRARY:FILEPATH=/usr/lib/gcc/x86_64-redhat-linux/16/libgomp.so

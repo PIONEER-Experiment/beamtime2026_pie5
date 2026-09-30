@@ -627,7 +627,17 @@ a negative prompt channel means `PIPSMRecoCore` uses `S1Channel`.
 
 ## Running it
 
-Start the analysis container and source the environment inside it:
+On pinky and piana, source the environment script of this repository. It sets
+up ROOT, Gaudi, MIDAS, the reco install and this repository's `python/` the
+same way on both hosts (piana: the stack `software/install.sh` built, see
+[`../../../software/README.md`](../../../software/README.md)), and strips an
+active conda env from the shell:
+
+```bash
+source <this repo>/software/env.sh
+```
+
+Elsewhere, start the analysis container and source the environment inside it:
 
 ```bash
 cd <your testbeam-env checkout> && ./start-midas-container.sh
@@ -635,12 +645,12 @@ docker exec -it testbeam-midas bash
 source /software/setup_container_env.sh
 pushd /software/root/install && source bin/thisroot.sh && popd
 source /simulation/docker/setenv.sh
+export PYTHONPATH=/workdir/beamtime2026_pie5/python:$PYTHONPATH
 ```
 
 ### Processing a file
 
 ```bash
-export PYTHONPATH=/workdir/beamtime2026_pie5/python:$PYTHONPATH
 python -m pioneer.nearline.process /workdir/scratch/online/run00175.mid.lz4 \
   --out-dir /workdir/scratch/nearline
 ```
@@ -667,7 +677,7 @@ one subrun file by hand.
 `--evt-max N` truncates, `--render-only` writes the `.py` and stops so you can
 edit it before running it, `--job PATH` renders some other copy of the job
 file, and `--light` renders the light job, the one a daemon started with
-`--light` runs (next section). If `gaudirun.py` is not on `PATH` it exits 2 and prints the three
+`--light` runs (next section). If `gaudirun.py` is not on `PATH` it exits 2 and prints the
 `source` lines above instead of a Gaudi import traceback.
 
 **Reproducing a run is running its `.py`:** `gaudirun.py run00175.py`. The
