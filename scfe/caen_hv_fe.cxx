@@ -165,6 +165,14 @@ namespace caen_hv {
    ///        that confirms it [ms]
    constexpr int kChStateSettleMs = 100;
 
+   /// @brief how long after PAR:ON / PAR:OFF the board may take to show it in
+   ///        STAT before the driver calls it "not executed". Measured on the
+   ///        DT1470ET: STAT still lacked ON 100 ms after an accepted PAR:ON
+   ///        and still had ON after an accepted PAR:OFF, both of which then
+   ///        did execute. The verdict is taken by the CMD_GET_STATUS polls
+   ///        (about one per second), never by blocking sc_thread.
+   constexpr auto kChStateVerdict = std::chrono::seconds(10);
+
    /// @brief longest message body this driver hands to cm_msg
    ///
    /// MIDAS's frontend printer memcpy()s the body into a char[160] without a
@@ -227,6 +235,13 @@ struct CAEN_HV_CHANNEL {
    /// @brief CMD_GET_STATUS calls left before POL is read again; 0 forces a
    ///        refresh on the next one (set at init and on every reconnect)
    int pol_countdown{0};
+
+   /// @brief an accepted PAR:ON (1) / PAR:OFF (0) that STAT did not show yet,
+   ///        -1 = none. Settled by caen_hv_chstate_verdict() on the next
+   ///        CMD_GET_STATUS polls. sc_thread only, like the rest of the cache.
+   int pending_chstate{-1};
+   /// @brief when that request was sent
+   std::chrono::steady_clock::time_point pending_since{};
 };
 
 /// @brief the internal information to run the FE
@@ -876,6 +891,8 @@ static bool caen_hv_mon_float(CAEN_HV_FE_INFO *info, int ch, const char *par,
    return true;
 }
 
+static void caen_hv_chstate_verdict(CAEN_HV_FE_INFO *info, int channel, DWORD word);
+
 /// @brief MON one channel parameter as an unsigned word (STAT)
 static bool caen_hv_mon_dword(CAEN_HV_FE_INFO *info, int ch, const char *par,
                               DWORD *out)
@@ -1208,6 +1225,7 @@ static INT caen_hv_fe_get(CAEN_HV_FE_INFO *info, INT channel, float *pvalue, INT
       if (caen_hv_mon_dword(info, channel, caen_hv::kParStat, &word)) {
          ch.stat = word;
          ch.stat_valid = true;
+         caen_hv_chstate_verdict(info, channel, word);
          *reinterpret_cast<DWORD *>(pvalue) = word;
          return FE_SUCCESS;
       }
@@ -1337,11 +1355,13 @@ static INT caen_hv_set_chstate(CAEN_HV_FE_INFO *info, INT channel, float value)
          }
          return FE_ERR_HW;
       }
-      if (is_on) {
+      // the cached STAT says nothing reliable while an earlier ON/OFF is
+      // still unsettled (the board shows it late), so no shortcut then
+      if (is_on && ch.pending_chstate < 0) {
          return FE_SUCCESS;   // already on, do not touch the output
       }
    } else {
-      if (ch.stat_valid && !is_on) {
+      if (ch.stat_valid && !is_on && ch.pending_chstate < 0) {
          return FE_SUCCESS;   // confirmed off, nothing to do
       }
       // state unknown: send OFF anyway, it can only make things safer
@@ -1359,6 +1379,11 @@ static INT caen_hv_set_chstate(CAEN_HV_FE_INFO *info, INT channel, float value)
    // set, VMON stays 0). An optimistic cache update would then report a
    // channel as on that is not, and keep ODB's ChState out of step with the
    // hardware. So always re-read STAT and believe only the board.
+   // The board also shows an executed ON/OFF only some time after the ack
+   // (measured: no ON bit 100 ms after an accepted PAR:ON that did execute),
+   // so only a front-switch refusal is final here; everything else is
+   // settled by caen_hv_chstate_verdict() on the following status polls,
+   // without blocking sc_thread.
    ss_sleep(caen_hv::kChStateSettleMs);
 
    DWORD word = 0;
@@ -1376,35 +1401,88 @@ static INT caen_hv_set_chstate(CAEN_HV_FE_INFO *info, INT channel, float value)
    }
    ch.stat = word;
    ch.stat_valid = true;
+   ch.pending_chstate = -1;     // a new request replaces an unsettled one
 
    bool now_on = (word & (1u << caen_hv::kStatOn)) != 0;
 
    if (want_on && !now_on) {
-      CAEN_HV_MSG(MERROR,
-             "ch %d: ON accepted, not executed (STAT %.32s)"
-             " - check front switch KILL/OFF/ON",
-             (int) channel, caen_hv::stat_text(word).c_str());
-      return FE_ERR_HW;
-   }
-
-   if (!want_on && now_on) {
-      // A channel that is ramping down is executing the OFF, that is not a
-      // failure. @todo confirm on hardware whether STAT clears bit 0 at once
-      // or only at the end of the ramp.
-      if (!(word & (1u << caen_hv::kStatRDwn))) {
-         if (caen_hv_may_log(info, "chstate_off_pending")) {
-            CAEN_HV_MSG(MERROR,
-                   "ch %d: OFF accepted but still reports ON (STAT %.32s)",
-                   (int) channel, caen_hv::stat_text(word).c_str());
-         }
+      // A front switch in OFF (DIS) or KILL is a definite no: the board acks
+      // PAR:ON and never executes it. Say so at once.
+      if (word & caen_hv::kStatSwitchMask) {
+         CAEN_HV_MSG(MERROR,
+                "ch %d: ON accepted, not executed (STAT %.32s)"
+                " - check front switch KILL/OFF/ON",
+                (int) channel, caen_hv::stat_text(word).c_str());
+         return FE_ERR_HW;
       }
+      // Otherwise the board may just not show it yet: it sets the ON bit
+      // some time after the ack. Let the next CMD_GET_STATUS polls decide.
+      ch.pending_chstate = 1;
+      ch.pending_since = std::chrono::steady_clock::now();
       return FE_SUCCESS;
    }
 
+   if (!want_on && now_on && !(word & (1u << caen_hv::kStatRDwn))) {
+      // still ON and not ramping down yet: the board may clear ON / set RDW
+      // only a little later, same as above
+      ch.pending_chstate = 0;
+      ch.pending_since = std::chrono::steady_clock::now();
+      return FE_SUCCESS;
+   }
+
+   // done, or executing (ramping down counts as executing the OFF)
    CAEN_HV_MSG(MINFO, "ch %d switched %.3s (STAT %.32s)",
           (int) channel, want_on ? "on" : "off",
           caen_hv::stat_text(word).c_str());
    return FE_SUCCESS;
+}
+
+/// @brief settle an ON/OFF that STAT did not show right after the command
+///
+/// Called with every good STAT read of CMD_GET_STATUS, i.e. on sc_thread.
+/// ON is confirmed by the ON bit, refused at once by a front switch bit (DIS
+/// or KILL), and called "not executed" only after caen_hv::kChStateVerdict.
+/// OFF is confirmed by ON clearing or by RDW (ramping down = executing).
+static void caen_hv_chstate_verdict(CAEN_HV_FE_INFO *info, int channel, DWORD word)
+{
+   CAEN_HV_CHANNEL &ch = info->channel[channel];
+   if (ch.pending_chstate < 0) {
+      return;
+   }
+   const bool want_on = (ch.pending_chstate == 1);
+   const bool on = (word & (1u << caen_hv::kStatOn)) != 0;
+   const bool done = want_on ? on : (!on || (word & (1u << caen_hv::kStatRDwn)));
+
+   if (done) {
+      ch.pending_chstate = -1;
+      CAEN_HV_MSG(MINFO, "ch %d switched %.3s (STAT %.32s)",
+             channel, want_on ? "on" : "off", caen_hv::stat_text(word).c_str());
+      return;
+   }
+   if (want_on && (word & caen_hv::kStatSwitchMask)) {
+      ch.pending_chstate = -1;
+      CAEN_HV_MSG(MERROR,
+             "ch %d: ON accepted, not executed (STAT %.32s)"
+             " - check front switch KILL/OFF/ON",
+             channel, caen_hv::stat_text(word).c_str());
+      return;
+   }
+   const auto waited = std::chrono::steady_clock::now() - ch.pending_since;
+   if (waited < caen_hv::kChStateVerdict) {
+      return;
+   }
+   ch.pending_chstate = -1;
+   const int secs = (int) std::chrono::duration_cast<std::chrono::seconds>(waited).count();
+   if (want_on) {
+      CAEN_HV_MSG(MERROR,
+             "ch %d: ON accepted, not executed after %d s (STAT %.32s)"
+             " - check front switch KILL/OFF/ON",
+             channel, secs, caen_hv::stat_text(word).c_str());
+   } else if (caen_hv_may_log(info, "chstate_off_pending")) {
+      CAEN_HV_MSG(MERROR,
+             "ch %d: OFF accepted but still reports ON after %d s (STAT %.32s)",
+             channel, secs, caen_hv::stat_text(word).c_str());
+   }
 }
 
 /// @brief CMD_SET_FIRST .. CMD_SET_LAST, all issued from MIDAS's sc_thread

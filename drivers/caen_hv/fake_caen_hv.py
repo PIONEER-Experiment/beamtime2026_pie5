@@ -8,6 +8,8 @@ serves the N1470-family ASCII protocol for ever.  Standard library only.
     ./fake_caen_hv.py --fault-current 5    # force IMON = 5 uA -> OVC/TRIP
     ./fake_caen_hv.py --local              # every SET answers LOC:ERR
     ./fake_caen_hv.py --pol -,+,+,- --stat-bits 8
+    ./fake_caen_hv.py --stat-delay 1.5     # PAR:ON/OFF take effect 1.5 s late
+    ./fake_caen_hv.py --stat-bits 0x800    # KILL: PAR:ON acked, never executed
 
 Every SET received is logged to stderr with a timestamp.
 """
@@ -50,6 +52,9 @@ class Channel:
     tripped: bool = False
     ovc_since: float | None = None
     extra_bits: int = 0
+    # an acknowledged PAR:ON (True) / PAR:OFF (False) waiting for --stat-delay:
+    # (switch on?, monotonic time it takes effect)
+    pending: tuple[bool, float] | None = None
 
     def stat(self) -> int:
         """Assemble the STAT word from the current state."""
@@ -86,6 +91,9 @@ class Board:
     load_ohm: float = 1e6
     fault_current: float | None = None
     clip_vset: bool = False
+    # seconds between the CMD:OK to PAR:ON/OFF and the switch showing in STAT
+    # (the real DT1470ET sets / clears the ON bit some time after the ack)
+    stat_delay: float = 0.0
     channels: list[Channel] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -95,6 +103,9 @@ class Board:
         now = time.monotonic()
         with self.lock:
             for ch in self.channels:
+                if ch.pending is not None and now >= ch.pending[1]:
+                    self._switch(ch, ch.pending[0])
+                    ch.pending = None
                 target = ch.vset if ch.on else 0.0
                 rate = ch.rup if target > ch.vmon else ch.rdw
                 delta = target - ch.vmon
@@ -248,15 +259,33 @@ class Board:
                     ch.trip = float(value)
                 elif par == "PDWN":
                     ch.pdwn = str(value)
-                elif par == "ON":
-                    ch.on = True
-                    ch.tripped = False
-                elif par == "OFF":
-                    ch.on = False
+                elif par in ("ON", "OFF"):
+                    want_on = par == "ON"
+                    if self.stat_delay > 0:
+                        ch.pending = (want_on, time.monotonic() + self.stat_delay)
+                    else:
+                        ch.pending = None
+                        self._switch(ch, want_on)
         self._log_set(fields)
         return proto.ok_reply(self.bd)
 
     # -- logging -----------------------------------------------------------
+    @staticmethod
+    def _switch(ch: Channel, on: bool) -> None:
+        """Execute PAR:ON / PAR:OFF (caller holds the lock).
+
+        A front switch in OFF (DIS) or KILL makes the real board acknowledge
+        PAR:ON and do nothing (caen_hv_fe.h, kStatSwitchMask); modelled here
+        with --stat-bits carrying DIS or KILL.
+        """
+        if on:
+            if ch.extra_bits & (proto.stat_bit("DIS") | proto.stat_bit("KILL")):
+                return
+            ch.on = True
+            ch.tripped = False
+        else:
+            ch.on = False
+
     def _log_set(self, fields: dict[str, str], refused: str = "") -> None:
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
         parts = [f"{k}:{v}" for k, v in fields.items() if k != "BD"]
@@ -341,6 +370,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="per-channel polarity, e.g. '-,+,+,-'")
     parser.add_argument("--local", action="store_true",
                         help="board in LOCAL mode: every SET answers LOC:ERR")
+    parser.add_argument("--stat-delay", type=float, default=0.0, metavar="S",
+                        help="PAR:ON/OFF show in STAT only S seconds after the ack")
     parser.add_argument("--clip-vset", action="store_true",
                         help="clip SET VSET to MAXV instead of answering VAL:ERR")
     return parser
@@ -349,7 +380,8 @@ def build_parser() -> argparse.ArgumentParser:
 def board_from_args(args: argparse.Namespace) -> Board:
     board = Board(bdname=args.bdname, nch=args.nch, bd=args.bd,
                   local=args.local, load_ohm=args.load_ohm,
-                  fault_current=args.fault_current, clip_vset=args.clip_vset)
+                  fault_current=args.fault_current, clip_vset=args.clip_vset,
+                  stat_delay=args.stat_delay)
     pols = [p.strip() for p in args.pol.split(",")] if args.pol else []
     for i in range(args.nch):
         pol = pols[i] if i < len(pols) and pols[i] in ("+", "-") else "+"

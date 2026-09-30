@@ -100,6 +100,7 @@ static const hv_alarm_driver_t caen_hv_alarm = {
    .is_ramping          = nullptr,
    .default_deviation_hold_s = 0,
    .on_while_off_check  = false,   /* CAEN has a real ON bit and a real ChState */
+   .off_stat_text       = nullptr,
 };
 
 /* The same for the iseg NHQ. Bits, names and the fault mask come from
@@ -124,6 +125,14 @@ static const hv_alarm_driver_t iseg_hv_alarm = {
    /* ChState is emulated on the set point (D = 0 is "off"), so voltage from
       a front-panel or CLI change while MIDAS says OFF needs its own alarm */
    .on_while_off_check  = true,
+   /* the NHQ says "ON" whenever the output has reached its set point, also at
+      D = 0: "board says off (STAT ON)" would read as a contradiction, so say
+      what it means */
+   .off_stat_text       = [](DWORD st) -> std::string {
+      if ((st & (1u << iseg_nhq::kStatOn)) && !(st & (1u << iseg_nhq::kStatDSet)))
+         return "ON, D=0";
+      return iseg_nhq::stat_text(st);
+   },
 };
 
 /* hv_alarm.cxx treats a ChStatus word whose bits 23-30 are all set (a float

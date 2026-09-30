@@ -99,6 +99,12 @@ struct hv_alarm_driver_t {
    /// is_ramping. Latched like the deviation check. No ODB key. FALSE: not
    /// checked.
    bool on_while_off_check;
+
+   /// optional: the status text for the "ChState ON but board says off
+   /// (STAT ...)" message, where a device can say more than stat_text (the
+   /// iseg reports "ON" at a 0 V set point, which reads as a contradiction
+   /// there). nullptr: stat_text is used.
+   std::string (*off_stat_text)(DWORD stat);
 };
 
 /// @brief Create the ODB records for one equipment and register it.
