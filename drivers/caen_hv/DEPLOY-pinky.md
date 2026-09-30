@@ -140,6 +140,23 @@ tree can stay (harmless) — if you delete it, also delete `/History/Links/Syste
 otherwise **mlogger refuses to start** on a dangling link (REGISTRY.md). `/Custom/CaenHV` can
 simply be deleted. The board keeps its own settings; nothing on it needs undoing.
 
+## The IsegHV equipment and the shared alarm class
+
+A second HV equipment, `IsegHV` (event ID 9, the iseg NHQ 208L for the S5 PMT), runs in the
+same `scfe` binary. Its first hardware test on pinky is in `drivers/iseg_nhq/DEPLOY-pinky.md`
+(not yet hardware-tested). Its build and rollback are separate from the steps above.
+
+The alarm module `scfe/hv_alarm.cxx` now serves both equipments, and both use the one class
+`/Alarms/Classes/HV Alarm`:
+
+* The class's `System message interval` (60 s) is shared. Alarms from `CaenHV` and `IsegHV`
+  inside the same minute give one TALK line, naming only the first (file header of
+  `scfe/hv_alarm.cxx`). Every alarm is still in `/Alarms/Alarms/<name>` and on the mhttpd banner.
+* Alarm bodies are clipped to fit the class's `Execute` command (the Slack script), so the
+  160-byte message buffer in `mfe.cxx` cannot overflow (`alarm_msg_limit()` in `hv_alarm.cxx`).
+* If you copy the Slack `Execute command` into `HV Alarm` (section 3), both equipments post to Slack.
+  `/Equipment/IsegHV/Settings/Alarm/Enabled` = `n` silences only `IsegHV`.
+
 ## Known MIDAS issues you will hit (documented, worked around, to be reported upstream)
 
 1. `mfe.cxx:1348-1357 message_print()` copies every `cm_msg` into a 160-byte stack buffer without
