@@ -1,35 +1,51 @@
 # MIDAS custom pages
 
-## `caenhv.html` — CAEN DT1470ET high voltage
+## `caenhv.html` — HV (CAEN DT1470ET and iseg NHQ S5)
 
-Operator page for the 4-channel `CaenHV` slow-control equipment: one row per
-channel with VSET / VMON / ISET / IMON / MAXV, an on/off checkbox, a decoded
-STAT word and the per-channel alarm state, plus a small read-only table of the
-ramp speeds and trip times.
+Operator page titled **HV**, still served as `caenhv.html` so the existing
+`/Custom/CaenHV` key keeps working. It has two tables, built by a config-driven
+builder in the page (`HV_EQUIPMENT`, one entry per equipment, `hv_build()`):
 
-Everything it shows comes from `/Equipment/CaenHV/...` and `/Alarms/Alarms/...`.
-The page writes only to three keys, all through the normal MIDAS controls:
+* **CAEN DT1470ET high voltage** (`CaenHV`, 4 channels): one row per channel with
+  VSET / VMON / ISET / IMON / MAXV, an on/off checkbox, a decoded STAT word and the
+  per-channel alarm state, plus a small read-only table of the ramp speeds and trip
+  times. Unchanged from before.
+* **iseg NHQ 208L - S5 PMT** (`IsegHV`, 1 channel): VSET / VMON / Trip [uA] / IMON /
+  V limit / Ramp [V/s] (read only), on/off checkbox, decoded status, alarm state, a
+  comm-alarm line and a line with the alarm thresholds, unit channel and ceiling.
+  Its status colours are listed in `drivers/iseg_nhq/README.md` (shifter guide).
 
-| control | ODB key | how |
+Adding an equipment means adding an entry to `HV_EQUIPMENT` (columns, decode
+function, confirm text) and, for a new status word, its bit table.
+
+Everything it shows comes from `/Equipment/CaenHV/...`, `/Equipment/IsegHV/...` and
+`/Alarms/Alarms/...`. The page writes only through the normal MIDAS controls:
+
+| control | ODB key (`<eq>` = `CaenHV` or `IsegHV`) | how |
 | --- | --- | --- |
-| VSET | `/Equipment/CaenHV/Variables/Demand[i]` | `modbvalue` inline edit (click, type, Enter) |
-| ISET | `/Equipment/CaenHV/Settings/Current Limit[i]` | `modbvalue` inline edit |
-| MAXV | `/Equipment/CaenHV/Settings/Voltage Limit[i]` | `modbvalue` inline edit |
-| On/Off | `/Equipment/CaenHV/Variables/ChState[i]` | checkbox; switching **on** asks for confirmation first |
+| VSET | `/Equipment/<eq>/Variables/Demand[i]` | `modbvalue` inline edit (click, type, Enter) |
+| ISET / Trip | `/Equipment/<eq>/Settings/Current Limit[i]` | `modbvalue` inline edit |
+| MAXV / V limit | `/Equipment/<eq>/Settings/Voltage Limit[i]` | `modbvalue` inline edit |
+| On/Off | `/Equipment/<eq>/Variables/ChState[i]` | checkbox; switching **on** asks for confirmation first |
 
-Switching a channel on pops up a `dlgConfirm` that also reminds the operator
-that a channel whose front-panel switch is in OFF or KILL (status `DIS` /
-`KILL`) will not come on: the board acknowledges `PAR:ON` and silently does
-nothing. Switching off is immediate, no confirmation.
+Switching a channel on pops up a `dlgConfirm`. For CAEN it reminds the operator that a
+channel whose front-panel switch is in OFF or KILL (status `DIS` / `KILL`) will not
+come on: the board acknowledges `PAR:ON` and silently does nothing. For the S5 channel
+it names the HV-ON switch, the CONTROL switch and autostart. Switching off is
+immediate, no confirmation.
 
 `IMON` shows `n/a` while the driver's "never read" sentinel (`-1`) is in
 `Variables/Current`. The decoded Status, Alarm, Pol, Name and IMON cells are
 refreshed by the page's own 1 s `mjsonrpc_db_get_values` poll; the plain
 numeric cells are `modbvalue` and are refreshed by mhttpd itself.
 
-STAT bit numbers are duplicated in the page's `HV_BITS` array. The single
-source of truth is `scfe/caen_hv_fe.h` (`enum stat_bit_t`) — if a bit moves
-there, move it here too.
+The page opens under the name of the `/Custom` key it was reached by (`?page=`),
+so the left menu highlights `CaenHV` on pinky and `HV-test` during the first
+S5 hardware test (`drivers/iseg_nhq/DEPLOY-pinky.md`).
+
+Status bit numbers are duplicated in the page: `CAEN_BITS` for CaenHV (single
+source of truth `scfe/caen_hv_fe.h`, `enum stat_bit_t`) and `ISEG_BIT` for IsegHV
+(`scfe/iseg_nhq_fe.h`, `enum stat_bit_t`). If a bit moves there, move it here too.
 
 ### ODB registration
 

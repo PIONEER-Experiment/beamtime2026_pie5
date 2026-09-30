@@ -6,54 +6,21 @@
    <script src="controls.js"></script>
    <script src="midas.js"></script>
    <script src="mhttpd.js"></script>
-   <title>CaenHV</title>
+   <title>HV</title>
 </head>
 
-<body class="mcss" onload="hv_build_rows(); mhttpd_init('CaenHV'); hv_start();">
+<!-- The sidenav highlights the /Custom key this page was opened under: CaenHV
+     on pinky (/Custom/CaenHV), HV in the laptop prototype (/Custom/HV). -->
+<body class="mcss" onload="hv_build(); mhttpd_init(hv_page_name()); hv_start();">
 
 <div id="mheader"></div>
 <div id="msidenav"></div>
 
-<div id="mmain">
-
-   <table class="mtable">
-      <tr><th class="mtableheader" colspan="11">CAEN DT1470ET high voltage</th></tr>
-      <tr>
-         <th>Ch</th><th>Name</th><th>Pol</th>
-         <th>VSET [V]</th><th>VMON [V]</th>
-         <th>ISET [uA]</th><th>IMON [uA]</th>
-         <th>MAXV [V]</th>
-         <th>On/Off</th><th>Status</th><th>Alarm</th>
-      </tr>
-      <!-- rows are generated in hv_build_rows() so the four channels stay in sync -->
-      <tbody id="hv_rows"></tbody>
-   </table>
-
-   <div style="margin:8px 0;">
-      Board: comm alarm <span id="hv_comm">?</span> &nbsp;|&nbsp;
-      HV alarms enabled <span class="modbvalue" data-odb-path="/Equipment/CaenHV/Settings/Alarm/Enabled"></span>
-   </div>
-
-   <table class="mtable">
-      <tr><th class="mtableheader" colspan="4">Ramp and trip settings (read-only here)</th></tr>
-      <tr><th>Ch</th><th>Ramp up [V/s]</th><th>Ramp down [V/s]</th><th>Trip time [s]</th></tr>
-      <tbody id="hv_ramp"></tbody>
-   </table>
-
-</div>
+<!-- one block per entry of HV_EQUIPMENT, generated in hv_build() so the rows
+     of an equipment stay in sync with its channel count -->
+<div id="mmain"></div>
 
 <script>
-   const HV_NCH = 4;
-   const VAR = "/Equipment/CaenHV/Variables/";
-   const SET = "/Equipment/CaenHV/Settings/";
-
-   // STAT bit names, from scfe/caen_hv_fe.h (single source of truth there)
-   const HV_BITS = ["ON", "RUP", "RDW", "OVC", "OVV", "UNV", "MAXV",
-                    "TRIP", "OVP", "OVT", "DIS", "KILL", "ILK", "NOCAL"];
-   const HV_STALE_BIT = 31;                 // driver flag: last STAT read failed
-   const HV_NEVER_POLLED = 0x7FC00000;      // ChStatus value before the first poll
-   const HV_FAULT = ["OVC", "OVV", "UNV", "MAXV", "TRIP", "OVP", "OVT", "ILK"];
-
    // DWORDs arrive as hex strings ("0x00000800") from db_copy/db_get_values but
    // as plain numbers from some paths, so accept both.
    function hv_int(v) {
@@ -64,79 +31,51 @@
       return parseInt(s, 10);
    }
 
-   function hv_build_rows() {
-      let rows = "";
-      let ramp = "";
-      for (let i = 0; i < HV_NCH; i++) {
-         rows +=
-            "<tr>" +
-            "<td>" + i + "</td>" +
-            "<td id='hv_name" + i + "'>-</td>" +
-            "<td id='hv_pol" + i + "' style='text-align:center'>-</td>" +
-            "<td class='modbvalue' data-odb-path='" + VAR + "Demand[" + i + "]'" +
-            " data-format='%f1' data-odb-editable='1'></td>" +
-            "<td class='modbvalue' data-odb-path='" + VAR + "Measured[" + i + "]'" +
-            " data-format='%f1'></td>" +
-            "<td class='modbvalue' data-odb-path='" + SET + "Current Limit[" + i + "]'" +
-            " data-format='%f1' data-odb-editable='1'></td>" +
-            "<td id='hv_imon" + i + "'>-</td>" +
-            "<td class='modbvalue' data-odb-path='" + SET + "Voltage Limit[" + i + "]'" +
-            " data-format='%f0' data-odb-editable='1'></td>" +
-            "<td style='text-align:center'>" +
-            "<input type='checkbox' class='modbcheckbox' data-ch='" + i + "'" +
-            " data-odb-path='" + VAR + "ChState[" + i + "]' data-validate='hv_switch'>" +
-            "</td>" +
-            "<td id='hv_stat" + i + "'>-</td>" +
-            "<td id='hv_alarm" + i + "'></td>" +
-            "</tr>";
-         ramp +=
-            "<tr><td>" + i + "</td>" +
-            "<td class='modbvalue' data-odb-path='" + SET + "Ramp Up Speed[" + i + "]' data-format='%f0'></td>" +
-            "<td class='modbvalue' data-odb-path='" + SET + "Ramp Down Speed[" + i + "]' data-format='%f0'></td>" +
-            "<td class='modbvalue' data-odb-path='" + SET + "Trip Time[" + i + "]' data-format='%f0'></td></tr>";
-      }
-      document.getElementById("hv_rows").innerHTML = rows;
-      document.getElementById("hv_ramp").innerHTML = ramp;
+   function hv_page_name() {
+      let p = new URLSearchParams(window.location.search).get("page");
+      return p ? p : "CaenHV";
    }
 
-   // modbcheckbox validator: always returns false, so mhttpd does not write the
-   // value itself and re-reads the box from the ODB; we write ChState only after
-   // the operator has confirmed.
-   function hv_switch(checked, el) {
-      let ch = parseInt(el.dataset.ch);
-      let path = VAR + "ChState[" + ch + "]";
-      if (!checked) {
-         modbset(path, 0);
-         return false;
-      }
-      dlgConfirm("Switch channel " + ch + " ON?<br><br>" +
-         "The channel will ramp to its VSET at the ramp-up speed shown below.<br>" +
-         "If the front-panel switch of this channel is in OFF or KILL " +
-         "(status DIS / KILL) the board acknowledges the command but the " +
-         "channel will <b>not</b> switch on.",
-         function (flag) {
-            if (flag) modbset(path, 1);
-         });
-      return false;
+   // ChStatus before the first poll: cd_hv's float NaN copied bit for bit,
+   // 0x7FC00000 or, from 0.0/0.0 at run time, 0xFFC00000 (bit 31 set, which
+   // would otherwise read as "stale"). Any NaN pattern counts, the same rule
+   // as stat_is_unknown() in scfe/hv_alarm.cxx; no real status word sets
+   // bits 23-30 all at once.
+   function hv_never_polled(s) {
+      return (s & 0x7F800000) === 0x7F800000 && (s & 0x007FFFFF) !== 0;
    }
 
-   function hv_decode(statRaw) {
+   // names of the bits set in s; names[] is indexed by bit number, null = unused
+   function hv_bit_names(s, names) {
+      let out = [];
+      for (let b = 0; b < names.length; b++)
+         if (names[b] && (s & (1 << b))) out.push(names[b]);
+      return out;
+   }
+
+   /*---- CAEN DT1470ET ---------------------------------------------------*/
+
+   // STAT bit names, from scfe/caen_hv_fe.h (single source of truth there)
+   const CAEN_BITS = ["ON", "RUP", "RDW", "OVC", "OVV", "UNV", "MAXV",
+                      "TRIP", "OVP", "OVT", "DIS", "KILL", "ILK", "NOCAL"];
+   const CAEN_STALE_BIT = 31;               // driver flag: last STAT read failed
+   const CAEN_FAULT = ["OVC", "OVV", "UNV", "MAXV", "TRIP", "OVP", "OVT", "ILK"];
+
+   function caen_decode(statRaw) {
       let s = hv_int(statRaw);
       if (s === null || isNaN(s))
          return {text: "no data", colour: "#cccccc"};
-      if (s === HV_NEVER_POLLED)
+      if (hv_never_polled(s))
          return {text: "no data", colour: "#cccccc"};
 
-      let names = [];
-      for (let b = 0; b < HV_BITS.length; b++)
-         if (s & (1 << b)) names.push(HV_BITS[b]);
+      let names = hv_bit_names(s, CAEN_BITS);
 
-      if (s & (1 << HV_STALE_BIT)) {
+      if (s & (1 << CAEN_STALE_BIT)) {
          let t = names.length ? names.join("|") : "-";
          return {text: "stale (" + t + ")", colour: "#c8a2f0"};
       }
 
-      let fault = names.filter(n => HV_FAULT.indexOf(n) >= 0);
+      let fault = names.filter(n => CAEN_FAULT.indexOf(n) >= 0);
       if (fault.length)
          return {text: fault.join("|"), colour: "#f08080"};
 
@@ -156,65 +95,340 @@
       return {text: names.length ? names.join("|") : "off", colour: "#dddddd"};
    }
 
-   function hv_poll() {
-      let paths = [VAR + "ChStatus", VAR + "Polarity", VAR + "Current", SET + "Names"];
-      for (let i = 0; i < HV_NCH; i++)
-         paths.push("/Alarms/Alarms/CaenHV Ch" + i + "/Triggered");
-      paths.push("/Alarms/Alarms/CaenHV Comm/Triggered");
+   function caen_stat_title(sv) {
+      return "STAT = 0x" + ((sv === null || isNaN(sv)) ? "?" :
+         (sv >>> 0).toString(16).toUpperCase());
+   }
 
+   /*---- iseg NHQ 208L ---------------------------------------------------*/
+
+   // Variables/ChStatus bit numbers and names, copied from scfe/iseg_nhq_fe.h
+   // (enum iseg_nhq::stat_bit_t and kStatBitName in iseg_nhq_fe.cxx), the
+   // single source of truth. If a bit moves there, move it here too.
+   const ISEG_BIT = {
+      ON: 0, OFF: 1, MAN: 2, ERR: 3, INH: 4, QUA: 5, L2H: 6, H2L: 7, LAS: 8, TRP: 9,
+      S_UNKNOWN: 10,
+      T_MAN: 17, T_POS: 18, T_HVOFF: 19, T_KILL: 20, T_INH: 21, T_ERR: 22, T_QUA: 23,
+      AUTOSTART: 24, TOT: 25, DSET: 26,
+      STALE: 31                              // iseg_nhq::kStatStale
+   };
+   const ISEG_BITS = [];                     // indexed by bit number
+   for (let k in ISEG_BIT) ISEG_BITS[ISEG_BIT[k]] = k;
+   // iseg_nhq::kStatFaultMask
+   const ISEG_FAULT = ["ERR", "INH", "TRP", "S_UNKNOWN", "T_ERR", "T_INH", "AUTOSTART", "TOT"];
+   // plain words for the fault bits (T_ERR/T_INH say the same as ERR/INH)
+   const ISEG_FAULT_TEXT = {
+      TRP: "TRIPPED (current trip)", ERR: "Vmax/Imax exceeded", T_ERR: "Vmax/Imax exceeded",
+      INH: "INHIBIT", T_INH: "INHIBIT", S_UNKNOWN: "unknown status text",
+      TOT: "unit timeout (re-initialised)"
+   };
+
+   function iseg_decode(statRaw) {
+      let s = hv_int(statRaw);
+      if (s === null || isNaN(s))
+         return {text: "no data", colour: "#cccccc"};
+      if (hv_never_polled(s))
+         return {text: "no data", colour: "#cccccc"};
+
+      let names = hv_bit_names(s, ISEG_BITS);
+      let has = n => names.indexOf(n) >= 0;
+
+      if (has("STALE")) {
+         let t = names.filter(n => n !== "STALE");
+         return {text: "stale (" + (t.length ? t.join("|") : "-") + ")", colour: "#c8a2f0"};
+      }
+
+      if (has("AUTOSTART"))
+         return {text: "AUTOSTART armed — frontend read-only", colour: "#f08080"};
+
+      let fault = [];
+      for (let n of names)
+         if (ISEG_FAULT.indexOf(n) >= 0) {
+            let t = ISEG_FAULT_TEXT[n] || n;
+            if (fault.indexOf(t) < 0) fault.push(t);
+         }
+      if (fault.length)
+         return {text: fault.join(", "), colour: "#f08080"};
+
+      // what the output is doing, from the S text and the D readback
+      let state;
+      if (has("L2H")) state = "ramping up";
+      else if (has("H2L")) state = "ramping down";
+      else if (has("ON") && has("DSET")) state = "ON";
+      else if (has("ON")) state = "0 V set";
+      else state = null;
+
+      // front-panel switches: the unit ignores the interface (OFF / MAN) or
+      // will cut the output hard (KILL)
+      let panel = [];
+      if (has("OFF") || has("T_HVOFF")) panel.push("HV-ON switch off");
+      if (has("MAN") || has("T_MAN")) panel.push("manual (CONTROL not on DAC)");
+      if (has("T_KILL")) panel.push("KILL enabled");
+      if (panel.length) {
+         let t = panel.join(", ");
+         if (state && !has("OFF") && !has("MAN")) t += "; " + state;
+         return {text: t, colour: "#f0b060"};
+      }
+
+      if (state === "ramping up" || state === "ramping down" || state === "ON") {
+         if (has("QUA") || has("T_QUA")) state += " (QUA)";
+         return {text: state, colour: "#a0e0a0"};
+      }
+      if (state)                                   // ON at D = 0
+         return {text: state, colour: "#dddddd"};
+
+      let t = names.filter(n => n !== "T_POS");
+      return {text: t.length ? t.join("|") : "off", colour: "#dddddd"};
+   }
+
+   function iseg_stat_title(sv) {
+      if (sv === null || isNaN(sv)) return "ChStatus = 0x?";
+      let t = "ChStatus = 0x" + (sv >>> 0).toString(16).toUpperCase();
+      if (hv_never_polled(sv)) return t + "  (never polled)";
+      let n = hv_bit_names(sv, ISEG_BITS);
+      return t + "  " + (n.length ? n.join("|") : "none");
+   }
+
+   /*---- equipment table -------------------------------------------------*/
+
+   // cell helpers; v = "/Equipment/<eq>/Variables/", s = ".../Settings/"
+   function c_odb(path, fmt, editable) {
+      return "<td class='modbvalue' data-odb-path='" + path + "'" +
+         " data-format='" + fmt + "'" + (editable ? " data-odb-editable='1'" : "") + "></td>";
+   }
+   function c_id(e, what, i, style) {
+      return "<td id='" + e.eq + "_" + what + i + "'" + (style ? " style='" + style + "'" : "") + ">-</td>";
+   }
+   function c_switch(e, i) {
+      return "<td style='text-align:center'>" +
+         "<input type='checkbox' class='modbcheckbox' data-eq='" + e.eq + "' data-ch='" + i + "'" +
+         " data-odb-path='" + e.v + "ChState[" + i + "]' data-validate='hv_switch'>" +
+         "</td>";
+   }
+
+   // columns: [header, cell(e, i)]
+   const COL = {
+      ch:     ["Ch", (e, i) => "<td>" + i + "</td>"],
+      name:   ["Name", (e, i) => c_id(e, "name", i)],
+      pol:    ["Pol", (e, i) => c_id(e, "pol", i, "text-align:center")],
+      vset:   ["VSET [V]", (e, i) => c_odb(e.v + "Demand[" + i + "]", "%f1", true)],
+      vmon:   ["VMON [V]", (e, i) => c_odb(e.v + "Measured[" + i + "]", "%f1", false)],
+      iset:   ["ISET [uA]", (e, i) => c_odb(e.s + "Current Limit[" + i + "]", "%f1", true)],
+      itrip:  ["Trip [uA]", (e, i) => c_odb(e.s + "Current Limit[" + i + "]", "%f0", true)],
+      imon:   ["IMON [uA]", (e, i) => c_id(e, "imon", i)],
+      maxv:   ["MAXV [V]", (e, i) => c_odb(e.s + "Voltage Limit[" + i + "]", "%f0", true)],
+      vlim:   ["V limit [V]", (e, i) => c_odb(e.s + "Voltage Limit[" + i + "]", "%f0", true)],
+      ramp:   ["Ramp [V/s]", (e, i) => c_odb(e.s + "Ramp Up Speed[" + i + "]", "%f0", false)],
+      onoff:  ["On/Off", (e, i) => c_switch(e, i)],
+      status: ["Status", (e, i) => c_id(e, "stat", i)],
+      alarm:  ["Alarm", (e, i) => "<td id='" + e.eq + "_alarm" + i + "'></td>"]
+   };
+
+   // header tooltips for columns whose meaning differs from the CAEN one
+   const ISEG_TIPS = {
+      "Trip [uA]": "Settings/Current Limit: the unit's current trip L (1 uA steps, 0 = no trip). " +
+                   "Above it the output is shut off (status TRIPPED).",
+      "V limit [V]": "Settings/Voltage Limit: software ceiling for VSET; the lower of this, " +
+                     "the Vmax rotary switch and the driver's Max Voltage applies.",
+      "Ramp [V/s]": "Settings/Ramp Up Speed: the unit's one ramp register V, used up and down."
+   };
+
+   const HV_EQUIPMENT = [
+      {
+         eq: "CaenHV", nch: 4,
+         title: "CAEN DT1470ET high voltage",
+         columns: ["ch", "name", "pol", "vset", "vmon", "iset", "imon", "maxv", "onoff", "status", "alarm"],
+         decode: caen_decode, stat_title: caen_stat_title,
+         comm_label: "Board",
+         ramp_table: true,               // separate read-only ramp/trip table
+         extra_info: null,
+         confirm_on: function (e, ch) {
+            return "Switch channel " + ch + " ON?<br><br>" +
+               "The channel will ramp to its VSET at the ramp-up speed shown below.<br>" +
+               "If the front-panel switch of this channel is in OFF or KILL " +
+               "(status DIS / KILL) the board acknowledges the command but the " +
+               "channel will <b>not</b> switch on.";
+         }
+      },
+      {
+         eq: "IsegHV", nch: 1,
+         title: "iseg NHQ 208L — S5 PMT",
+         columns: ["name", "pol", "vset", "vmon", "itrip", "imon", "vlim", "ramp", "onoff", "status", "alarm"],
+         tips: ISEG_TIPS,
+         decode: iseg_decode, stat_title: iseg_stat_title,
+         comm_label: "Unit",
+         ramp_table: false,
+         device: "iseg NHQ",             // Settings/Devices/<device> (DEVICE_DRIVER name in scfe.cxx)
+         extra_info: function (e) {
+            let s = e.s, a = e.s + "Alarm/", d = e.s + "Devices/" + e.device + "/";
+            let v = (p, f) => "<span class='modbvalue' data-odb-path='" + p + "'" +
+               (f ? " data-format='" + f + "'" : "") + "></span>";
+            return "<div style='margin:0 0 8px 0;'>" +
+               "Alarm when IMON &gt; " + v(a + "Current Max[0]", "%f0") + " uA" +
+               " or |VSET − VMON| &gt; " + v(a + "Deviation Max[0]", "%f0") + " V for " +
+               v(a + "Deviation Hold s") + " s" +
+               " &nbsp;|&nbsp; unit channel " + v(d + "Hardware Channel") +
+               ", ceiling " + v(d + "Max Voltage", "%f0") + " V" +
+               "</div>";
+         },
+         confirm_on: function (e, ch) {
+            return "Switch S5 ON?<br><br>" +
+               "The unit ramps to VSET at the ramp speed shown in the table.<br>" +
+               "If the front-panel HV-ON switch is off, the CONTROL switch is on manual, " +
+               "or autostart is armed (status column), the frontend refuses and the " +
+               "output stays where it is; see the MIDAS messages.";
+         }
+      }
+   ];
+
+   for (let e of HV_EQUIPMENT) {
+      e.v = "/Equipment/" + e.eq + "/Variables/";
+      e.s = "/Equipment/" + e.eq + "/Settings/";
+   }
+
+   function hv_block(e) {
+      let cols = e.columns.map(c => COL[c]);
+      let h = "";
+      h += "<table class='mtable'>";
+      h += "<tr><th class='mtableheader' colspan='" + cols.length + "'>" + e.title + "</th></tr>";
+      h += "<tr>";
+      for (let c of cols) {
+         let tip = (e.tips && e.tips[c[0]]) ? " title='" + e.tips[c[0]] + "'" : "";
+         h += "<th" + tip + ">" + c[0] + "</th>";
+      }
+      h += "</tr><tbody>";
+      for (let i = 0; i < e.nch; i++) {
+         h += "<tr>";
+         for (let c of cols) h += c[1](e, i);
+         h += "</tr>";
+      }
+      h += "</tbody></table>";
+
+      h += "<div style='margin:8px 0;'>" +
+         e.comm_label + ": comm alarm <span id='" + e.eq + "_comm'>?</span> &nbsp;|&nbsp; " +
+         "HV alarms enabled <span class='modbvalue' data-odb-path='" + e.s + "Alarm/Enabled'></span>" +
+         "</div>";
+      if (e.extra_info) h += e.extra_info(e);
+
+      if (e.ramp_table) {
+         h += "<table class='mtable'>";
+         h += "<tr><th class='mtableheader' colspan='4'>Ramp and trip settings (read-only here)</th></tr>";
+         h += "<tr><th>Ch</th><th>Ramp up [V/s]</th><th>Ramp down [V/s]</th><th>Trip time [s]</th></tr>";
+         h += "<tbody>";
+         for (let i = 0; i < e.nch; i++)
+            h += "<tr><td>" + i + "</td>" +
+               c_odb(e.s + "Ramp Up Speed[" + i + "]", "%f0", false) +
+               c_odb(e.s + "Ramp Down Speed[" + i + "]", "%f0", false) +
+               c_odb(e.s + "Trip Time[" + i + "]", "%f0", false) + "</tr>";
+         h += "</tbody></table>";
+      }
+      return h;
+   }
+
+   function hv_build() {
+      let h = "";
+      for (let k = 0; k < HV_EQUIPMENT.length; k++) {
+         if (k > 0) h += "<div style='height:16px'></div>";
+         h += hv_block(HV_EQUIPMENT[k]);
+      }
+      document.getElementById("mmain").innerHTML = h;
+   }
+
+   function hv_eq(name) {
+      return HV_EQUIPMENT.find(e => e.eq === name);
+   }
+
+   // modbcheckbox validator: always returns false, so mhttpd does not write the
+   // value itself and re-reads the box from the ODB; we write ChState only after
+   // the operator has confirmed.
+   function hv_switch(checked, el) {
+      let e = hv_eq(el.dataset.eq);
+      let ch = parseInt(el.dataset.ch);
+      let path = e.v + "ChState[" + ch + "]";
+      if (!checked) {
+         modbset(path, 0);
+         return false;
+      }
+      dlgConfirm(e.confirm_on(e, ch),
+         function (flag) {
+            if (flag) modbset(path, 1);
+         });
+      return false;
+   }
+
+   function hv_paths(e) {
+      let paths = [e.v + "ChStatus", e.v + "Polarity", e.v + "Current", e.s + "Names"];
+      for (let i = 0; i < e.nch; i++)
+         paths.push("/Alarms/Alarms/" + e.eq + " Ch" + i + "/Triggered");
+      paths.push("/Alarms/Alarms/" + e.eq + " Comm/Triggered");
+      return paths;
+   }
+
+   function hv_show(e, d) {
+      // a one-element ODB array comes back as a bare value, not as [value]
+      let arr = x => Array.isArray(x) ? x : ((x === null || x === undefined) ? [] : [x]);
+      let stat = arr(d[0]), pol = arr(d[1]), cur = arr(d[2]), names = arr(d[3]);
+
+      for (let i = 0; i < e.nch; i++) {
+         // name: MIDAS "group%name" convention, show only the part after '%'
+         let nm = (typeof names[i] === "string") ? names[i] : "";
+         let k = nm.indexOf("%");
+         document.getElementById(e.eq + "_name" + i).textContent =
+            (k >= 0) ? nm.substring(k + 1) : nm;
+
+         let p = hv_int(pol[i]);
+         let pe = document.getElementById(e.eq + "_pol" + i);
+         pe.textContent = (p > 0) ? "+" : (p < 0) ? "−" : "?";
+         pe.title = "polarity " + p;
+
+         // IMON: the driver writes -1 when IMON was never read
+         let c = (cur[i] === undefined || cur[i] === null) ? null : Number(cur[i]);
+         document.getElementById(e.eq + "_imon" + i).textContent =
+            (c === null || isNaN(c)) ? "-" : (c < 0 ? "n/a" : c.toFixed(2));
+
+         let s = e.decode(stat[i]);
+         let se = document.getElementById(e.eq + "_stat" + i);
+         se.textContent = s.text;
+         se.style.backgroundColor = s.colour;
+         se.title = e.stat_title(hv_int(stat[i]));
+
+         // a missing alarm key returns null (status 312): treat as not triggered
+         let trg = hv_int(d[4 + i]);
+         let ae = document.getElementById(e.eq + "_alarm" + i);
+         if (trg) {
+            ae.textContent = "ALARM";
+            ae.style.backgroundColor = "#f08080";
+         } else {
+            ae.textContent = "";
+            ae.style.backgroundColor = "";
+         }
+      }
+
+      let comm = hv_int(d[4 + e.nch]);
+      let ce = document.getElementById(e.eq + "_comm");
+      if (comm === null) {
+         ce.textContent = "not defined";
+         ce.style.backgroundColor = "";
+      } else if (comm) {
+         ce.textContent = "TRIGGERED";
+         ce.style.backgroundColor = "#f08080";
+      } else {
+         ce.textContent = "ok";
+         ce.style.backgroundColor = "#a0e0a0";
+      }
+   }
+
+   function hv_poll() {
+      let paths = [], offs = [];
+      for (let e of HV_EQUIPMENT) {
+         offs.push(paths.length);
+         paths = paths.concat(hv_paths(e));
+      }
       mjsonrpc_db_get_values(paths).then(function (rpc) {
          let d = rpc.result.data;
-         let stat = d[0] || [], pol = d[1] || [], cur = d[2] || [], names = d[3] || [];
-
-         for (let i = 0; i < HV_NCH; i++) {
-            // name: MIDAS "group%name" convention, show only the part after '%'
-            let nm = (typeof names[i] === "string") ? names[i] : "";
-            let k = nm.indexOf("%");
-            document.getElementById("hv_name" + i).textContent =
-               (k >= 0) ? nm.substring(k + 1) : nm;
-
-            let p = hv_int(pol[i]);
-            let pe = document.getElementById("hv_pol" + i);
-            pe.textContent = (p > 0) ? "+" : (p < 0) ? "−" : "?";
-            pe.title = "polarity " + p;
-
-            // IMON: the driver writes -1 when IMON was never read
-            let c = (cur[i] === undefined || cur[i] === null) ? null : Number(cur[i]);
-            document.getElementById("hv_imon" + i).textContent =
-               (c === null || isNaN(c)) ? "-" : (c < 0 ? "n/a" : c.toFixed(2));
-
-            let s = hv_decode(stat[i]);
-            let se = document.getElementById("hv_stat" + i);
-            se.textContent = s.text;
-            se.style.backgroundColor = s.colour;
-            let sv = hv_int(stat[i]);
-            se.title = "STAT = 0x" + ((sv === null || isNaN(sv)) ? "?" :
-               (sv >>> 0).toString(16).toUpperCase());
-
-            // a missing alarm key returns null (status 312): treat as not triggered
-            let trg = hv_int(d[4 + i]);
-            let ae = document.getElementById("hv_alarm" + i);
-            if (trg) {
-               ae.textContent = "ALARM";
-               ae.style.backgroundColor = "#f08080";
-            } else {
-               ae.textContent = "";
-               ae.style.backgroundColor = "";
-            }
-         }
-
-         let comm = hv_int(d[4 + HV_NCH]);
-         let ce = document.getElementById("hv_comm");
-         if (comm === null) {
-            ce.textContent = "not defined";
-            ce.style.backgroundColor = "";
-         } else if (comm) {
-            ce.textContent = "TRIGGERED";
-            ce.style.backgroundColor = "#f08080";
-         } else {
-            ce.textContent = "ok";
-            ce.style.backgroundColor = "#a0e0a0";
-         }
+         HV_EQUIPMENT.forEach(function (e, k) {
+            hv_show(e, d.slice(offs[k], offs[k] + 5 + e.nch));
+         });
       }).catch(function (error) {
          mjsonrpc_error_alert(error);
       });
