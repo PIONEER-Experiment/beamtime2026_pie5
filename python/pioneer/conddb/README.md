@@ -159,14 +159,14 @@ neither means open-ended. Nothing is written without `--write`.
 ## The MuPix timewalk constants
 
 `mupix_timewalk` holds the per-chip walk curves `PIPSMMuPixTimewalkCorrection`
-applies when it copies `/Event/muquad` to `/Event/muquad_twc` (job option
-`applyTimewalkCorrection`, on by default): every pixel time of a listed chip
-becomes t - W(ToT). W is the peak of dt = t(pixel) - t(S1) against the pixel
-ToT, in ns, so it includes the chip's constant offset from S1 and the
-corrected dt is about 0 at every ToT. It lives in
+applies when it writes the hits of `/Event/muquad`, corrected and in time order,
+to `/Event/muquad_twc` (job option `applyTimewalkCorrection`, on by default):
+every pixel time of a listed chip becomes t - W(ToT). W is the peak of
+dt = t(pixel) - t(S1) against the pixel ToT, in ns, so it includes the chip's
+constant offset from S1 and the corrected dt is about 0 at every ToT. It lives in
 `reco_testbeam/conditions/bt2026_psm_readout_map.json` and ships empty on
-[0, open) under the default tag `bt2026-timewalk`, which makes the correction a
-plain copy. It is a `parameter_set` of parallel arrays:
+[0, open) under the default tag `bt2026-timewalk`, which leaves every time, and
+so the order, as it was. It is a `parameter_set` of parallel arrays:
 
 | key | what |
 |---|---|

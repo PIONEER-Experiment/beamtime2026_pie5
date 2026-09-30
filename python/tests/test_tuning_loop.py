@@ -1275,17 +1275,19 @@ def test_a_target_off_centre_is_a_warning_not_a_refusal():
 
 from tuning_fakes import FakeTH2, fake_root  # noqa: E402
 
-XXP, YYP, XY = ("histograms/PIPSMMuPixMonitor/xxp", "histograms/PIPSMMuPixMonitor/yyp",
-                "histograms/PIPSMMuPixMonitor/track_xy")
-X_RANGE, PX_RANGE = (-37.48, 3.48), (-1365.0, 1365.0)
-Y_RANGE, PY_RANGE = (-20.48, 20.48), (-1333.0, 1333.0)
+XXP, YYP, XY = ("histograms/PIPSMMuPixMonitor/xxp_mt", "histograms/PIPSMMuPixMonitor/yyp_mt",
+                "histograms/PIPSMMuPixMonitor/xy_mt")
+# The monitor's *_mt maps as the nearline job books them: PSM_PHASE_SPACE_BINS
+# (320) over +-PSM_PHASE_SPACE_POS_RANGE_MM and +-_SLOPE_RANGE_MRAD.
+X_RANGE, PX_RANGE = (-37.0, 37.0), (-950.0, 950.0)
+Y_RANGE, PY_RANGE = (-37.0, 37.0), (-950.0, 950.0)
 
 
 def mupix_maps(counts=1000.0, at_x=-10.0):
     return {
-        XXP: FakeTH2.blob(128, 128, X_RANGE, PX_RANGE, (at_x, 100.0), counts),
-        YYP: FakeTH2.blob(128, 128, Y_RANGE, PY_RANGE, (5.0, -200.0), counts),
-        XY: FakeTH2.blob(128, 128, X_RANGE, Y_RANGE, (at_x, 5.0), counts),
+        XXP: FakeTH2.blob(320, 320, X_RANGE, PX_RANGE, (at_x, 100.0), counts),
+        YYP: FakeTH2.blob(320, 320, Y_RANGE, PY_RANGE, (5.0, -200.0), counts),
+        XY: FakeTH2.blob(320, 320, X_RANGE, Y_RANGE, (at_x, 5.0), counts),
     }
 
 
@@ -1987,7 +1989,7 @@ def test_inline_maps_are_labelled(monkeypatch):
     assert inline["names"] == [XXP, YYP, XY]
     assert inline["source"] == "daemon"
     assert inline["n_files"] == 3
-    assert inline["rebin"] == 2
+    assert inline["rebin"] == 5
     assert set(inline) == {"maps", "axes", "names", "source", "n_files", "rebin"}
     assert inline["axes"] == {"x": list(X_RANGE), "px": list(PX_RANGE),
                               "y": list(Y_RANGE), "py": list(PY_RANGE)}
@@ -1999,7 +2001,7 @@ def test_rebin_is_listed_per_map_when_the_maps_differ():
     maps = mupix_maps()
     maps[YYP] = FakeTH2.blob(320, 128, Y_RANGE, PY_RANGE, (5.0, 0.0))
     inline = inline_maps([maps[XXP], maps[YYP], maps[XY]])
-    assert inline["rebin"] == [[2, 2], [5, 2], [2, 2]]
+    assert inline["rebin"] == [[5, 5], [5, 2], [5, 5]]
 
 
 def test_inconsistent_axes_post_files_only_with_an_error(monkeypatch):

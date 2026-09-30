@@ -7,6 +7,10 @@ shifter gets exactly the artefacts the daemon would have produced -- the same
 <filebase>.py, .root and _hists.root, from the same renderer -- without a
 database, a scheduler or a hand-written NL_MIDAS line.
 
+--light renders the light job, as a daemon started with --light does (pinky):
+histograms only, so the artefacts are the <filebase>.py and the _hists.root, and
+no RNTuple.
+
 Because the rendered job ignores NL_*, the .py left in the output directory
 re-runs the same processing later whatever the environment then says; and
 because it is rendered HERE, NL_CONDITIONS_DIR and NL_PG in this shell are
@@ -60,9 +64,14 @@ def main(argv=None) -> int:
         description="Render and run the nearline job on one MIDAS file.")
     parser.add_argument("midas_file", help="the MIDAS file to process (.mid or .mid.lz4)")
     parser.add_argument("--out-dir", default=".",
-                        help="directory for the .py, .root and _hists.root (default: here)")
+                        help="directory for the .py, .root and _hists.root (default: here; "
+                             "no .root with --light)")
     parser.add_argument("--evt-max", type=int, default=-1,
                         help="events to process; -1 (default) is the whole file")
+    parser.add_argument("--light", action="store_true",
+                        help="the light job, as the daemon with --light runs it: histograms "
+                             "only, no RNTuple, no timewalk histograms, no wide SMA dt plot, "
+                             "no SMA raw-word diagnostics")
     parser.add_argument("--render-only", action="store_true",
                         help="write the rendered job and stop, without running it")
     parser.add_argument("--job", default=None,
@@ -80,10 +89,12 @@ def main(argv=None) -> int:
     out_file = out_dir / f"{filebase}.root"
     rendered = render_job(midas_file, out_file, evt_max=args.evt_max,
                           job_id="manual", run_id=run_id_of(filebase),
-                          job_source=args.job)
+                          light=args.light, job_source=args.job)
 
     print(f"[process] job        {rendered}")
-    print(f"[process] rntuple    {out_file}")
+    # The out_file is still the name the histogram file is derived from, but the
+    # light job never writes it.
+    print(f"[process] rntuple    {'no RNTuple (light)' if args.light else out_file}")
     print(f"[process] histograms {out_dir / f'{filebase}_hists.root'}")
 
     if args.render_only:
