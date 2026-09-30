@@ -893,6 +893,16 @@ static bool caen_hv_mon_dword(CAEN_HV_FE_INFO *info, int ch, const char *par,
       }
       return false;
    }
+   // STAT is a 16-bit word (bits 0..13 defined). Anything larger is a garbled
+   // reply; treating it as a parse error makes the word go stale instead of
+   // letting high bits reach Variables/ChStatus, where bits 23..30 all set
+   // would read as a float NaN, i.e. "never read" (hv_alarm.cxx)
+   if (ul > 0xFFFFul) {
+      if (caen_hv_may_log(info, "parse")) {
+         CAEN_HV_MSG(MERROR, "PAR:%.8s CH:%d out of range '%.20s'", par, ch, val->c_str());
+      }
+      return false;
+   }
    *out = (DWORD) ul;
    return true;
 }
