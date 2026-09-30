@@ -155,6 +155,13 @@ namespace iseg_nhq {
 /// M<n> read shows the ceiling dropped below ODB's value, but never below the
 /// D of a unit that is on (cd_hv's clamp would then ramp it down).
 ///
+/// A ChState ON that is refused or fails (no demand or Demand 0, front panel
+/// OFF/MAN, autostart, ceiling, no link, a switch-on undone after G failed)
+/// writes ChState 0 back into Variables/ChState[0] (from sc_thread; cd_hv's
+/// echo of it is dropped silently), so the box does not stay ticked on a
+/// channel that is off. ChState is never touched while the unit is on, and a
+/// refused OFF leaves it alone.
+///
 /// While on, a Demand change is refused when the S word shows TRP/ERR/INH
 /// (a G would release the shut-off: switch ChState 0 then 1), and when ODB's
 /// ChState shows 0 for a unit the driver found on. A ChState 0 that arrives
