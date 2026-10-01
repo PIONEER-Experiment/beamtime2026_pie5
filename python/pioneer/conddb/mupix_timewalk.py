@@ -86,16 +86,27 @@ that already holds constants also needs ``--replace``: its constants are
 dropped in the overlap (a union makes no sense, a chip has one curve).
 Nothing is written that the C++ layer would reject (validate()).
 
-``--write`` edits the git-tracked container in reco_testbeam/conditions (the
-default location); commit it there. ``--table-out`` writes a container of
-this table alone for the database loaders:
+``--db [CONNINFO]`` works on the conditions database, where constants are
+written first during the 2026 beamtime (default CONNINFO
+``service=pioneer-conditions-admin``; the password comes from ~/.pgpass). It
+behaves as in ``mupix_mask``: the table and the chip map are read with
+cond_export.export_table(), the same edit is applied, and ``--write`` loads
+the whole resulting table (active intervals) through cond_loader in one
+transaction, then refreshes the JSON snapshot:
+
+    python -m pioneer.conddb.mupix_timewalk --db add twc_fit_run00459.json \\
+        --run-start 459 --last-run 459 --split --comment "..."           # dry run
+    python -m pioneer.conddb.mupix_timewalk --db add ... --write
+    python -m pioneer.conddb.mupix_timewalk --db show --run 459
+
+Without ``--db``, ``--write`` edits a container file: ``--conditions PATH`` (a
+directory means its bt2026_psm_readout_map.json), else $NL_CONDITIONS_DIR,
+else $PIONEERSYS/reco_testbeam/conditions, the git-tracked copy, to be
+committed there. That is the development path. ``--table-out`` also writes a
+container of this table alone (as written, or as loaded with --db):
 
     python -m pioneer.conddb.mupix_timewalk add ... --write --table-out /tmp/twc.json
-    python3 json2pg.py --docker testbeam-pgdb /tmp/twc.json
-
-The container is ``--conditions PATH`` (a directory means its
-bt2026_psm_readout_map.json), else $NL_CONDITIONS_DIR, else
-$PIONEERSYS/reco_testbeam/conditions.
+    python3 json2pg.py "host=... dbname=..." /tmp/twc.json
 
 Environment
 -----------
@@ -106,7 +117,6 @@ iminuit and uproot (or PyROOT when uproot is missing), and matplotlib for
 from __future__ import annotations
 
 import argparse
-import difflib
 import getpass
 import json
 import math
@@ -116,18 +126,22 @@ import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pioneer.conddb.mupix_mask import (
+from pioneer.conddb.mupix_mask import (  # noqa: F401 (CONTAINER, dump: the tests use them)
     CONTAINER,
     MaskError,
     _end,
     _min_end,
     _range,
+    add_db_argument,
     carve_out,
-    container_path,
+    commit_write,
+    db_argv,
     describe,
     dump,
+    open_source,
     resolve,
     select_tag,
+    show_diff,
     validate_table,
     vid_problems,
 )
@@ -1165,12 +1179,12 @@ def cmd_fit(args) -> int:
     return 0 if good else 1
 
 
-def _load_doc(conditions):
-    path = container_path(conditions)
-    doc = json.loads(path.read_text(encoding="utf-8"))
-    if TABLE not in doc:
-        raise TimewalkError(f"{path} has no table {TABLE}")
-    return path, doc
+def _load_doc(args):
+    """(Source, doc): the container of --conditions, or the database of --db."""
+    src = open_source(args, TABLE, ARRAYS + ("comment",))
+    if TABLE not in src.doc:
+        raise TimewalkError(f"{src.label} has no table {TABLE}")
+    return src, src.doc
 
 
 def cmd_add(args) -> int:
@@ -1179,7 +1193,7 @@ def cmd_add(args) -> int:
                             "--form or --skip-vid")
     if not args.empty and not args.input:
         raise TimewalkError("give a fit JSON, or --empty for an interval without constants")
-    path, doc = _load_doc(args.conditions)
+    src, doc = _load_doc(args)
     fit_warnings: list[str] = []
     if args.empty:
         chips, left_out, source = [], [], "none: --empty, no chip is corrected"
@@ -1210,8 +1224,7 @@ def cmd_add(args) -> int:
     if problems:
         raise TimewalkError("the table after the change would fail the correction:\n  "
                             + "\n  ".join(problems))
-    before, after = dump(doc), dump(new_doc)
-    print(f"container  {path}")
+    print(f"{src.what:<10} {src.label}")
     print(f"table      {TABLE}, tag '{tag}'")
     print(f"input      {input_text}")
     if left_out:
@@ -1230,28 +1243,19 @@ def cmd_add(args) -> int:
     print()
     print(f"constants of the new interval ({len(chips)} chip(s)):")
     print(chip_table(chips) if chips else "  none: the correction is a copy over this interval")
-    if not args.no_diff:
-        print()
-        sys.stdout.writelines(difflib.unified_diff(
-            before.splitlines(keepends=True), after.splitlines(keepends=True),
-            fromfile=str(path), tofile=str(path), n=2))
+    after = show_diff(src, TABLE, doc, new_doc, args)
     print()
     if not args.write:
         print("dry run: nothing written. Add --write to apply.")
         return 0
-    path.write_text(after, encoding="utf-8")
-    print(f"written: {path}")
-    if args.table_out:
-        out = Path(args.table_out)
-        out.write_text(dump({TABLE: new_table}), encoding="utf-8")
-        print(f"written: {out} (this table alone, for json2pg.py / json2sqlite.py)")
+    commit_write(src, TABLE, new_table, after, args.table_out)
     return 0
 
 
 def cmd_show(args) -> int:
-    path, doc = _load_doc(args.conditions)
+    src, doc = _load_doc(args)
     table = doc[TABLE]
-    print(f"container  {path}")
+    print(f"{src.what:<10} {src.label}")
     print(describe(table, "n_chips", "chips"))
     if args.run is None:
         return 0
@@ -1267,9 +1271,9 @@ def cmd_show(args) -> int:
 
 
 def cmd_check(args) -> int:
-    path, doc = _load_doc(args.conditions)
+    src, doc = _load_doc(args)
     problems = validate(doc)
-    print(f"container  {path}")
+    print(f"{src.what:<10} {src.label}")
     if problems:
         print(f"{len(problems)} problem(s); the correction would fail on them:")
         for p in problems:
@@ -1284,9 +1288,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog=f"python -m {TOOL}", description=__doc__.splitlines()[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter,
                                  epilog=f"See the module docstring (pydoc {TOOL}).")
-    ap.add_argument("--conditions", metavar="PATH",
-                    help=f"conditions directory or container (default: $NL_CONDITIONS_DIR, else "
-                         f"$PIONEERSYS/reco_testbeam/conditions; a directory means its {CONTAINER})")
+    add_db_argument(ap)
     subs = ap.add_subparsers(dest="command", required=True)
 
     p = subs.add_parser("fit", help="fit the walk per chip from nearline _hists.root files")
@@ -1347,7 +1349,7 @@ def main(argv: list[str] | None = None) -> int:
     subs.add_parser("check", help="the correction's rules over every run: no gap or overlap in "
                                   "the default tag, every payload valid against the chip map")
 
-    args = ap.parse_args(argv)
+    args = ap.parse_args(db_argv(sys.argv[1:] if argv is None else list(argv)))
     try:
         return {"fit": cmd_fit, "add": cmd_add, "show": cmd_show,
                 "check": cmd_check}[args.command](args)

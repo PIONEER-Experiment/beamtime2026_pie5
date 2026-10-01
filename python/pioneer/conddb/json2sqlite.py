@@ -37,6 +37,8 @@ def main() -> int:
                     help="delete each named table first (dev databases only: "
                          "this discards the history already-written output files "
                          "point at)")
+    ap.add_argument("--force", action="store_true",
+                    help="load even if a table changed since the condtool export it came from")
     args = ap.parse_args()
 
     if args.replace:
@@ -45,7 +47,7 @@ def main() -> int:
 
     ex = make_executor(sqlite=args.database)
     try:
-        loaded = load(ex, args.containers, replace=args.replace)
+        loaded = load(ex, args.containers, replace=args.replace, force=args.force)
     except LoaderError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

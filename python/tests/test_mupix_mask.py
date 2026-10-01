@@ -567,3 +567,126 @@ def test_non_ascii_is_written_as_is(conditions, tmp_path):
     text = (conditions / mupix_mask.CONTAINER).read_text(encoding="utf-8")
     assert "5 µs bursts" in text and "\\u00b5" not in text
     assert mupix_mask.dump(json.loads(text)) == text
+
+
+# ---------------------------------------------------------------------------
+# --db: the database is read, edited and written back as a whole table
+
+@pytest.fixture
+def db(tmp_path):
+    """A SQLite conditions database holding the stand-in container."""
+    path = tmp_path / "db.sqlite"
+    ex = cond_loader.make_executor(sqlite=str(path))
+    cond_loader.load_tables(ex, [("fixture", _container())])
+    ex.close()
+    return f"sqlite:{path}"
+
+
+def _db_add(spec, *argv):
+    return main(["--db", spec, "add", *map(str, argv)])
+
+
+def _db_intervals(spec):
+    con = sqlite3.connect(spec[len("sqlite:"):])
+    rows = con.execute("SELECT row_id, run_start, run_end, is_active FROM cond_iov "
+                       "WHERE table_name = 'mupix_pixel_mask' ORDER BY row_id").fetchall()
+    con.close()
+    return rows
+
+
+def _db_mask_at(spec, run):
+    from pioneer.conddb import cond_export
+    table = cond_export.export_table(spec, "mupix_pixel_mask", list_keys=mupix_mask.MASK_ARRAYS)
+    _row, payload = mupix_mask.resolve(table, "mupix_pixel_mask", run)
+    return {(p.vid, p.col, p.row) for p in mupix_mask.mask_pixels(payload)}
+
+
+def test_db_dry_run_writes_nothing(db, tmp_path, capsys):
+    before = _db_intervals(db)
+    assert _db_add(db, _study(tmp_path, [(5, 0, 22)]), "--run-start", 459, "--last-run", 459,
+                   "--split", "--comment", "c") == 0
+    out = capsys.readouterr().out
+    assert "database   " in out and "dry run: nothing written" in out
+    assert "(after the load)" in out and '"is_active": false' not in out
+    assert _db_intervals(db) == before
+
+
+def test_db_write_loads_the_whole_table(db, tmp_path, capsys):
+    """The shipped interval is retired by the load, the three pieces of the split
+    go in once each (no second inactive copy of the old row), and the next edit
+    starts from the database, one-pixel arrays included."""
+    assert _db_add(db, _study(tmp_path, [(5, 0, 22)]), "--run-start", 459, "--last-run", 459,
+                   "--split", "--comment", "c", "--write") == 0
+    out = capsys.readouterr().out
+    assert "loaded into" in out and "snapshot: none for a SQLite database" in out
+    rows = _db_intervals(db)
+    assert rows[0] == (1, 0, None, 0) and len(rows) == 4
+    assert sorted(r[1:] for r in rows[1:]) == [(0, 459, 1), (459, 460, 1), (460, None, 1)]
+    assert _db_mask_at(db, 459) == {(10022, 0, 22)} and _db_mask_at(db, 458) == set()
+
+    study = _study(tmp_path, [(4, 137, 2)])
+    assert _db_add(db, study, "--run-start", 459, "--last-run", 459, "--split", "--union",
+                   "--comment", "d", "--write") == 0
+    assert _db_mask_at(db, 459) == {(10022, 0, 22), (10021, 137, 2)}
+    active = [r for r in _db_intervals(db) if r[3]]
+    assert sorted((r[1], r[2] or 1 << 30) for r in active) == [(0, 459), (459, 460),
+                                                               (460, 1 << 30)]
+    assert main(["--db", db, "check"]) == 0
+
+
+def test_db_show_and_check(db, tmp_path, capsys):
+    assert _db_add(db, _study(tmp_path, [(5, 0, 22)]), "--run-start", 459, "--last-run", 459,
+                   "--split", "--comment", "c", "--write") == 0
+    capsys.readouterr()
+    assert main(["--db", db, "show", "--run", "459"]) == 0
+    assert "1 masked pixel(s)" in capsys.readouterr().out
+    assert main(["--db", db, "check"]) == 0
+
+
+def test_db_write_refused_when_the_table_changed(db, tmp_path):
+    args = type("A", (), {"db": db, "conditions": None})()
+    src = mupix_mask.open_source(args, "mupix_pixel_mask", mupix_mask.MASK_ARRAYS)
+    con = sqlite3.connect(db[len("sqlite:"):])
+    con.execute("UPDATE cond_iov SET is_active = 0 WHERE table_name = 'mupix_pixel_mask'")
+    con.commit()
+    con.close()
+    with pytest.raises(MaskError, match="changed since it was read"):
+        mupix_mask.write_db(src, "mupix_pixel_mask", src.doc["mupix_pixel_mask"])
+
+
+def test_db_argv_default_service():
+    assert mupix_mask.db_argv(["--db", "add", "x.json"]) == \
+        ["--db", mupix_mask.DB_DEFAULT, "add", "x.json"]
+    assert mupix_mask.db_argv(["--db", "host=h dbname=d", "show"]) == \
+        ["--db", "host=h dbname=d", "show"]
+    assert mupix_mask.db_argv(["show", "--db"]) == ["show", "--db", mupix_mask.DB_DEFAULT]
+
+
+def test_db_and_conditions_exclude_each_other(conditions, db, capsys):
+    with pytest.raises(SystemExit):
+        main(["--db", db, "--conditions", str(conditions), "check"])
+
+
+def test_snapshot_hook_is_never_fatal(monkeypatch, capsys):
+    monkeypatch.setattr(mupix_mask, "_snapshot_available", lambda: False)
+    mupix_mask.snapshot_after_write("service=pioneer-conditions-admin")
+    assert "reminder: no pioneer.conddb.snapshot" in capsys.readouterr().out
+
+    calls = []
+
+    class Done:
+        returncode = 3
+
+    monkeypatch.setattr(mupix_mask, "_snapshot_available", lambda: True)
+    monkeypatch.setattr(mupix_mask.subprocess, "run", lambda argv, **kw: calls.append(argv) or Done())
+    mupix_mask.snapshot_after_write("service=pioneer-conditions-admin")
+    assert calls and calls[0][1:] == ["-m", "pioneer.conddb.snapshot", "--conninfo",
+                                      "service=pioneer-conditions-admin"]
+    assert "WARNING: the snapshot failed (3)" in capsys.readouterr().out
+
+
+def test_json_write_says_it_does_not_reach_the_database(conditions, tmp_path, capsys):
+    assert _add(conditions, _study(tmp_path, [(5, 0, 22)]), "--run-start", 459, "--last-run",
+                459, "--split", "--comment", "c", "--write") == 0
+    out = capsys.readouterr().out
+    assert "NOT the conditions database" in out and "Use --db" in out

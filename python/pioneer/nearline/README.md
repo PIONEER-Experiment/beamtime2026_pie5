@@ -9,13 +9,15 @@ also the template: for every file the DAQ produces, the daemon fills in its
 paths and writes the result next to the outputs as `<filebase>.py`, a complete
 standalone job and the record of what processed that run. The histogram file is
 what the nearline website reads during a shift; the RNTuple is for the offline
-pass.
+pass. The constants come from the conditions database by default (see
+*Conditions*); when it is down, jobs fail and *Conditions DB down* below is the
+shifter's page.
 
 | file | what it is |
 |---|---|
 | `nearline_job.py` | **the edit-me file *and* the template.** A Gaudi options file: settings block, then linear assembly. `gaudirun.py` execs it; it is not a module and must not be imported. It carries twelve `${name}` placeholders, all inside string literals, so it is valid Python and runs unrendered |
 | `render.py` | fills those placeholders and writes the complete job next to the outputs as `<filebase>.py`. `render_job()` is what both callers use; `python -m pioneer.nearline.render IN OUT` renders and stops |
-| `process.py` | **process one file by hand**: `python -m pioneer.nearline.process <midas file> [--out-dir DIR] [--light]` renders the job and runs `gaudirun.py` on it. Standard library plus `render` only, so it imports where `jobs.py` cannot |
+| `process.py` | **process one file by hand**: `python -m pioneer.nearline.process <midas file> [--out-dir DIR] [--light] [--conditions SOURCE]` renders the job and runs `gaudirun.py` on it. Standard library plus `render` and `pioneer.conddb.pgservice` only, so it imports where `jobs.py` cannot |
 | `jobs.py` | job classes the daemon schedules: `GaudiJob` (this job), `RsyncJob`, `CleanJob`, `MergeJob`, `DummyJob` |
 | `daemon.py` | the long-running process: MIDAS client, per-resource queues, dispatch and status write-back to the run database |
 | `run.py` | run-sequence definitions (`midas_run_sequence`, `midas_run`) written into the run database |
@@ -162,7 +164,9 @@ Everything below is the block between `===== SETTINGS =====` and
 `===== END OF SETTINGS =====` in `nearline_job.py`, read **once at configuration
 time** — so editing it is safe while a job runs: the running job is unaffected
 and the next one picks up the new value. Container settings hold bare file names
-resolved against `CONDITIONS_DIR`; an absolute path is honoured unchanged.
+resolved against the JSON directory of `CONDITIONS` (json mode only), the ODB
+specs and `ODB_OVERRIDES` against `CONDITIONS_DIR`; an absolute path is honoured
+unchanged.
 
 ### Job
 
@@ -179,11 +183,11 @@ resolved against `CONDITIONS_DIR`; an absolute path is honoured unchanged.
 
 | setting | default | what goes wrong if it is wrong |
 |---|---|---|
-| `CONDITIONS_DIR` | `NL_CONDITIONS_DIR`, else `/simulation/reco_testbeam/conditions` | Every bare container name resolves against it. Wrong and `check()` prints one "conditions container does not exist" line per file, naming the absolute path |
-| `PG_CONNECTIONS` | `[]` | libpq conninfo strings for the campaign database; `NL_PG` (`os.pathsep`-separated) wins. **Password in `PGPASSWORD`, never in the string** — the service stamps the conninfo into every output file |
+| `CONDITIONS` | `"db:service=pioneer-conditions"` | Where the constants come from: `db[:SERVICE or CONNINFO]` the conditions database, `json:DIR` the JSON containers in `DIR` (a snapshot), `json` the containers in `CONDITIONS_DIR`. `NL_CONDITIONS` wins for an unrendered run, `process.py --conditions` for a hand run. The service is expanded through `~/.pg_service.conf` before the job reaches Gaudi, and the password stays in `~/.pgpass`. See *Conditions*. A service this host does not define, or anything that does not parse, is reported by `check()` |
+| `CONDITIONS_DIR` | `NL_CONDITIONS_DIR`, else `/simulation/reco_testbeam/conditions` | The ODB specs and `ODB_OVERRIDES` resolve against it in both modes, and the containers too under a bare `json`. Wrong and `check()` prints one "conditions container does not exist" line per file, naming the absolute path |
 | `ODB_SPECS` | `odb/bt2026_runinfo.json`, `odb/bt2026_wavedream_daq.json`, `odb/bt2026_wavedream_scalers.json`, `odb/bt2026_isel.json` | Map subtrees of the begin-of-run ODB dump to conditions tables. Drop one and the DAQ settings the run was actually taken with reach neither the algorithms nor the provenance header |
 | `ODB_PRELOAD` | `runinfo`, `wd_board_settings`, `wd_channel_settings`, `wd_scaler_names` | Resolved at `initialize()` rather than lazily, so a misconfigured job dies in the first second naming the missing ODB path instead of at the first event that needs it |
-| `ODB_OVERRIDES` | `""` | Run-indexed corrections applied to a private copy of the ODB tree before any table is mapped, for a setting that was recorded wrong. `""` uses the ODB exactly as recorded |
+| `ODB_OVERRIDES` | `""` | Run-indexed corrections applied to a private copy of the ODB tree before any table is mapped, for a setting that was recorded wrong. `""` uses the ODB exactly as recorded. A JSON container, loaded in both modes; in db mode it is the only JSON the job reads |
 | `SETTINGS_SUMMARY` | `True` | Writes the resolved ODB tables into the output as a `WDSettingsHeader`. Off and the file no longer records the DAQ configuration it was taken with. Costs one algorithm and no per-event time |
 
 ### WaveDREAM
@@ -574,17 +578,80 @@ ones carry Sumw2) and add little to the file, being mostly empty.
 
 ## Conditions
 
-Several sources are loaded at once and **they never merge**: whichever layer owns
+`CONDITIONS` picks where the constants come from. There are two modes:
+
+| mode | `CONDITIONS` | what the conditions service is given |
+|---|---|---|
+| **db** (default) | `"db:service=pioneer-conditions"`, or `db`, `db:NAME`, `db:host=H port=P dbname=D user=U` | `PgConnections` = one explicit conninfo; `JsonFiles` = `ODB_OVERRIDES` only, when set |
+| **json** | `"json:DIR"`, or `json` for `CONDITIONS_DIR` | `JsonFiles` = the five `bt2026_*.json` containers from that directory (plus `ODB_OVERRIDES`); no database |
+
+The ODB specs (`ODB_SPECS`, under `CONDITIONS_DIR/odb/`) are read in both modes.
+
+**db mode.** Every host names the database by the libpq service
+`pioneer-conditions` (read-only role `cond_viewer`), defined in the user's
+`~/.pg_service.conf`, with the password in `~/.pgpass`. The job never passes the
+service name to Gaudi. It expands it first (`pioneer.conddb.pgservice`) into the
+explicit `host= port= dbname= user=` string, drops any password, and hands that
+over. The reason is provenance: the C++ layer records only what it can parse
+out of the string it is given, so a bare service name would reach every
+ConditionsHeader as `host=<default>`. The service file is read the way libpq
+reads it (first group and first key win, no spaces around `=`, a missing
+`$PGSERVICEFILE` is an error), and a result without a host or a dbname is
+refused. `db:` or `json:` with nothing after the colon is an error, not the
+default. The output files record
+`postgresql://host=... port=... dbname=conditions#<table>` as each table's
+source. The job connects once, at `initialize()`, and makes no queries while
+events are processed.
+
+**An unreachable database fails the job at `initialize()`**, after about 20 s
+(two attempts, each with libpq's 10 s `connect_timeout`). The job never falls
+back to JSON by itself, because old constants that nobody chose are worse than
+a failed job. The recovery is by hand: *Conditions DB down* below.
+
+**json mode** is the job as it was before the database: the same five
+containers, the same layer order, bit-identical outputs. `json:DIR` is how a
+shifter processes from a snapshot while the database is down. Snapshots of the
+database, exported as the same five containers, go to
+`~/bt2026/conddb-snapshots/<UTC time>/`, with `latest` pointing at the newest
+(written hourly by cron, and after every writer's `--write`, by
+`python -m pioneer.conddb.snapshot`; see *Snapshots and backups* in
+[`../conddb/README.md`](../conddb/README.md)).
+`json` alone reads the git copies in `CONDITIONS_DIR`, which is also the dev
+setup on a laptop without a database.
+
+In either mode the startup banner prints the source, `[nearline] conditions db
+host=... port=... dbname=...` or `[nearline] conditions json <dir>`, and the
+conditions service prints one line per table saying which layer served it
+(`layer=db source=postgresql://...` or `layer=json source=json://...`).
+
+Several layers can be loaded at once, and **they never merge**: whichever layer owns
 a table serves all of it.
 
 | precedence | layer | `PIConditionsSvc` property | what it holds |
 |---|---|---|---|
-| highest | JSON containers | `JsonFiles` | the shipped `bt2026_*.json` under `CONDITIONS_DIR`, plus any local override |
-| middle | PostgreSQL | `PgConnections` | the campaign database (`PG_CONNECTIONS` / `NL_PG`) |
+| highest | JSON containers | `JsonFiles` | json mode: the shipped `bt2026_*.json`. Either mode: `ODB_OVERRIDES` |
+| middle | PostgreSQL | `PgConnections` | db mode: the conditions database |
 | lowest | ODB | `OdbTables` | subtrees of the begin-of-run ODB dump, mapped by the spec files in `ODB_SPECS` |
+
+Because the JSON layer comes first, a container passed in db mode would win over
+the database for every table it holds. That is why db mode passes none, except
+`ODB_OVERRIDES`, which is a deliberate local override.
+
+db mode also refuses, in `check()`, the two ways of asking for containers it
+would otherwise quietly not read: `WD_CONDITIONS_FILES`, `PSM_GEOMETRY_FILES` or
+`PSM_CHANNEL_MAP_FILE` changed from their committed values (in the block, an
+overrides file or a rendered copy), and a `CONDITIONS_DIR` that holds
+`bt2026_*.json` containers without being a `reco_testbeam/conditions` checkout
+(a scratch copy of the constants, pointed at with `NL_CONDITIONS_DIR` the way
+it was done before the database). Both messages say to use json mode instead:
+`CONDITIONS = "json:DIR"`, `NL_CONDITIONS=json:DIR`, or `process.py --conditions
+json:DIR`.
 
 `Preload` resolves `ODB_PRELOAD` (plus `wd_timebase` when WaveDREAM is on) at
 `initialize()`, so a table nothing can supply fails the job in the first second.
+
+The tables, and the container that carries each one in json mode (the database
+holds the same twelve tables under the same names):
 
 | container | tables it supplies |
 |---|---|
@@ -598,8 +665,8 @@ a table serves all of it.
 | `odb/bt2026_wavedream_scalers.json` | `wd_scaler_names` |
 | `odb/bt2026_isel.json` | `isel` — only read when `PSM_GEOMETRY_TRANS` contains `COND:isel` |
 
-`WD_ROLE_TABLE` names `wd_channel_map`, the cabling table in
-`bt2026_wavedream_calibration.json` (schema `wd_channel_map`, tag
+`WD_ROLE_TABLE` names `wd_channel_map`, the cabling table
+(schema `wd_channel_map`, tag
 `wd036-run114`, one interval per cabling change). The per-channel trigger levels
 do **not** come with it: they are a DAQ *setting*, not a cabling *decision*, so
 `WD_CHANNEL_SETTINGS_TABLE` reads `wd_channel_settings` from the ODB layer
@@ -609,14 +676,11 @@ algorithm falls back per role, to `WD_SCINT_THR_FALLBACK_V` on a scintillator
 and `WD_NIM_THR_FALLBACK_V` on a NIM copy, and names every such channel once at
 `initialize()`.
 
-**PostgreSQL is forthcoming and will become the default conditions source.**
-Today every constant comes from the JSON containers. When the campaign database
-is served, `PG_CONNECTIONS` (or `NL_PG`) is set **once**, in the daemon's
-environment, the JSON list shrinks to whatever is being overridden locally, and
-precedence makes those files win over the database. The password goes in
-`PGPASSWORD` and never in the conninfo, because the service stamps the conninfo
-into every output file. The loader and inspection tools are in [`../conddb/`](../conddb/)
-(`json2pg.py`, `condtool.py`; see its README).
+The loader, the export and the inspection tools are in
+[`../conddb/`](../conddb/) (`json2pg.py`, `condtool.py`; see its README). A JSON
+output file and a database output file of the same constants carry the same
+sha256 per table, because the hash covers the constants and not where they
+came from, so files from both modes merge.
 
 **The run number is never configured.** `PIMidasSelector` publishes the
 begin-of-run ODB dump as `"ODBHeader"` in `PIHeaderSvc` during its own
@@ -659,7 +723,11 @@ python -m pioneer.nearline.process /workdir/scratch/online/run00175.mid.lz4 \
 ```
 
 That is the daemon's flow without the daemon or the run database, and it is
-what to reach for when a run has to be processed by hand. It renders
+what to reach for when a run has to be processed by hand. It reads the
+conditions database, as the daemon does, through the `pioneer-conditions`
+service of the user running it (`~/.pg_service.conf` and `~/.pgpass`; inside
+`testbeam-midas` add `-e PGSERVICEFILE=/workdir/scratch/conddb/pg_service.conf
+-e PGPASSFILE=/workdir/scratch/conddb/pgpass` to the `docker exec`). It renders
 `nearline_job.py` for that one file and runs `gaudirun.py` on the result, so it
 leaves the **same three artefacts the daemon leaves** (two with `--light`,
 which writes no RNTuple), named after the part of the file name before the
@@ -680,19 +748,36 @@ one subrun file by hand.
 `--evt-max N` truncates, `--render-only` writes the `.py` and stops so you can
 edit it before running it, `--job PATH` renders some other copy of the job
 file, and `--light` renders the light job, the one a daemon started with
-`--light` runs (next section). If `gaudirun.py` is not on `PATH` it exits 2 and prints the
+`--light` runs (next section). `--conditions` picks the source:
+
+| `--conditions` | constants from |
+|---|---|
+| (not given) | `NL_CONDITIONS` if set, else the job's `CONDITIONS`: the database |
+| `db` | the service `pioneer-conditions` |
+| `db:NAME` | another libpq service, e.g. `db:pioneer-conditions-admin` |
+| `db:"host=H port=P dbname=D user=U"` | a server named directly (no password here, it goes in `~/.pgpass`) |
+| `json:DIR` | the JSON containers in `DIR`, e.g. `json:~/bt2026/conddb-snapshots/latest` |
+| `json` | the JSON containers in `CONDITIONS_DIR` (the git copies) |
+
+A service the host does not define stops the command before anything runs,
+with the file it searched and the `--conditions json:` line to use instead. If `gaudirun.py` is not on `PATH` it exits 2 and prints the
 `source` lines above instead of a Gaudi import traceback.
 
 **Reproducing a run is running its `.py`:** `gaudirun.py run00175.py`. The
-rendered file names its own input, output, event limit, conditions directory
-and database connections, so it ignores every `NL_*` variable and re-processes
+rendered file names its own input, output, event limit, conditions source and
+conditions directory, so it ignores every `NL_*` variable and re-processes
 the same file the same way whatever the shell around it says. That is true of a
 daemon's rendered file and a `process` one alike — they come out of the same
-renderer, and differ only in `rendered_at`, `rendered_by` and `job_id`. The two
-host-dependent variables are the exception that proves it: `NL_CONDITIONS_DIR`
-and `NL_PG` **of the shell that renders** are baked into the file at that
-moment, exactly as the daemon bakes in its own, so set them before the
-`process` command rather than before the `gaudirun.py` that re-runs it.
+renderer, and differ only in `rendered_at`, `rendered_by` and `job_id`. The
+conditions source is resolved when the file is rendered: a service becomes the
+explicit `host= port= dbname= user=` it named at that moment (never the service
+name, never a password), and a `json:` directory becomes an absolute path with
+its links resolved, so `json:~/bt2026/conddb-snapshots/latest` records the
+snapshot it read and not the link, which moves on. The password is not in the
+file: a re-run reads `~/.pgpass` (or `PGPASSWORD`) of whoever runs it.
+`NL_CONDITIONS` and `NL_CONDITIONS_DIR` **of the shell that renders** are baked
+in at that moment, exactly as the daemon bakes in its own, so set them before
+the `process` command rather than before the `gaudirun.py` that re-runs it.
 
 ### Light mode (pinky)
 
@@ -747,62 +832,78 @@ ones pinky took would still have no RNTuple.
 
 ### Masking hot pixels
 
-The hot-pixel mask is a conditions table, so masking a run is three hand-run
-steps, each of which leaves a file to look at:
+The hot-pixel mask is a conditions table, and the nearline job reads it from
+the conditions database. Masking a run is three hand-run steps, each of which
+leaves something to look at. They write to the **database**, as the
+`pioneer-conditions-admin` service (`cond_admin`) of whoever runs them, so that
+service must be in their `~/.pg_service.conf` with its password in `~/.pgpass`.
 
 1. **Find the pixels.** psm-analysis `mupix-timewalk/noisy_pixels.py RUN ...`
    (inside `testbeam-midas`) writes `noisy_pixels.json`, whose
    `recommended.pixel_mask.pixels` is the mask it recommends, and one
    `runNNNNN/noisy_pixels_runNNNNN.json` per run with the `hot.pixels` records.
-2. **Put them into the table** (same `PYTHONPATH` as above). Dry run first; it
-   prints what changes, the intervals after, the pixels with their detector
-   ids, and the diff of the file:
+2. **Put them into the database** (same `PYTHONPATH` as above). Dry run first;
+   it reads the table from the database and prints what changes, the intervals
+   after, the pixels with their detector ids, and the diff of the table:
 
    ```bash
-   python -m pioneer.conddb.mupix_mask add \
+   python -m pioneer.conddb.mupix_mask --db add \
      /workdir/scratch/mupix-timewalk/noisy-pixels/noisy_pixels.json \
      --run-start 459 --last-run 459 --split \
      --comment "hot pixels of run 459 (ThHigh/ThLow 0x7a/0x79)"
-   # then the same with --write
-   python -m pioneer.conddb.mupix_mask show --run 459
+   # then exactly the same with --write at the end
+   python -m pioneer.conddb.mupix_mask --db show --run 459
+   python -m pioneer.conddb.mupix_mask --db check
    ```
 
-   The study names chips by their raw id; the tool converts them to detector
-   ids through `mupix_chip_map` at the study's run. `--split` is needed while
-   the range lies inside the shipped empty [0, open) interval: that interval is
-   kept but deactivated, and its parts outside the new range come back with
-   the empty payload. Where the range overlaps an interval that already masks
-   pixels, `--split` also needs `--union` (keep those pixels and add the new
-   ones) or `--replace-mask` (drop them there; it prints how many per
-   interval). `python -m pioneer.conddb.mupix_mask check` runs the decoder's
-   rules over every run of the container. The container written is the one
-   under `NL_CONDITIONS_DIR` (else `$PIONEERSYS/reco_testbeam/conditions`), or
-   `--conditions PATH`. To try a mask without touching the shipped file, copy
-   the conditions directory and point both the tool and the job at the copy.
-
-   **`--write` edits a git-tracked file** of the reco_testbeam repository
-   (`conditions/bt2026_psm_readout_map.json`), so the change is not done
-   until it is committed to reco_testbeam. On pinky that file is in the
-   daemon's own checkout (the one `NL_CONDITIONS_DIR` points at); commit it
-   there, because a dirty checkout makes the next `git pull` of reco_testbeam
-   refuse, and an uncommitted mask is lost to everyone else.
-3. **Reprocess one file** with the same `NL_CONDITIONS_DIR` in the shell:
+   `--db` (before `add`) is what makes it the database; with no value it is
+   `service=pioneer-conditions-admin`. `--write` loads the whole table in one
+   transaction and is refused if somebody changed the table since the tool
+   read it (read again and redo it). After the load the tool refreshes the JSON
+   snapshot (`~/bt2026/conddb-snapshots/`) by itself. The study names chips by
+   their raw id; the tool converts them to detector ids through
+   `mupix_chip_map` at the study's run. `--split` is needed while the range
+   lies inside the shipped empty [0, open) interval: that interval is kept but
+   deactivated, and its parts outside the new range come back with the empty
+   payload. Where the range overlaps an interval that already masks pixels,
+   `--split` also needs `--union` (keep those pixels and add the new ones) or
+   `--replace-mask` (drop them there; it prints how many per interval).
+   `check` runs the decoder's rules over every run.
+3. **Check one file** with the job as the daemon runs it (the database, no
+   `--conditions`):
 
    ```bash
-   NL_CONDITIONS_DIR=/workdir/scratch/mask-trial/conditions \
-     python -m pioneer.nearline.process /workdir/scratch/online/run00459_00000.mid.lz4 \
-     --out-dir /workdir/scratch/mask-trial
+   python -m pioneer.nearline.process /workdir/scratch/online/run00459_00000.mid.lz4 \
+     --out-dir /workdir/scratch/mask-check
    ```
 
-   The log names the interval (`Resolved table=mupix_pixel_mask ... iov=[459, 460)`)
-   and ends with `N pixel word(s) on the M masked pixel(s) dropped, by chip`;
-   `histograms/musip/mupix_masked_hits` holds the same counts, and the masked
-   pixels are empty in the `PIPSMMuPixMonitor/<plane>_chip<vid>_xy` maps.
+   The log names the interval (`Resolved table=mupix_pixel_mask ... iov=[459, 460)
+   ... layer=db`) and ends with `N pixel word(s) on the M masked pixel(s)
+   dropped, by chip`; `histograms/musip/mupix_masked_hits` holds the same
+   counts, and the masked pixels are empty in the
+   `PIPSMMuPixMonitor/<plane>_chip<vid>_xy` maps.
 
-The daemon needs nothing else: it loads the same container on the next file.
-For the campaign database, `--write --table-out FILE` also writes the table
-alone for `../conddb/json2pg.py` (see [`../conddb/README.md`](../conddb/README.md));
-the JSON container outranks the database either way.
+That is all: the next file the daemon processes reads the new interval, with
+nothing to commit and nothing to redeploy. The git copy of the table
+(`reco_testbeam/conditions/bt2026_psm_readout_map.json`) is an export of the
+database and is refreshed from it (`../conddb/README.md`, "Workflow: the
+database first"); it is never edited by hand first.
+
+**Trying a mask without writing it** (optional, for a dev check): copy the
+conditions directory to scratch, run the same `add` **without `--db`** and with
+`--conditions /workdir/scratch/mask-trial/conditions ... --write`, which edits
+that copy, and process a file against the copy:
+
+```bash
+python -m pioneer.nearline.process /workdir/scratch/online/run00459_00000.mid.lz4 \
+  --out-dir /workdir/scratch/mask-trial \
+  --conditions json:/workdir/scratch/mask-trial/conditions
+```
+
+Without `--db` and without `--conditions`, `--write` edits the git-tracked
+container, which no nearline job reads unless it is run in json mode. On pinky
+that would change nothing the daemon does and leave the checkout dirty, so
+the next `git pull` refuses: do not do it there.
 
 ### Recalibrating the timewalk
 
@@ -810,7 +911,8 @@ The timewalk constants are a conditions table too, and the job fills the
 histograms they are fitted from, so a recalibration is four hand-run steps.
 The fit reads the `_raw` histograms, which hold the uncorrected times whatever
 constants the processing applied, so any processing of the run with
-`PSM_TIMEWALK` on will do, corrected or not.
+`PSM_TIMEWALK` on will do, corrected or not. Step 3 writes to the database as
+`pioneer-conditions-admin`, as for the mask.
 
 1. **Process the files** the constants are to come from, as in *Processing a
    file* above (or take the daemon's outputs). Each subrun's `_hists.root`
@@ -835,41 +937,35 @@ constants the processing applied, so any processing of the run with
    written only with `--plots DIR`. A chip with fewer than 5 good columns is
    refused and named. `add` leaves it out, so its hits pass through
    uncorrected. Look at the PNGs before going on.
-3. **Put the constants into the table.** Dry run first, then the same with
+3. **Put the constants into the database.** Dry run first, then the same with
    `--write`:
 
    ```bash
-   python -m pioneer.conddb.mupix_timewalk add \
+   python -m pioneer.conddb.mupix_timewalk --db add \
      /workdir/scratch/twc-trial/fit_run00459.json \
      --run-start 459 --last-run 459 --split \
      --comment "timewalk of run 459, fitted from subruns 0-17"
-   # then the same with --write
-   python -m pioneer.conddb.mupix_timewalk show --run 459
-   python -m pioneer.conddb.mupix_timewalk check
+   # then exactly the same with --write at the end
+   python -m pioneer.conddb.mupix_timewalk --db show --run 459
+   python -m pioneer.conddb.mupix_timewalk --db check
    ```
 
-   As for the mask, `--split` is needed while the range lies inside the
-   shipped empty [0, open) interval. Constants do not merge, so a range that
-   overlaps an interval already holding constants also needs `--replace`
-   (together with `--split`); an empty interval does not need it. The
-   container written is the one under `NL_CONDITIONS_DIR` (else
-   `$PIONEERSYS/reco_testbeam/conditions`), or `--conditions PATH`; to try
-   constants without touching the shipped file, copy the conditions directory
-   and point both the tool and the job at the copy. **`--write` edits
-   `conditions/bt2026_psm_readout_map.json` of reco_testbeam**, so the change
-   is not done until it is committed there, in the checkout the daemon's
-   `NL_CONDITIONS_DIR` points at (on pinky, the daemon's own).
-4. **Reprocess one file** with the same `NL_CONDITIONS_DIR` in the shell:
+   As for the mask, `--db` makes it the database, `--write` loads the whole
+   table in one transaction (refused if the table changed since the read) and
+   then refreshes the snapshot, and `--split` is needed while the range lies
+   inside the shipped empty [0, open) interval. Constants do not merge, so a
+   range that overlaps an interval already holding constants also needs
+   `--replace` (together with `--split`); an empty interval does not need it.
+4. **Check one file** with the job as the daemon runs it:
 
    ```bash
-   NL_CONDITIONS_DIR=/workdir/scratch/twc-trial/conditions \
-     python -m pioneer.nearline.process /workdir/scratch/online/run00459_00020.mid.lz4 \
-     --out-dir /workdir/scratch/twc-trial
+   python -m pioneer.nearline.process /workdir/scratch/online/run00459_00020.mid.lz4 \
+     --out-dir /workdir/scratch/twc-check
    ```
 
-   The log names the interval (`Resolved table=mupix_timewalk ... iov=[459, 460)`),
-   prints each chip's curve with its W at ToT 0, at its `tot_max` and at 31, and
-   ends with
+   The log names the interval (`Resolved table=mupix_timewalk ... iov=[459, 460)
+   ... layer=db`), prints each chip's curve with its W at ToT 0, at its
+   `tot_max` and at 31, and ends with
    `N MuPix hit(s) timewalk-corrected, 0 passed through without constants`.
    `PIPSMMuPixTimewalkCorrection/twc_dt_vs_tot_cor_L1`/`_L2` should show a
    flat band near dt = 0 where `_raw_L1`/`_L2` bend, and the RNTuple's
@@ -878,9 +974,13 @@ constants the processing applied, so any processing of the run with
    time-ordered on the corrected times).
    Prefer a file that did not go into the fit.
 
-The daemon needs nothing else here either. The walk depends on the pixel
-threshold, so a change of the MuPix thresholds is a reason to refit and to start
-a new interval.
+As for the mask, the daemon's next job reads the new interval; nothing is
+committed or redeployed, and the git container is refreshed from the database.
+**Trying constants without writing them** works as for the mask: `add` without
+`--db`, with `--conditions <scratch copy> ... --write`, then `process.py
+--conditions json:<scratch copy>`; never without `--db` against pinky's own
+checkout. The walk depends on the pixel threshold, so a change of the MuPix
+thresholds is a reason to refit and to start a new interval.
 
 ### Deploy order
 
@@ -895,13 +995,27 @@ updating a machine, pull and rebuild reco_testbeam (the library and its
 `conditions/`, which must carry `mupix_pixel_mask` and `mupix_timewalk`)
 **before** pulling beamtime2026_pie5.
 
+The database default needs three things on the host **before** the job file
+that has it is pulled: a build with the PostgreSQL layer (libpq found when
+cmake ran, so `PI_COND_HAVE_PG` is among the `shared` compile flags; a build
+without it fails every job at `initialize()` with "PgConnections is set but
+this build has no PostgreSQL layer"), the `pioneer-conditions` service in
+`~/.pg_service.conf` of the user the daemon runs as, and that user's password
+line in `~/.pgpass`. Check all three with one hand run before the daemon starts:
+`python -m pioneer.nearline.process <recent subrun> --out-dir /tmp/nl-check`
+must end with rc 0 and its log must show `layer=db` lines.
+
 Restart the nearline daemon right after pulling beamtime2026_pie5. A running
 daemon keeps the `render.py`, `jobs.py` and `daemon.py` it started with, but reads
 `nearline_job.py` from disk for every job, so until the restart it renders the
 new job file with the old code. The job file is written to survive that where it
 can — a daemon from before light mode leaves the `light` placeholder unfilled,
 and the job reads that as the full job — but an old daemon does not know
-`--light`, and the next change may not be as forgiving.
+`--light`, and the next change may not be as forgiving. The conditions source is
+such a change: a daemon started before it fills a `pg` placeholder the job no
+longer has, so it refuses to render and every job it takes fails to start
+(MIDAS message "Job N failed to start: ... has no placeholder for: pg"). It
+does not quietly render a JSON job. Restart it.
 
 ### A quick look, or a variant job
 
@@ -935,8 +1049,8 @@ NL_MIDAS=/workdir/midas_files/fake_run00913_mutrig.mid NL_OUT=/tmp/run00913.root
 | `NL_OUT` | yes | the RNTuple path; the histogram file is the same name with `.root` replaced by `_hists.root` |
 | `NL_EVTMAX` | no | overrides `EVT_MAX` |
 | `NL_LIGHT` | no | `1` sets `LIGHT` (the light job), `0` clears it; anything else is rejected by `check()` |
-| `NL_PG` | no | `os.pathsep`-separated conninfo strings, overriding `PG_CONNECTIONS` |
-| `NL_CONDITIONS_DIR` | no | overrides `CONDITIONS_DIR` |
+| `NL_CONDITIONS` | no | overrides `CONDITIONS`, e.g. `json:/workdir/scratch/snap` or `db:pioneer-conditions-admin`. Also read by the renderer (the daemon, `process.py` without `--conditions`) and baked in |
+| `NL_CONDITIONS_DIR` | no | overrides `CONDITIONS_DIR`. Also baked in by the renderer |
 | `NL_OVERRIDES` | no | a small Python file `exec`'d over the settings, for a variant job |
 
 **Every variable in that table is read only by an unrendered job file.** A
@@ -1006,6 +1120,160 @@ because the daemon polls the same service and could take the same proposal:
 set it to `n` first (it is how a step is taken while the daemon's loop is
 paused), or pass `--force`. `--dry-run` only reads and always runs.
 
+## Conditions DB down
+
+The shifter's page for when nearline jobs fail because the conditions database
+cannot be read. It assumes the DAQ is idle (no run is being taken) and that you
+are logged in on pinky as the user the nearline daemon runs as (`pinky`). The
+database is `conditions` on pinky's PostgreSQL server, and the job reads it
+through the service `pioneer-conditions`. The job never falls back to older
+constants by itself (see *Conditions*), so until someone acts, every new subrun
+stays unprocessed.
+
+### 1. Recognise it
+
+* On the MIDAS **RunDB** page, or the website's run page, the nearline jobs of
+  new subruns turn `FAILED`, each about 20 s after it started (2 s when the
+  server refuses outright).
+* The daemon announces its conditions source when it starts (MIDAS message
+  `Nearline daemon: conditions from the database host=localhost port=5432
+  dbname=conditions`); a start message that says anything else is a problem of
+  its own (see *Via the daemon*).
+* The failing job prints the lines below. There is no log per job: the run's
+  nearline log, `/home/pinky/nearline/runNNNNN/runNNNNN_nearline.log`, is shared
+  by every subrun job of that run, each job empties it when it starts and jobs
+  running in parallel write into it together, so it may show another subrun or
+  a mixture. To see one subrun's failure cleanly, run its rendered job again,
+  which fails the same way within about 20 s:
+  `gaudirun.py /home/pinky/nearline/runNNNNN/runNNNNN_SSSSS.py` (in the daemon's
+  environment, see step 3). The lines (from a test against the laptop's
+  database container; on pinky the host is `localhost`):
+
+  ```
+  [nearline] conditions db host=testbeam-pgdb port=5999 dbname=conditions
+  PIConditionsSvc     FATAL Conditions: could not connect (host=testbeam-pgdb port=5999 dbname=conditions): connection to server at "testbeam-pgdb" (172.18.0.3), port 5999 failed: Connection refused
+  ServiceManager      ERROR Unable to initialize Service: PIConditionsSvc
+  ApplicationMgr      ERROR Application Manager Terminated with error code 1
+  ```
+
+  The text after `failed:` says why: `Connection refused` (nothing listens on the
+  port, the server is down), `timeout expired` (the host does not answer),
+  `password authentication failed` (`~/.pgpass`), `database "conditions" does
+  not exist`, `no pg_hba.conf entry` (server configuration).
+* If instead the MIDAS messages say `Job N failed to start: libpq service
+  'pioneer-conditions' is not defined in any service file; searched: ...` (or
+  another error about the service file), the jobs never started, and the daemon
+  marked their rows `FAILED` straight away: the service file of the daemon's
+  user is missing or broken. The daemon already said so when it started. That
+  is a setup problem, not an outage; restore `~/.pg_service.conf` (the expert
+  has the contents), restart the daemon, and go to step 4.
+* If the whole PostgreSQL server is down, the **run database** (`pioneer`, same
+  server) is down with it: the RunDB page reads "Run database: unreachable", the
+  daemon sends `Nearline Error ...` MIDAS messages and claims no new jobs at all
+  (they stay `PENDING`). Only the jobs that were already running go `FAILED`.
+
+### 2. Check the database
+
+```bash
+systemctl status postgresql                          # "active (running)"?
+psql service=pioneer-conditions -c 'select 1'        # prints a row with 1?
+psql service=pioneer-conditions -c 'select name from cond_tables'   # the tables, not empty
+```
+
+* `systemctl` says `inactive`, `failed` or `activating`: the server is down.
+  Call the DAQ expert; restarting it needs sudo
+  (`sudo systemctl restart postgresql`, then `systemctl status postgresql`
+  again). The run database comes back with it.
+* The server is running but `psql` fails: the message names the cause, as in
+  step 1. Call the expert with that message.
+* Both work: the database is fine now (it may have been restarted meanwhile).
+  Go to step 4 and requeue.
+
+### 3. Process a file by hand while the database is down
+
+Only for the subruns someone needs to look at now; everything else waits for
+step 4. The latest snapshot of the database, exported as JSON containers, is at
+`~/bt2026/conddb-snapshots/latest` (written by the snapshot tool; see
+`../conddb/README.md`). A new snapshot is written only when the database
+changed, so an old date is fine. What matters is that the hourly runs before
+the outage succeeded:
+
+```bash
+ls -l ~/bt2026/conddb-snapshots/latest                # where it points, and when
+tail -3 ~/bt2026/conddb-snapshots/cron.log            # no FAILED line from before the outage
+```
+
+Then, in the environment the daemon runs in (same `PATH`, `PYTHONPATH` and
+`NL_CONDITIONS_DIR`). `NL_CONDITIONS_DIR` is whatever the daemon was started
+with, and every job it rendered records it: read it from any recent rendered
+job of the run, and export the same value.
+
+```bash
+grep -m1 '"conditions_dir"' /home/pinky/nearline/runNNNNN/runNNNNN_00000.py
+export NL_CONDITIONS_DIR=<the value it shows>   # empty there means the job's default
+```
+
+Then:
+
+```bash
+cd /home/pinky/bt2026/beamtime2026_pie5/python
+python -m pioneer.nearline.process /home/pinky/online/runNNNNN_SSSSS.mid.lz4 \
+  --out-dir /home/pinky/nearline/runNNNNN \
+  --conditions json:~/bt2026/conddb-snapshots/latest
+```
+
+It writes `runNNNNN_SSSSS.py`, `.root` and `_hists.root` there, exactly where
+the daemon would have put them, so the website shows the subrun. The log's
+`[nearline] conditions json /home/pinky/bt2026/conddb-snapshots/<UTC time>`
+line, and the `"conditions"` field of the `.py`, record which snapshot was used.
+A snapshot holds the constants as they were when it was taken; a constant
+written to the database after it is not in it. The run database is not told
+about a hand run: the job's row stays `FAILED` until step 4.
+
+### 4. Requeue the failed jobs once the database is back
+
+There is no requeue command. A job is requeued by setting its row back to
+`PENDING`, which the daemon then claims like a new one. First list what failed
+(the run numbers are MIDAS run numbers; the password of the run database role
+`readonly` is `readonly`, see `docs/DEPLOY-pinky-rundb.md`):
+
+```bash
+psql -h localhost -U readonly -d pioneer -c "
+  SELECT j.id, r.midas_run_number, j.status
+  FROM state.postproc_job j JOIN state.midas_run r ON r.id = j.midas_run_id
+  WHERE j.job_type = 'nearline' AND j.status = 'FAILED'
+    AND r.midas_run_number BETWEEN <first run> AND <last run>
+  ORDER BY j.id"
+```
+
+Check the list: these are the jobs that failed at initialize and the ones that
+failed to start. (A row left `CLAIMED` belongs to a daemon that stopped in the
+middle of starting a job; requeue it the same way, with `'CLAIMED'` in place of
+`'FAILED'`, only while the daemon is stopped.) Then requeue those rows, as the
+role the daemon writes statuses with (`bot`, password `bot`, `daemon.py:37-38`;
+`readonly` cannot write):
+
+```bash
+psql -h localhost -U bot -d pioneer -c "
+  UPDATE state.postproc_job j SET status = 'PENDING'
+  FROM state.midas_run r
+  WHERE r.id = j.midas_run_id AND j.job_type = 'nearline'
+    AND j.status = 'FAILED'
+    AND r.midas_run_number BETWEEN <first run> AND <last run>"
+```
+
+The daemon picks them up within a few seconds, as many at a time as
+`/Nearline/config/Num parallel jobs`. Subruns processed by hand in step 3 are
+processed again, now from the database, and their files are overwritten; that
+is intended, because the database is the record. Watch the first few turn
+`DONE` on the RunDB page, and check one log for `layer=db` lines.
+
+If the database will stay down for a long time, the expert can run the daemon
+from the snapshot instead: restart it with
+`NL_CONDITIONS=json:$HOME/bt2026/conddb-snapshots/latest` in its environment (see
+*Via the daemon*), then requeue as above. Every file it produces then records
+the snapshot directory. Undo it (unset, restart) as soon as the database is back.
+
 ## Via the daemon
 
 `GaudiJob.format_config_file()` calls `render_job()` on `nearline_job.py` and
@@ -1017,7 +1285,8 @@ assembly included, with the twelve placeholders filled:
 | field | what the daemon puts there |
 |---|---|
 | `in_file`, `out_file` | absolute paths; `evt_max` is `-1`, so a stray `NL_EVTMAX` in the daemon's environment cannot truncate a run |
-| `conditions_dir`, `pg` | `NL_CONDITIONS_DIR` and `NL_PG` **of the daemon's environment**, baked in at render time. Empty means the job's own defaults |
+| `conditions` | the conditions source, resolved at render time: `db:` and the explicit, password-free conninfo the job's default service (or the daemon's `NL_CONDITIONS`) names in the daemon user's `~/.pg_service.conf`, or `json:` and an absolute directory, or `json` |
+| `conditions_dir` | `NL_CONDITIONS_DIR` **of the daemon's environment**, baked in at render time. Empty means the job's own default |
 | `rendered_at`, `rendered_by` | UTC timestamp to the second, and `user@host` |
 | `job_source`, `job_git` | the job file it was rendered from, and `git describe --always --dirty` of it — so a file says which version of the job made it, dirty tree included |
 | `job_id`, `run_id` | the run database's own ids for this piece of work |
@@ -1062,13 +1331,37 @@ Note that `format_config_file()` renders even in dry-run, so the `.py` appears
 next to the outputs either way.
 
 The daemon process needs `gaudirun.py` on `PATH`, the build's generated `Conf`
-modules on `PYTHONPATH`, and `NL_CONDITIONS_DIR` pointing at a checkout of
-`reco_testbeam/conditions`. On pinky the repo is at
+modules on `PYTHONPATH`, `NL_CONDITIONS_DIR` pointing at a checkout of
+`reco_testbeam/conditions`, and, for the database, the `pioneer-conditions`
+service in its user's `~/.pg_service.conf` with the password in `~/.pgpass`.
+It needs no `NL_CONDITIONS`: the database is the job's own default, so a daemon
+restarted from the MIDAS Programs page, which has none of the `NL_*` variables,
+still reads the database. On pinky the repo is at
 `/home/pinky/bt2026/beamtime2026_pie5` and **there is no `/simulation`**, so the
-default `CONDITIONS_DIR` is wrong there: `NL_CONDITIONS_DIR` is not optional.
-It is now baked into every file the daemon renders, which is the other half of
-the reason a pinky-rendered job re-runs correctly anywhere the conditions tree
-is at that path.
+default `CONDITIONS_DIR` is wrong there: `NL_CONDITIONS_DIR` is not optional,
+because the ODB specs are read from it in both modes. It is baked into every
+file the daemon renders, which is the other half of the reason a pinky-rendered
+job re-runs correctly anywhere the conditions tree is at that path.
+
+To run the daemon's jobs from JSON for a while (the rollback), start it with
+`NL_CONDITIONS=json:<dir>` in its environment; each job it renders then records
+`json:<dir>`. Unset it and restart to go back to the database.
+
+**At startup the daemon announces its conditions source** as a MIDAS message
+(and on stdout), resolved exactly as every job it renders will resolve it:
+`Nearline daemon: conditions from the database host=... port=... dbname=...
+(the job's default)`. Anything else is sent as a MIDAS **error**: a JSON source
+(`... WARNING: conditions from JSON <dir>, NOT from the database
+(NL_CONDITIONS in the daemon's environment) ...`), which usually means an
+`NL_CONDITIONS` leaked into the environment the daemon was started from, or a
+source that does not resolve (a missing service), in which case every job would
+fail to start. Read that message after every restart.
+
+A render that fails (for example a service the daemon's user does not define)
+makes the job fail to start: the daemon sends a MIDAS error "Job N failed to
+start: ..." and marks the job's row `FAILED`, so it shows and is requeued like
+any failed job (see *Conditions DB down*, step 4). Before, such a row stayed
+`CLAIMED` for good.
 
 ## The tuning loop
 
@@ -1225,12 +1518,14 @@ starts and are never overwritten.
 ## What fails early, on purpose
 
 `check()` runs before a single Configurable is touched and reports **every**
-problem it finds in one message, rather than the first:
+problem it finds in one message, rather than the first. What it cannot see is
+whether the database answers: that is found at `initialize()` (about 20 s),
+where an unreachable server fails the job (*Conditions DB down*).
 
 1. `NL_MIDAS` or `NL_OUT` unset — the message shows **both** ways in: the interactive `NL_MIDAS=... NL_OUT=... gaudirun.py nearline_job.py`, and `python -m pioneer.nearline.process <midas file> --out-dir DIR`, which needs no environment at all. (A rendered file cannot reach this one: its paths are filled in.)
 2. `NL_MIDAS` does not exist on disk.
 3. The directory of `NL_OUT` is not an existing directory.
-4. A resolved conditions container or ODB spec does not exist — one line per file, naming the absolute path.
+4. A resolved conditions container or ODB spec does not exist — one line per file, naming the absolute path. In db mode only the ODB specs and `ODB_OVERRIDES` are files. Next to it: `CONDITIONS` does not parse, or names a service no service file defines (the message lists the files searched and gives the `process.py --conditions json:<snapshot dir>` line), or, unrendered, `pioneer` is not on `PYTHONPATH` to expand the service. In db mode also: a container setting changed from its committed value, or a `CONDITIONS_DIR` holding `bt2026_*.json` that is not a `reco_testbeam/conditions` tree (use json mode for either). No message echoes a conninfo: only host, port and dbname are ever printed.
 5. Both halves off (`WD_ENABLED` and `PSM_DECODE`): nothing would decode.
 6. `PSM_RECO` without `PSM_DECODE`: nothing would produce `/Event/muquad` and `/Event/mutrig`.
 7. `PSM_DECODE` with an empty `PSM_GEOMETRY_BASE`: no `GeoHeader`, and the decoder throws on hit one.
@@ -1251,16 +1546,16 @@ problem it finds in one message, rather than the first:
 22. `LIGHT`, `PSM_PIXEL_MASK`, `PSM_TIMEWALK`, `PSM_TIMEWALK_CORRECTION` or `PSM_SMA_WIDE_DT` not a bool (`NL_LIGHT` or a rendered `light` other than `1`/`0` ends up here): a string such as `"False"` is true in Python and would switch the setting on.
 23. `PSM_TIMEWALK` on and `PSM_TIMEWALK_DT_MIN`/`_MAX`/`_BINS` not an axis: max not above min, or bins not an integer 1-8192.
 24. `PSM_RF_CHANNEL` not an integer, outside 0-15, or equal to `PSM_CURRENT_CHANNEL`: the SMA word's channel field is 4 bits, and the decoder takes the RF channel first, so the current pulses would become RF pulses.
-25. A `GEOCOND` base with an empty `PSM_GEOMETRY_FILES`: nothing supplies the table it names.
+25. A `GEOCOND` base with an empty `PSM_GEOMETRY_FILES` (json mode): nothing supplies the table it names.
 26. `COND:isel` in `PSM_GEOMETRY_TRANS` without `bt2026_isel.json` in `ODB_SPECS`.
-27. `PSM_PIXEL_MASK` on (with `PSM_DECODE`) and a `PSM_GEOMETRY_FILES` without `bt2026_psm_readout_map.json`: nothing would supply the `mupix_pixel_mask` table, and the decoder stops at `initialize()`.
-28. `PSM_TIMEWALK_CORRECTION` on (with `PSM_DECODE`) and a `PSM_GEOMETRY_FILES` without `bt2026_psm_readout_map.json`: nothing would supply the `mupix_timewalk` table, and the correction layer stops at `initialize()`.
+27. json mode, `PSM_PIXEL_MASK` on (with `PSM_DECODE`) and a `PSM_GEOMETRY_FILES` without `bt2026_psm_readout_map.json`: nothing would supply the `mupix_pixel_mask` table, and the decoder stops at `initialize()`.
+28. json mode, `PSM_TIMEWALK_CORRECTION` on (with `PSM_DECODE`) and a `PSM_GEOMETRY_FILES` without `bt2026_psm_readout_map.json`: nothing would supply the `mupix_timewalk` table, and the correction layer stops at `initialize()`.
 29. `PSM_WEIGHT_STRATEGY` not `0`, `1` or `2`.
 30. `PSM_WEIGHT_STRATEGY >= 1` without both `PSM_DECODE` and `PSM_GEOMETRY_BASE`: no `PIGeometrySvc` to take the L1/L2 plane footprints from.
 31. `PSM_WEIGHT_STRATEGY >= 1` without `COND:isel` in `PSM_GEOMETRY_TRANS`: every run would be treated as sitting at the design stage position.
 32. Exactly one of `WD_ALIGN_TABLE` / `WD_ECAL_TABLE` set: `PIWDCalibrator` needs both.
 33. `WD_ENABLED` with an empty `WD_RF_TABLE`: `PIWDRFPhase` runs first in `WDAnalysisSeq` and `PIWDWaveformAnalysis` reads `/Event/wd_rf_phase`, so the RF table cannot be empty.
-34. `WD_ROLE_TABLE` set with an empty `WD_CONDITIONS_FILES`: nothing would supply the `wd_channel_map` table.
+34. json mode, `WD_ROLE_TABLE` set with an empty `WD_CONDITIONS_FILES`: nothing would supply the `wd_channel_map` table.
 35. `WD_CHANNEL_SETTINGS_TABLE` set with an empty `ODB_SPECS`: only the begin-of-run ODB dump serves `wd_channel_settings`.
 36. `WD_CAL_CHANNELS` not a subset of `WD_CHANNELS`: they would have no features to calibrate.
 37. `WD_SCALER_MONITOR` without `WD_ENABLED`: nothing would produce `/Event/wd_scalers`.

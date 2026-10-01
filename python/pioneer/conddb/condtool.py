@@ -3,17 +3,29 @@
 
 The loaders write containers; this is the other half of the operational job:
 "what will run N read?", "which intervals are still open?", "close this
-open-ended calibration at run M", "retire that row". It speaks to SQLite, to a
-PostgreSQL server over a conninfo, and to the sidecar container over
-docker exec, through the same executors the loaders use.
+open-ended calibration at run M", "retire that row", "give me this table as a
+container to edit". It speaks to SQLite, to a PostgreSQL server over a
+conninfo (a libpq service name is the normal spelling), and to a container
+over docker exec, through the same executors the loaders use.
 
-    python3 condtool.py --docker testbeam-pgdb tables
-    python3 condtool.py --docker testbeam-pgdb tags wd_align
+    C=service=pioneer-conditions-admin
+    python3 condtool.py --conninfo $C tables
+    python3 condtool.py --conninfo $C tags wd_align
     python3 condtool.py --sqlite out/conditions.db iov wd_align --all
-    python3 condtool.py --docker testbeam-pgdb resolve wd_align --run 193
-    python3 condtool.py --docker testbeam-pgdb close wd_align --row-id 3 --run-end 300
-    python3 condtool.py --docker testbeam-pgdb deactivate wd_align --row-id 3 \
+    python3 condtool.py --conninfo $C resolve wd_align --run 193
+    python3 condtool.py --conninfo $C close wd_align --row-id 3 --run-end 300
+    python3 condtool.py --conninfo $C deactivate wd_align --row-id 3 \\
         --comment "wrong cable map"
+    python3 condtool.py --conninfo $C export sma_coarse_shift --out sma.json
+
+``export`` writes the table as a container of that one table: its active
+intervals renumbered 1..N, every tag, tag-wide and per-interval payloads as
+the database holds them (cond_export.py), plus an ``_export`` record of the
+table's fingerprint (highest row_id, active intervals) at export time. Edit
+it and load it back with ``json2pg.py $C sma.json``; the load replaces every
+active interval of each tag the file names, which is why the export holds
+the complete table, and it is refused if the table changed since the export
+(someone else's edit would be lost); ``json2pg.py --force`` overrides.
 
 ``resolve`` reproduces PICondIov.h exactly -- explicit tag or the unique
 default tag, that tag's active rows only, half-open [run_start, run_end), and
@@ -37,11 +49,13 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from cond_loader import LoaderError, lit, make_executor, schema_version
+from cond_loader import EXPORT_KEY, LoaderError, lit, make_executor, schema_version
+from cond_export import export_table, table_fingerprint
 
 OPEN_END = 2147483647   # the sentinel the C++ layers use for an open interval
 
@@ -285,12 +299,44 @@ def cmd_deactivate(ex, args) -> int:
     return 0
 
 
+def cmd_export(ex, args) -> int:
+    """The table as a one-table container, to stdout or --out."""
+    _require_table(ex, args.table)
+    hint = None
+    if args.order_from:
+        try:
+            hint = json.loads(Path(args.order_from).read_text(encoding="utf-8")).get(args.table)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise LoaderError(f"--order-from {args.order_from}: {exc}") from None
+    # The fingerprint before the export: a change after it is caught at load
+    # time, one between an export and a later fingerprint would not be.
+    fingerprint = table_fingerprint(ex, args.table)
+    table = export_table(ex, args.table, order_from=hint)
+    table[EXPORT_KEY] = {
+        "fingerprint": list(fingerprint),
+        "source": ex.label,
+        "exported_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "note": "json2pg.py refuses this file if the table's intervals changed since "
+                "the export (highest row_id, active intervals); --force overrides. "
+                "The loader stores nothing of this key.",
+    }
+    text = json.dumps({args.table: table}, indent=2, ensure_ascii=False) + "\n"
+    if not args.out:
+        sys.stdout.write(text)
+        return 0
+    Path(args.out).write_text(text, encoding="utf-8")
+    print(f"{args.table}: exported from {ex.label} to {args.out} (fingerprint: highest "
+          f"row_id {fingerprint[0]}, {fingerprint[1]} active)", file=sys.stderr)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     backend = ap.add_mutually_exclusive_group(required=True)
     backend.add_argument("--sqlite", metavar="FILE", help="SQLite conditions database")
     backend.add_argument("--conninfo", metavar="STR",
-                         help='libpq connection string (no password: use PGPASSWORD)')
+                         help='libpq connection string, e.g. service=pioneer-conditions '
+                              '(no password: use ~/.pgpass or PGPASSWORD)')
     backend.add_argument("--docker", metavar="NAME",
                          help="run psql inside this docker container")
     ap.add_argument("--database", default="conditions",
@@ -324,10 +370,18 @@ def main() -> int:
     p.add_argument("--row-id", type=int, required=True)
     p.add_argument("--comment", required=True, help="why it was retired")
 
+    p = subs.add_parser("export", help="the table as a container (active intervals), "
+                                       "to edit and load back")
+    p.add_argument("table")
+    p.add_argument("--out", metavar="FILE", help="write here (default: stdout)")
+    p.add_argument("--order-from", metavar="FILE",
+                   help="a container holding the table, to take order and spelling from "
+                        "(e.g. the git copy)")
+
     args = ap.parse_args()
     handlers = {"tables": cmd_tables, "tags": cmd_tags, "iov": cmd_iov,
                 "resolve": cmd_resolve, "close": cmd_close,
-                "deactivate": cmd_deactivate}
+                "deactivate": cmd_deactivate, "export": cmd_export}
     try:
         ex = make_executor(sqlite=args.sqlite, conninfo=args.conninfo,
                            docker=args.docker, database=args.database)

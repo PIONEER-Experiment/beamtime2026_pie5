@@ -1,9 +1,12 @@
-"""Rendering nearline_job.py, light mode, and the file names around it.
+"""Rendering nearline_job.py, light mode, the conditions source, and the file
+names around it.
 
 Runs without Gaudi, MIDAS or a database. The rendered job is executed with
 stand-in Configurables that only record what the job file sets on them, which
-is enough to see what light mode changes in the job's configuration; whether
-Gaudi accepts that configuration is for a real gaudirun.py.
+is enough to see what light mode and the conditions source change in the job's
+configuration; whether Gaudi accepts that configuration is for a real
+gaudirun.py. The libpq service the job defaults to comes from a service file
+in tmp_path (PGSERVICEFILE), never from the caller's ~/.pg_service.conf.
 """
 
 import importlib.util
@@ -15,10 +18,28 @@ from pathlib import Path
 import pytest
 
 from pioneer.nearline import render
+from pioneer.conddb.pgservice import ServiceNotFound
 from pioneer.nearline.render import (PLACEHOLDERS, hists_file_name, registered_file_name,
                                      render_job)
 
 JOB = Path(render.__file__).with_name("nearline_job.py")
+
+# What the test service file expands the job's default service into.
+CONNINFO = "host=pg.example port=5432 dbname=conditions user=cond_viewer"
+
+
+@pytest.fixture(autouse=True)
+def _pg_service(tmp_path, monkeypatch):
+    """A service file defining pioneer-conditions (with a password, which must never
+    reach a rendered job), and no NL_CONDITIONS from the caller."""
+    path = tmp_path / "pg_service.conf"
+    path.write_text("[pioneer-conditions]\nhost=pg.example\nport=5432\ndbname=conditions\n"
+                    "user=cond_viewer\npassword=hunter2\n")
+    monkeypatch.setenv("PGSERVICEFILE", str(path))
+    monkeypatch.delenv("PGSYSCONFDIR", raising=False)
+    for var in ("NL_CONDITIONS", "NL_CONDITIONS_DIR"):
+        monkeypatch.delenv(var, raising=False)
+    return path
 
 
 # -- rendering -----------------------------------------------------------------
@@ -36,6 +57,8 @@ def test_the_job_file_has_one_dollar_sign_per_placeholder():
     # in the unrendered file are the placeholders; the render step relies on it.
     source = JOB.read_text()
     assert source.count("$") == len(PLACEHOLDERS) == 12
+    # the database connection is part of the conditions source, not a list of its own
+    assert "conditions" in PLACEHOLDERS and "pg" not in PLACEHOLDERS
     for name in PLACEHOLDERS:
         assert source.count("${" + name + "}") == 1, name
 
@@ -156,10 +179,11 @@ def job_env(tmp_path, monkeypatch):
     for name, mod in _gaudi_stubs().items():
         monkeypatch.setitem(sys.modules, name, mod)
     monkeypatch.setenv("PIONEERSYS", str(tmp_path / "pioneersys"))
-    for var in ("NL_MIDAS", "NL_OUT", "NL_EVTMAX", "NL_PG", "NL_OVERRIDES", "NL_LIGHT"):
+    for var in ("NL_MIDAS", "NL_OUT", "NL_EVTMAX", "NL_CONDITIONS", "NL_OVERRIDES", "NL_LIGHT"):
         monkeypatch.delenv(var, raising=False)
     settings = _settings()
-    cond = tmp_path / "conditions"
+    # named like the real tree: db mode refuses a directory of containers that is not one
+    cond = tmp_path / "reco_testbeam" / "conditions"
     for name in (list(settings["WD_CONDITIONS_FILES"]) + list(settings["PSM_GEOMETRY_FILES"])
                  + [settings["PSM_CHANNEL_MAP_FILE"]] + list(settings["ODB_SPECS"])):
         (cond / name).parent.mkdir(parents=True, exist_ok=True)
@@ -223,7 +247,8 @@ def test_a_job_from_a_renderer_without_light_is_the_full_job(job_env):
     tmp_path, midas = job_env
     from string import Template
     mapping = {"in_file": str(midas), "out_file": str(tmp_path / "runNNNNN_SSSSS.root"),
-               "evt_max": "-1", "conditions_dir": os.environ["NL_CONDITIONS_DIR"], "pg": "",
+               "evt_max": "-1", "conditions_dir": os.environ["NL_CONDITIONS_DIR"],
+               "conditions": "db:" + CONNINFO,
                "rendered_at": "2026-01-01T00:00:00+00:00", "rendered_by": "old@daemon",
                "job_source": str(JOB), "job_git": "unknown", "job_id": "1", "run_id": "2"}
     assert set(mapping) == set(PLACEHOLDERS) - {"light"}
@@ -305,6 +330,288 @@ def test_a_scint_window_that_is_empty_or_reaches_the_delayed_window_is_rejected(
     text = target.read_text().replace("PSM_SCINT_WINDOW_NS = 5.0", f"PSM_SCINT_WINDOW_NS = {value}")
     with pytest.raises(SystemExit, match="PSM_SCINT_WINDOW_NS"):
         _run(target, text)
+
+
+# -- the conditions source ----------------------------------------------------
+
+def _containers(settings):
+    return (list(settings["WD_CONDITIONS_FILES"]) + list(settings["PSM_GEOMETRY_FILES"])
+            + [settings["PSM_CHANNEL_MAP_FILE"]])
+
+
+def test_job_default_is_the_database_by_service_name():
+    assert render.job_conditions(JOB.read_text()) == "db:service=pioneer-conditions"
+
+
+def test_render_bakes_the_explicit_password_free_conninfo(tmp_path):
+    _, text = _render(tmp_path, False)
+    assert f'"conditions": "db:{CONNINFO}"' in text
+    block = text[text.index("_RENDERED = {"):text.index("# Which of the two ways")]
+    assert "service=" not in block and "password" not in block
+    assert "hunter2" not in text
+
+
+def test_render_bakes_json_as_an_absolute_resolved_directory(tmp_path):
+    real = tmp_path / "snapshots" / "20260930T120000Z"
+    real.mkdir(parents=True)
+    (tmp_path / "snapshots" / "latest").symlink_to(real)
+    _, text = _render(tmp_path, False, conditions=f"json:{tmp_path}/snapshots/latest")
+    assert f'"conditions": "json:{real}"' in text
+    _, text = _render(tmp_path, False, conditions="json")
+    assert '"conditions": "json"' in text
+
+
+def test_render_takes_nl_conditions_and_the_argument_wins(tmp_path, monkeypatch):
+    monkeypatch.setenv("NL_CONDITIONS", f"json:{tmp_path}")
+    _, text = _render(tmp_path, False)
+    assert f'"conditions": "json:{tmp_path}"' in text
+    _, text = _render(tmp_path, False, conditions="db")
+    assert f'"conditions": "db:{CONNINFO}"' in text
+
+
+def test_render_with_an_undefined_service_raises_and_writes_nothing(tmp_path):
+    with pytest.raises(ServiceNotFound, match="'nope'"):
+        _render(tmp_path, False, conditions="db:nope")
+    assert not (tmp_path / "out" / "run00790_00000.py").exists()
+
+
+def test_render_rejects_an_unknown_source(tmp_path):
+    with pytest.raises(ValueError, match="sqlite"):
+        _render(tmp_path, False, conditions="sqlite:x.db")
+
+
+def test_a_quoted_conninfo_survives_the_render(tmp_path, monkeypatch):
+    spec = "db:host=h dbname=d options='-c search_path=cond' application_name='a\\'b'"
+    target, text = _render(tmp_path, False, conditions=spec)
+    compile(text, str(target), "exec")
+    # the literal in the rendered file reads back as the resolved conninfo
+    scope = {}
+    block = text[text.index("_RENDERED = {"):text.index("# Which of the two ways")]
+    exec(block, scope)
+    assert scope["_RENDERED"]["conditions"] == "db:" + render.resolve_conninfo(spec[3:])
+
+
+@pytest.mark.parametrize("spec", ["db", "db:", "db: ", "DB", "db:pioneer-conditions-admin",
+                                  "db:service=x", "db: host=h port=1 dbname=d ",
+                                  "json", "json:", "json:/a/b", "json:~/snap", " json : /x ",
+                                  "postgres", "sqlite:x password=hunter2"])
+def test_the_job_and_the_renderer_split_a_source_alike(job_env, spec):
+    tmp_path, midas = job_env
+    job = _run(render_job(midas, tmp_path / "run00790_00000.root", conditions="json"))
+
+    def outcome(split):
+        try:
+            return split(spec)
+        except ValueError as exc:
+            assert "hunter2" not in str(exc)
+            return ValueError
+    assert outcome(job["_split_conditions"]) == outcome(render.split_conditions)
+
+
+@pytest.mark.parametrize("spec", ["db:", "json:", "db:  "])
+def test_a_colon_with_nothing_after_it_is_not_the_default(tmp_path, spec):
+    with pytest.raises(ValueError, match="nothing after the colon"):
+        _render(tmp_path, False, conditions=spec)
+
+
+def test_the_job_describes_a_conninfo_as_pgservice_does(job_env):
+    from pioneer.conddb.pgservice import describe, format_conninfo
+    tmp_path, midas = job_env
+    job = _run(render_job(midas, tmp_path / "run00790_00000.root", conditions="json"))
+    for keys in ({"host": "h", "port": "5432", "dbname": "c", "user": "u"},
+                 {"hostaddr": "10.0.0.1", "dbname": "c"}, {"dbname": "c"}):
+        text = format_conninfo(keys)
+        assert job["_describe_conninfo"](text) == describe(text)
+
+
+def test_rendered_db_job_reads_only_the_database(job_env, capsys):
+    tmp_path, midas = job_env
+    job = _run(render_job(midas, tmp_path / "run00790_00000.root"))
+    assert job["condSvc"].PgConnections == [CONNINFO]
+    assert job["condSvc"].JsonFiles == []
+    cond = Path(os.environ["NL_CONDITIONS_DIR"])
+    assert job["condSvc"].OdbTables == [str(cond / f) for f in job["ODB_SPECS"]]
+    out = capsys.readouterr().out
+    assert "[nearline] conditions db host=pg.example port=5432 dbname=conditions\n" in out
+    assert f"[nearline] odb specs  {cond}" in out
+    assert "cond_viewer" not in out
+
+
+def test_db_job_keeps_an_overrides_file_as_its_only_json(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root")
+    (Path(os.environ["NL_CONDITIONS_DIR"]) / "ov.json").write_text("{}")
+    text = target.read_text().replace('ODB_OVERRIDES = ""', 'ODB_OVERRIDES = "ov.json"')
+    job = _run(target, text)
+    assert job["condSvc"].JsonFiles == [str(Path(os.environ["NL_CONDITIONS_DIR"]) / "ov.json")]
+    assert job["condSvc"].PgConnections == [CONNINFO]
+
+
+_EMPTIED = (('WD_CONDITIONS_FILES = ["bt2026_wavedream_timebase.json", '
+             '"bt2026_wavedream_calibration.json"]', "WD_CONDITIONS_FILES = []"),
+            ('PSM_GEOMETRY_FILES = ["bt2026_psm_geometry.json", '
+             '"bt2026_psm_readout_map.json"]', "PSM_GEOMETRY_FILES = []"))
+
+
+def test_db_job_needs_no_container_files(job_env):
+    # The container-file checks are json-mode only.
+    tmp_path, midas = job_env
+    cond = Path(os.environ["NL_CONDITIONS_DIR"])
+    for name in _containers(_settings()):
+        (cond / name).unlink()
+    job = _run(render_job(midas, tmp_path / "run00790_00000.root"))
+    assert job["condSvc"].JsonFiles == []
+    with pytest.raises(SystemExit, match="conditions container does not exist"):
+        _run(render_job(midas, tmp_path / "run00790_00000.root", conditions="json"))
+
+
+def test_the_committed_container_settings_are_the_blocks(job_env):
+    tmp_path, midas = job_env
+    job = _run(render_job(midas, tmp_path / "run00790_00000.root"))
+    for name, value in job["_JSON_ONLY_DEFAULTS"].items():
+        assert _settings()[name] == value, name
+
+
+def test_db_job_refuses_changed_container_settings(job_env):
+    tmp_path, midas = job_env
+    text = render_job(midas, tmp_path / "run00790_00000.root").read_text()
+    for old, new in _EMPTIED:
+        assert text.count(old) == 1
+        text = text.replace(old, new)
+    with pytest.raises(SystemExit, match="WD_CONDITIONS_FILES, PSM_GEOMETRY_FILES differ") as err:
+        _run(tmp_path / "x.py", text)
+    assert "--conditions json:DIR" in str(err.value)
+    # and json mode still says what is wrong with them
+    with pytest.raises(SystemExit, match="PSM_GEOMETRY_FILES is empty"):
+        _run(tmp_path / "x.py", text.replace(f'"db:{CONNINFO}"', '"json"'))
+
+
+def test_db_job_refuses_changed_container_settings_from_an_overrides_file(job_env, monkeypatch):
+    tmp_path, midas = job_env
+    overrides = tmp_path / "ov.py"
+    overrides.write_text('PSM_CHANNEL_MAP_FILE = "/scratch/my_channel_map.json"\n')
+    monkeypatch.setenv("NL_MIDAS", str(midas))
+    monkeypatch.setenv("NL_OUT", str(tmp_path / "run00790_00000.root"))
+    monkeypatch.setenv("NL_OVERRIDES", str(overrides))
+    with pytest.raises(SystemExit, match="PSM_CHANNEL_MAP_FILE differ"):
+        _run(JOB)
+    monkeypatch.setenv("NL_CONDITIONS", "json")
+    overrides.write_text("")
+    _run(JOB)
+
+
+def test_db_job_refuses_a_conditions_dir_holding_its_own_containers(job_env, monkeypatch):
+    tmp_path, midas = job_env
+    copy = tmp_path / "mask-trial"
+    (copy / "odb").mkdir(parents=True)
+    cond = Path(os.environ["NL_CONDITIONS_DIR"])
+    for name in _containers(_settings()) + list(_settings()["ODB_SPECS"]):
+        (copy / name).write_text("{}")
+    monkeypatch.setenv("NL_CONDITIONS_DIR", str(copy))
+    target = render_job(midas, tmp_path / "run00790_00000.root")
+    with pytest.raises(SystemExit, match="mask-trial holds bt2026_") as err:
+        _run(target)
+    assert "reco_testbeam/conditions checkout" in str(err.value)
+    # json mode reads them, and a directory with odb/ only is fine for db mode
+    _run(render_job(midas, tmp_path / "run00790_00000.root", conditions="json"))
+    for name in _containers(_settings()):
+        (copy / name).unlink()
+    _run(render_job(midas, tmp_path / "run00790_00000.root"))
+    assert cond.is_dir()
+
+
+def test_a_bad_conninfo_is_reported_without_echoing_it(job_env, monkeypatch):
+    tmp_path, midas = job_env
+    monkeypatch.setenv("NL_MIDAS", str(midas))
+    monkeypatch.setenv("NL_OUT", str(tmp_path / "run00790_00000.root"))
+    for spec in ("db:host=h password=hunter2 'oops", "db:dbname=c password=hunter2",
+                 "db:host=h password=hunter2"):
+        monkeypatch.setenv("NL_CONDITIONS", spec)
+        with pytest.raises(SystemExit) as err:
+            _run(JOB)
+        assert "hunter2" not in str(err.value) and "CONDITIONS names a database" in str(err.value)
+
+
+def test_rendered_json_job_is_the_old_job(job_env, capsys):
+    tmp_path, midas = job_env
+    cond = Path(os.environ["NL_CONDITIONS_DIR"])
+    job = _run(render_job(midas, tmp_path / "run00790_00000.root", conditions="json"))
+    settings = _settings()
+    assert job["condSvc"].JsonFiles == [str(cond / f) for f in _containers(settings)]
+    assert "PgConnections" not in job["condSvc"].__dict__
+    assert f"[nearline] conditions json {cond}\n" in capsys.readouterr().out
+
+
+def test_json_dir_moves_the_containers_but_not_the_odb_specs(job_env, tmp_path):
+    _, midas = job_env
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    for name in _containers(_settings()):
+        (snap / name).write_text("{}")
+    job = _run(render_job(midas, tmp_path / "run00790_00000.root", conditions=f"json:{snap}"))
+    cond = Path(os.environ["NL_CONDITIONS_DIR"])
+    assert job["condSvc"].JsonFiles == [str(snap / f) for f in _containers(_settings())]
+    assert job["condSvc"].OdbTables == [str(cond / f) for f in job["ODB_SPECS"]]
+
+
+def test_rendered_job_ignores_nl_conditions(job_env, monkeypatch):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root")
+    monkeypatch.setenv("NL_CONDITIONS", "json")
+    assert _run(target)["condSvc"].PgConnections == [CONNINFO]
+
+
+def test_unrendered_job_expands_the_service_and_takes_nl_conditions(job_env, monkeypatch):
+    tmp_path, midas = job_env
+    monkeypatch.setenv("NL_MIDAS", str(midas))
+    monkeypatch.setenv("NL_OUT", str(tmp_path / "run00790_00000.root"))
+    job = _run(JOB)
+    assert job["RENDERED"] is False and job["condSvc"].PgConnections == [CONNINFO]
+    monkeypatch.setenv("NL_CONDITIONS", "json")
+    assert "PgConnections" not in _run(JOB)["condSvc"].__dict__
+
+
+def test_unrendered_job_with_an_undefined_service_points_at_the_snapshot(job_env, monkeypatch):
+    tmp_path, midas = job_env
+    monkeypatch.setenv("NL_MIDAS", str(midas))
+    monkeypatch.setenv("NL_OUT", str(tmp_path / "run00790_00000.root"))
+    monkeypatch.setenv("NL_CONDITIONS", "db:nope")
+    with pytest.raises(SystemExit) as err:
+        _run(JOB)
+    assert "'nope'" in str(err.value) and "--conditions json:" in str(err.value)
+    assert "Conditions DB down" in str(err.value)
+
+
+def test_a_bad_source_is_rejected_by_check(job_env, monkeypatch):
+    tmp_path, midas = job_env
+    monkeypatch.setenv("NL_MIDAS", str(midas))
+    monkeypatch.setenv("NL_OUT", str(tmp_path / "run00790_00000.root"))
+    monkeypatch.setenv("NL_CONDITIONS", "postgres")
+    with pytest.raises(SystemExit, match="CONDITIONS starts with 'postgres'"):
+        _run(JOB)
+
+
+def test_process_takes_conditions(tmp_path, capsys):
+    from pioneer.nearline import process
+    midas = tmp_path / "run00790_00000.mid.lz4"
+    midas.write_bytes(b"")
+    out = tmp_path / "out"
+    assert process.main([str(midas), "--out-dir", str(out), "--render-only",
+                         "--conditions", f"json:{tmp_path}"]) == 0
+    assert f'"conditions": "json:{tmp_path}"' in (out / "run00790_00000.py").read_text()
+    assert process.main([str(midas), "--out-dir", str(out), "--render-only"]) == 0
+    assert f'"conditions": "db:{CONNINFO}"' in (out / "run00790_00000.py").read_text()
+
+
+def test_process_with_an_undefined_service_says_what_to_do(tmp_path, capsys):
+    from pioneer.nearline import process
+    midas = tmp_path / "run00790_00000.mid.lz4"
+    midas.write_bytes(b"")
+    assert process.main([str(midas), "--out-dir", str(tmp_path / "o"), "--render-only",
+                         "--conditions", "db:nope"]) == 2
+    out = capsys.readouterr().out
+    assert "'nope'" in out and "--conditions json:~/bt2026/conddb-snapshots/latest" in out
+    assert not (tmp_path / "o" / "run00790_00000.py").exists()
 
 
 # -- file names in the run database --------------------------------------------
@@ -507,3 +814,49 @@ def test_start_command_has_no_jobs(daemon_module):
     args = daemon_module.build_parser().parse_args(["--midas-expt", "bt2026", "-j", "5"])
     cmd = daemon_module.start_command(args, executable="py", script="d.py")
     assert "-j" not in cmd.split() and "--jobs" not in cmd
+
+
+def test_daemon_announces_the_database(daemon_module, monkeypatch):
+    msg, bad = daemon_module.conditions_announcement(environ={})
+    assert bad is False
+    assert msg == ("Nearline daemon: conditions from the database host=pg.example port=5432 "
+                   "dbname=conditions (the job's default)")
+
+
+def test_daemon_warns_loudly_about_json(daemon_module, tmp_path):
+    msg, bad = daemon_module.conditions_announcement(environ={"NL_CONDITIONS": f"json:{tmp_path}"})
+    assert bad is True and "NOT from the database" in msg and str(tmp_path) in msg
+    assert "NL_CONDITIONS in the daemon's environment" in msg
+
+
+def test_daemon_says_up_front_when_the_source_does_not_resolve(daemon_module):
+    msg, bad = daemon_module.conditions_announcement(environ={"NL_CONDITIONS": "db:nope"})
+    assert bad is True and "every nearline job will fail to start" in msg and "'nope'" in msg
+
+
+def test_a_job_that_fails_to_start_is_marked_failed(daemon_module, monkeypatch, tmp_path):
+    class BrokenJob:
+        def start(self):
+            raise ValueError("libpq service 'pioneer-conditions' is not defined")
+
+    class Db:
+        def __init__(self):
+            self.status = []
+
+        def update_status(self, table, job_id, status):
+            self.status.append((table, job_id, status))
+
+    messages = []
+    monkeypatch.setattr(daemon_module.nl_jobs, "create_job", lambda cfg, db: BrokenJob())
+    d = object.__new__(daemon_module.NearlineDaemon)
+    d.light = False
+    d.midas_logger_path = d.backup_path = d.remote_path = tmp_path
+    d.nearline_output_path = tmp_path
+    d.db_interface = Db()
+    d.message = lambda msg, is_error=False, send_to_slack=False: messages.append((msg, is_error))
+    queue = daemon_module.NearlineQueue("nearline", 1)
+    d.dispatch_job(queue, {"midas_run_number": 790, "job_id": 12, "job_type": "nearline"})
+    assert d.db_interface.status == [("postproc_job", 12, "FAILED")]
+    assert queue.active == []
+    assert messages == [("Job 12 failed to start: libpq service 'pioneer-conditions' is not "
+                         "defined", True)]

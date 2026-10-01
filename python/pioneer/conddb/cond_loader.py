@@ -14,11 +14,12 @@ was served during data taking. The old PostgreSQL loader deleted the table and
 re-inserted it, which threw away the history the ConditionsHeader points at.
 Instead, loading a container:
 
-  * pins the constants the currently active intervals were serving. A tag-wide
-    payload (JSON ``values``) belongs to every active interval of the tag, so
-    before those intervals are retired it is copied onto each of them as a
-    per-interval payload (``iov_row_id = row_id``). History then keeps its
-    constants, and no interval ever carries both payload kinds;
+  * pins the constants the tag's intervals were serving. A tag-wide payload
+    (JSON ``values``) belongs to every interval of the tag that has no payload
+    of its own, the inactive ones included, so before it is deleted it is
+    copied onto each of them as a per-interval payload
+    (``iov_row_id = row_id``). History then keeps its constants, and no
+    interval ever carries both payload kinds;
   * deactivates the tag's intervals (``is_active`` is the only column of an
     existing cond_iov row a load ever changes);
   * inserts the container's intervals with fresh ``row_id``s above the highest
@@ -58,6 +59,16 @@ VALUE_COLUMNS = ("table_name", "tag", "iov_row_id", "channel_id", "key",
 
 class LoaderError(Exception):
     """A container, a database state or a value the loader refuses."""
+
+
+class FingerprintMoved(LoaderError):
+    """A table's intervals changed between reading it and loading into it."""
+
+
+#: The key under which ``condtool export`` records where a table came from
+#: (``{"fingerprint": [max_row_id, active], "source": ...}``). The loader reads
+#: it to refuse a stale edit and stores nothing of it.
+EXPORT_KEY = "_export"
 
 
 # ---------------------------------------------------------------------------
@@ -136,8 +147,13 @@ class PsqlExec:
         and csv.reader unquotes them. -t drops the header row. psql prints SQL
         NULL and the empty string identically in CSV, so a query that has to
         tell them apart selects a companion ``col IS NULL`` column.
+
+        ``extra_float_digits = 3`` first: a server (or role) set to 0 prints a
+        double with 15 significant digits, and an export would then round
+        every real it reads without anything noticing. -q keeps the SET's
+        command tag out of the output.
         """
-        out = self._run(sql, ["--csv", "-t"])
+        out = self._run("SET extra_float_digits = 3;\n" + sql, ["--csv", "-t", "-q"])
         return [row for row in csv.reader(io.StringIO(out))]
 
     def close(self) -> None:
@@ -170,8 +186,10 @@ def describe_conninfo(conninfo: str) -> str:
 
     A libpq conninfo routinely carries ``password=``; printing it into a log
     file or a provenance record leaks the credential to everyone who can read
-    the output. Only host/hostaddr/port/dbname say which server was used, and
-    that is what an operator reading a log needs.
+    the output. Only service/host/hostaddr/port/dbname say which server was
+    used, and that is what an operator reading a log needs. A service name is
+    kept because ``service=pioneer-conditions-admin`` alone is the normal
+    spelling on the DAQ host; its expansion is in ~/.pg_service.conf.
     """
     if "://" in conninfo:
         return "<postgresql URI>"
@@ -185,10 +203,10 @@ def describe_conninfo(conninfo: str) -> str:
             return "<unparseable conninfo>"
         key, _, value = token.partition("=")
         seen[key.strip()] = value
-    for key in ("host", "hostaddr", "port", "dbname"):
+    for key in ("service", "host", "hostaddr", "port", "dbname"):
         if key in seen:
             keep.append(f"{key}={seen[key]}")
-    return " ".join(keep) or "<conninfo without host or dbname>"
+    return " ".join(keep) or "<conninfo without service, host or dbname>"
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +294,11 @@ def lit(value, dialect: str = "pg") -> str:
     if isinstance(value, int):
         return str(value)
     if isinstance(value, float):
+        if value == 0.0 and math.copysign(1.0, value) < 0 and dialect == "pg":
+            # "-0.0" is unary minus on the numeric 0.0, which has no sign: the
+            # column would get +0. The float8 input function keeps it. (SQLite
+            # stores -0.0 as 0 whatever the spelling.)
+            return "'-0'::float8"
         return repr(value)
     return "'" + str(value).replace("'", "''") + "'"
 
@@ -342,7 +365,8 @@ def read_existing(ex, table: str) -> dict:
     """
     name = lit(table, ex.dialect)
     true = lit(True, ex.dialect)
-    out: dict = {"table": None, "tags": {}, "max_row_id": 0, "active": {}}
+    out: dict = {"table": None, "tags": {}, "max_row_id": 0, "active": {},
+                 "unpinned": {}}
 
     rows = ex.query(f"SELECT schema, version, kind FROM cond_tables "
                     f"WHERE name = {name};")
@@ -369,6 +393,18 @@ def read_existing(ex, table: str) -> dict:
             f"ORDER BY i.row_id;"):
         out["active"].setdefault(tag, []).append(
             {"row_id": int(row_id), "own_payload": int(own) > 0})
+
+    # Every interval, active or not, that reads the tag-wide payload because it
+    # has none of its own. An interval retired by an earlier load was pinned
+    # then, but a container may carry inactive intervals itself (a mapping kept
+    # for the record, say), and those read the tag-wide payload until a reload
+    # deletes it.
+    for tag, row_id in ex.query(
+            f"SELECT i.tag, i.row_id FROM cond_iov i "
+            f"WHERE i.table_name = {name} AND NOT EXISTS (SELECT 1 FROM cond_values v "
+            f"WHERE v.table_name = i.table_name AND v.iov_row_id = i.row_id) "
+            f"ORDER BY i.row_id;"):
+        out["unpinned"].setdefault(tag, []).append(int(row_id))
     return out
 
 
@@ -410,7 +446,8 @@ def statements(name: str, table: dict, dialect: str, existing: dict,
                 f"DELETE FROM cond_iov    WHERE table_name = {tname};",
                 f"DELETE FROM cond_tags   WHERE table_name = {tname};",
                 f"DELETE FROM cond_tables WHERE name = {tname};"]
-        existing = {"table": None, "tags": {}, "max_row_id": 0, "active": {}}
+        existing = {"table": None, "tags": {}, "max_row_id": 0, "active": {},
+                    "unpinned": {}}
 
     # 1. the table's identity ------------------------------------------------
     if existing["table"] is None:
@@ -501,10 +538,13 @@ def statements(name: str, table: dict, dialect: str, existing: dict,
                               f"both")
 
     # 4. pin, then retire, the intervals this load supersedes -----------------
+    # The tag-wide payload is about to be deleted, so every interval that reads
+    # it -- active or already inactive -- gets its own copy first. Pinning only
+    # the active ones would leave an inactive interval reading whatever
+    # tag-wide payload the container brings: its history would change.
     for tag in container_tags:
-        for row in existing["active"].get(tag, []):
-            if not row["own_payload"]:
-                out.append(_pin_sql(name, tag, row["row_id"], dialect))
+        for row_id in existing["unpinned"].get(tag, []):
+            out.append(_pin_sql(name, tag, row_id, dialect))
         out.append(f"DELETE FROM cond_values WHERE table_name = {tname} "
                    f"AND tag = {lit(tag, dialect)} AND iov_row_id IS NULL;")
         out.append(f"UPDATE cond_iov SET is_active = {false} WHERE table_name = {tname} "
@@ -553,19 +593,87 @@ def statements(name: str, table: dict, dialect: str, existing: dict,
 # Driver
 # ---------------------------------------------------------------------------
 
-def load(ex, containers, replace: bool = False, set_default: bool = False):
+def load(ex, containers, replace: bool = False, set_default: bool = False,
+         expect: dict | None = None, force: bool = False):
     """Load container files into ``ex``; returns [(path, table, cells, first_row_id)].
 
     One transaction for everything: a container that fails half way through
     leaves the database exactly as it was, so a rejected load never has to be
-    unwound by hand.
+    unwound by hand. ``expect`` and ``force``: see load_tables().
+    """
+    return load_tables(ex, [(str(path), json.loads(Path(path).read_text()))
+                            for path in containers],
+                       replace=replace, set_default=set_default, expect=expect,
+                       force=force)
+
+
+def fingerprint_sql(name: str, dialect: str) -> tuple[str, str]:
+    """(highest row_id ever used, active intervals) of one table, as two SQL
+    scalar subqueries. Every load and every ``condtool close`` takes a new
+    row_id and every ``condtool deactivate`` changes the active count, so an
+    unchanged pair means nobody changed the table's intervals."""
+    tname = lit(name, dialect)
+    return (f"(SELECT COALESCE(MAX(row_id), 0) FROM cond_iov WHERE table_name = {tname})",
+            f"(SELECT COUNT(*) FROM cond_iov WHERE table_name = {tname} "
+            f"AND is_active = {lit(True, dialect)})")
+
+
+def fingerprint(ex, name: str) -> tuple[int, int]:
+    """fingerprint_sql() read now."""
+    top, active = fingerprint_sql(name, ex.dialect)
+    rows = ex.query(f"SELECT {top}, {active};")
+    return int(rows[0][0] or 0), int(rows[0][1] or 0)
+
+
+def _guard_sql(name: str, want: tuple[int, int], dialect: str) -> list[str]:
+    """Abort the load transaction if the table no longer has fingerprint ``want``.
+
+    Runs after the table lock, so it sees every load that committed before
+    this one could start, and none can commit until this one is done.
+    """
+    top, active = fingerprint_sql(name, dialect)
+    moved = f"{top} <> {int(want[0])} OR {active} <> {int(want[1])}"
+    message = (f"conditions table {name} changed since it was read "
+               f"(expected highest row_id {int(want[0])}, {int(want[1])} active)")
+    if dialect == "pg":
+        return [f"DO $cond_guard$ BEGIN IF {moved} THEN RAISE EXCEPTION "
+                f"{lit(message, dialect)}; END IF; END $cond_guard$;"]
+    # SQLite has no DO block; RAISE() exists only inside a trigger.
+    return ["CREATE TEMP TABLE IF NOT EXISTS cond_load_guard (tbl TEXT);",
+            "CREATE TEMP TRIGGER IF NOT EXISTS cond_load_guard_abort BEFORE INSERT "
+            "ON cond_load_guard BEGIN SELECT RAISE(ABORT, 'conditions table changed "
+            "since it was read'); END;",
+            f"INSERT INTO cond_load_guard SELECT {lit(name, dialect)} WHERE {moved};"]
+
+
+def load_tables(ex, containers, replace: bool = False, set_default: bool = False,
+                expect: dict | None = None, force: bool = False):
+    """load() for containers already in memory: ``containers`` is a list of
+    (label, {table name: table}). The label only names the container in
+    messages and in the returned list. Same single transaction.
+
+    The statements are computed from the table's state as read before the
+    transaction. So the transaction first takes an exclusive lock on the
+    interval table (PostgreSQL: SHARE ROW EXCLUSIVE, which concurrent loads,
+    closes and deactivations all wait for; SQLite: BEGIN IMMEDIATE) and then
+    checks that each table still has the fingerprint it was read with. A
+    concurrent writer makes the load fail with FingerprintMoved, never lose
+    the other writer's intervals.
+
+    ``expect`` maps a table name to the fingerprint the caller read it with
+    (a writer that exported, edited and now loads the table). A table
+    carrying an ``_export`` record (condtool export) expects the fingerprint
+    recorded there. ``force`` drops both expectations; the lock and the check
+    against the state just read stay.
     """
     ensure_schema(ex)
     seen: dict[str, str] = {}
-    sql = ["BEGIN;"]
+    sql = ["BEGIN;" if ex.dialect == "pg" else "BEGIN IMMEDIATE;"]
+    if ex.dialect == "pg":
+        sql.append("LOCK TABLE cond_iov IN SHARE ROW EXCLUSIVE MODE;")
+    body: list[str] = []
     loaded = []
-    for path in containers:
-        tables = json.loads(Path(path).read_text())
+    for path, tables in containers:
         for name, table in tables.items():
             if name in seen:
                 raise LoaderError(f"table '{name}' is defined in both {seen[name]} "
@@ -573,14 +681,33 @@ def load(ex, containers, replace: bool = False, set_default: bool = False):
                                   f"or load them separately")
             seen[name] = path
             existing = read_existing(ex, name)
-            sql += statements(name, table, ex.dialect, existing, replace, set_default)
+            now = (existing["max_row_id"], sum(len(v) for v in existing["active"].values()))
+            want = None
+            if not force:
+                record = table.get(EXPORT_KEY) or {}
+                if expect and name in expect:
+                    want = tuple(int(x) for x in expect[name])
+                elif record.get("fingerprint") is not None:
+                    want = tuple(int(x) for x in record["fingerprint"])
+            if want is not None and want != now:
+                raise FingerprintMoved(
+                    f"conditions table {name} changed since it was read: highest row_id "
+                    f"{want[0]} and {want[1]} active interval(s) then, {now[0]} and {now[1]} "
+                    f"now in {ex.label}. Nothing was written.")
+            sql += _guard_sql(name, now, ex.dialect)
+            body += statements(name, table, ex.dialect, existing, replace, set_default)
             first_row = 1 if replace else existing["max_row_id"] + 1
             loaded.append((str(path), name, sum(1 for _ in cells(table)), first_row))
+    sql += body
     sql.append("COMMIT;")
     try:
         ex.script("\n".join(sql))
     except LoaderError as exc:
         text = str(exc)
+        if "changed since it was read" in text:
+            raise FingerprintMoved(
+                f"{text}\n\nAnother writer changed the table between this load reading "
+                f"it and locking it. Nothing was written; rerun.") from exc
         if "cond_iov" in text and any(w in text.lower() for w in
                                       ("unique", "primary key", "duplicate key")):
             raise LoaderError(
@@ -594,4 +721,5 @@ def load(ex, containers, replace: bool = False, set_default: bool = False):
 __all__ = ["LoaderError", "SqliteExec", "PsqlExec", "make_executor",
            "describe_conninfo", "read_schema", "schema_version", "ensure_schema",
            "typed", "lit", "payloads", "cells", "read_existing", "statements",
-           "load", "SCHEMA_VERSION", "VALUE_COLUMNS"]
+           "load", "load_tables", "fingerprint", "fingerprint_sql", "FingerprintMoved",
+           "EXPORT_KEY", "SCHEMA_VERSION", "VALUE_COLUMNS"]

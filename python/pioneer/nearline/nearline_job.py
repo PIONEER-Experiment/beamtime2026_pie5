@@ -101,8 +101,9 @@ from reco_testbeam.pi_psmalg_expConf import (PIPSMComputeWeight, PIPSMDelayedCoi
 # the outputs as <filebase>.py. Left unfilled, they still read as their own placeholder
 # text, which means "take the environment" and is how an interactive run works. A rendered
 # file ignores every NL_* variable instead: the file beside the outputs is the whole record
-# of what processed that run, including the conditions directory and database connection
-# the renderer's environment supplied.
+# of what processed that run, including where its constants came from -- the conditions
+# source as the renderer resolved it (a database as an explicit, password-free libpq
+# conninfo, never a service name, or a JSON directory) and the conditions directory.
 #
 # Every placeholder sits inside a string literal, so the checked-in file is valid Python and
 # runs unrendered. The render step substitutes safely and then refuses to write unless all
@@ -111,7 +112,7 @@ from reco_testbeam.pi_psmalg_expConf import (PIPSMComputeWeight, PIPSMDelayedCoi
 # is what makes the render step collapse it to a single character.
 _RENDERED = {
     "in_file": "${in_file}", "out_file": "${out_file}", "evt_max": "${evt_max}",
-    "conditions_dir": "${conditions_dir}", "pg": "${pg}",
+    "conditions_dir": "${conditions_dir}", "conditions": "${conditions}",
     "rendered_at": "${rendered_at}", "rendered_by": "${rendered_by}",
     "job_source": "${job_source}", "job_git": "${job_git}",
     "job_id": "${job_id}", "run_id": "${run_id}", "light": "${light}",
@@ -122,8 +123,8 @@ _RENDERED = {
 # that the only dollar signs in the unrendered file are the twelve placeholders above.
 RENDERED = not _RENDERED["rendered_at"].startswith(chr(36))
 
-# Where conditions containers live when nobody says otherwise. This is the bind mount
-# inside the testbeam-midas container; on a host without /simulation (pinky) the daemon's
+# The conditions directory when nobody says otherwise. This is the bind mount inside the
+# testbeam-midas container; on a host without /simulation (pinky) the daemon's
 # NL_CONDITIONS_DIR is mandatory and is what a rendered file carries.
 _DEFAULT_CONDITIONS_DIR = os.path.join(os.environ.get("PIONEERSYS"), "reco_testbeam/conditions")
 
@@ -148,18 +149,29 @@ PSM_DECODE = True
 # Run the tracklet chain on the decoded musip hits. Requires PSM_DECODE.
 PSM_RECO = True
 # --- Conditions ------------------------------------------------------------
-# Directory every bare container name below is resolved against.
+# Where the constants come from, one of:
+#   "db:service=NAME"  the conditions database, by libpq service name (~/.pg_service.conf,
+#                      password in ~/.pgpass); "db:NAME" and bare "db" (pioneer-conditions)
+#                      mean the same. "db:host=H port=P dbname=D user=U" names it directly.
+#   "json:DIR"         the JSON containers below, from DIR (a snapshot of the database)
+#   "json"             the JSON containers below, from CONDITIONS_DIR
+# The database is the default. An unreachable server fails the job at initialize and
+# the job never falls back to JSON by itself; the runbook "Conditions DB down" in
+# README.md is what a shifter does then. The service name is expanded into the explicit
+# conninfo before the job reaches Gaudi, so every ConditionsHeader names the real host.
+# NL_CONDITIONS in the environment wins for an unrendered run.
+CONDITIONS = "db:service=pioneer-conditions"
+# Directory the ODB specs and ODB_OVERRIDES resolve against, whatever CONDITIONS says,
+# and the JSON containers too under a bare "json".
 CONDITIONS_DIR = os.environ.get("NL_CONDITIONS_DIR", _DEFAULT_CONDITIONS_DIR)
-# Campaign database, libpq conninfo strings. FORTHCOMING DEFAULT: once served, the
-# constants come from here and the JSON files become local overrides.
-# NL_PG wins; password in PGPASSWORD.
-PG_CONNECTIONS = []
 # Specs mapping subtrees of the begin-of-run ODB dump to conditions tables.
 ODB_SPECS = ["odb/bt2026_runinfo.json", "odb/bt2026_wavedream_daq.json",
              "odb/bt2026_wavedream_scalers.json", "odb/bt2026_isel.json"]
 # Tables resolved at initialize(), so a misconfigured job dies in the first second.
 ODB_PRELOAD = ["runinfo", "wd_board_settings", "wd_channel_settings", "wd_scaler_names"]
-# Run-indexed corrections applied to a private copy of the ODB tree; "" is none.
+# Run-indexed corrections applied to a private copy of the ODB tree; "" is none. A JSON
+# container, and it is loaded in both modes: in db mode it is the one JSON file the job
+# reads, and it wins over the database for the table it holds.
 ODB_OVERRIDES = ""
 # Write the resolved ODB tables into the output as a WDSettingsHeader.
 SETTINGS_SUMMARY = True
@@ -240,6 +252,7 @@ WD_PHASE_BINS = 48
 WD_RF_RESIDUAL_MAX = 0.05
 # Containers holding the DRS4 timebase and the three calibration tables; two files
 # defining the same table name is a hard error, so replace a file, never stack one.
+# json mode only; the database serves the same tables.
 WD_CONDITIONS_FILES = ["bt2026_wavedream_timebase.json", "bt2026_wavedream_calibration.json"]
 # RF channel and frequency. REQUIRED whenever WD_ENABLED: PIWDRFPhase runs first
 # in WDAnalysisSeq and PIWDWaveformAnalysis consumes /Event/wd_rf_phase, so ""
@@ -326,7 +339,7 @@ PSM_GEOMETRY_MAPS = ["MUPIX:mupix_chip_map", "MUTRIG:mutrig_channel_map"]
 # at initialize() with "source absent"; set [] and PSM_WEIGHT_STRATEGY = 0 to
 # process one of those (the acceptance weights need the stage position).
 PSM_GEOMETRY_TRANS = ["COND:isel"]
-# Containers supplying the base table and the two map tables above.
+# Containers supplying the base table and the two map tables above (json mode only).
 PSM_GEOMETRY_FILES = ["bt2026_psm_geometry.json", "bt2026_psm_readout_map.json"]
 # Tag of the base geometry table; None reads the table's default tag, which is
 # bt2026-v4: the MuPix chips of each quad 0.32 mm apart, a PROVISIONAL value from
@@ -454,7 +467,7 @@ PSM_SMA_MARKER_TOT_SHARE = 0.5
 # bin 2 of pattern_counters then counts every frame as left out of it.
 PSM_SMA_WIDE_DT = True
 # --- PSM reco --------------------------------------------------------------
-# Container holding the data-side channel map the tracklet reco reads.
+# Container holding the data-side channel map the tracklet reco reads (json mode only).
 PSM_CHANNEL_MAP_FILE = "bt2026_psm_channel_map.json"
 # Channel-map table and tag; the table supplies the WHOLE map, so no per-channel job option is set.
 PSM_CHANNEL_MAP_TABLE = "psm_channel_map"
@@ -638,12 +651,12 @@ PSM_SMA_CAL_NTUPLE = "raw"
 _LIGHT_VALUES = {"1": True, "0": False}
 _LIGHT_SWITCHES = ("WRITE_NTUPLE", "PSM_TIMEWALK", "PSM_SMA_WIDE_DT", "PSM_SMA_DIAGNOSTICS")
 
-# Where the input, the output, the event limit, light mode and the two host-dependent
-# settings come from. This runs before the container lists below, which resolve against
-# CONDITIONS_DIR, and before check(), which reports on all of them.
+# Where the input, the output, the event limit, light mode, the conditions source and the
+# conditions directory come from. This runs before the container lists below, which
+# resolve against them, and before check(), which reports on all of them.
 if RENDERED:
     # A rendered file is a record, so it reads nothing from the environment: no
-    # NL_MIDAS, NL_OUT, NL_EVTMAX, NL_PG, NL_CONDITIONS_DIR and no overrides file.
+    # NL_MIDAS, NL_OUT, NL_EVTMAX, NL_CONDITIONS, NL_CONDITIONS_DIR and no overrides file.
     # Re-run it under any environment at all and it processes the same input with the
     # same settings into the same outputs, which is what makes it worth keeping.
     NL_MIDAS = _RENDERED["in_file"]
@@ -662,8 +675,10 @@ if RENDERED:
     # rendered file must still name one directory, because a run reprocessed against
     # a different conditions tree is a different run.
     CONDITIONS_DIR = _RENDERED["conditions_dir"] or _DEFAULT_CONDITIONS_DIR
-    # Same list, same separator as NL_PG; empty is the normal case today.
-    PG_CONNECTIONS = [c for c in _RENDERED["pg"].split(os.pathsep) if c]
+    # As the renderer resolved it: "db:" and an explicit, password-free conninfo (no
+    # service name, so the file says which server it read even after ~/.pg_service.conf
+    # changes), "json:" and an absolute directory, or a bare "json".
+    CONDITIONS = _RENDERED["conditions"]
     # An overrides file is an interactive convenience and is deliberately not part
     # of a rendered job: it would be a second file the record depends on, and the
     # point of the record is that it depends on nothing. Note the renderer does NOT
@@ -671,7 +686,6 @@ if RENDERED:
     # variant job is made by editing the settings block, or the rendered copy.
     NL_OVERRIDES = ""
 
-    HIST_ONLY = str(_RENDERED["hist_only"]).strip().lower() in ("1", "true", "yes", "on")
 else:
     # A variant job reassigns a few settings in a small file instead of editing
     # this one. Unknown names are not rejected; the banner prints the path.
@@ -684,8 +698,8 @@ else:
     NL_OUT = os.environ.get("NL_OUT", "")
     if os.environ.get("NL_EVTMAX"):
         EVT_MAX = int(os.environ["NL_EVTMAX"])
-    if os.environ.get("NL_PG"):
-        PG_CONNECTIONS = [c for c in os.environ["NL_PG"].split(os.pathsep) if c]
+    if os.environ.get("NL_CONDITIONS"):
+        CONDITIONS = os.environ["NL_CONDITIONS"]
     # "1" or "0"; anything else is kept as the string it is, and check() rejects it.
     if os.environ.get("NL_LIGHT"):
         LIGHT = _LIGHT_VALUES.get(os.environ["NL_LIGHT"], os.environ["NL_LIGHT"])
@@ -736,8 +750,92 @@ _BOARD_SETTINGS_TABLE = "wd_board_settings"
 _LEVELS = {"DEBUG": DEBUG, "INFO": INFO, "WARNING": WARNING, "ERROR": ERROR}
 
 
+# The libpq service a bare "db" means. pioneer.nearline.render has the same constant.
+_DEFAULT_SERVICE = "pioneer-conditions"
+
+
+def _split_conditions(spec):
+    """CONDITIONS -> ("db", conninfo) or ("json", dir or ""); ValueError otherwise.
+
+    The same grammar as pioneer.nearline.render.split_conditions, which the
+    renderer uses; written out here because a rendered job must run with nothing
+    from pioneer on the path. A test holds the two to the same answers.
+    """
+    kind, colon, arg = str(spec).strip().partition(":")
+    kind, arg = kind.strip().lower(), arg.strip()
+    if colon and not arg:
+        # "db:" is not "db": an empty service or directory is a mistake, not a default.
+        raise ValueError(f"CONDITIONS is '{kind}:' with nothing after the colon: write "
+                         f"'{kind}' for the default, or name the service or directory.")
+    if kind == "db":
+        if not arg:
+            arg = "service=" + _DEFAULT_SERVICE
+        elif "=" not in arg:
+            arg = "service=" + arg
+        return "db", arg
+    if kind == "json":
+        return "json", arg
+    # The kind only: the rest of the string could hold a password.
+    raise ValueError(f"CONDITIONS starts with {kind!r}: it must be 'db', 'db:SERVICE', "
+                     "'db:<libpq conninfo>', 'json' or 'json:DIR'.")
+
+
+def _describe_conninfo(conninfo):
+    """host/port/dbname of a conninfo, as PICondPgLayer::Describe prints them; the same
+    answer as pioneer.conddb.pgservice.describe for the strings the renderer writes."""
+    keys = dict(t.split("=", 1) for t in str(conninfo).split() if "=" in t)
+    out = "host=" + (keys.get("host") or keys.get("hostaddr") or "<default>")
+    out += (" port=" + keys["port"]) if keys.get("port") else ""
+    out += (" dbname=" + keys["dbname"]) if keys.get("dbname") else ""
+    return out
+
+
+# The conditions source, resolved. _COND_KIND is "db" or "json" (None when CONDITIONS
+# does not parse), _PG_CONNINFO the explicit conninfo handed to PgConnections in db mode,
+# _JSON_DIR the directory the containers resolve against in json mode. Every failure is
+# kept in _COND_PROBLEM for check() to report with the rest.
+_COND_KIND, _PG_CONNINFO, _JSON_DIR, _COND_PROBLEM = None, "", CONDITIONS_DIR, ""
+try:
+    _COND_KIND, _cond_arg = _split_conditions(CONDITIONS)
+except ValueError as _exc:
+    _COND_PROBLEM = str(_exc)
+else:
+    if _COND_KIND == "json":
+        _JSON_DIR = os.path.expanduser(_cond_arg) if _cond_arg else CONDITIONS_DIR
+    elif RENDERED:
+        # The renderer already expanded the service and dropped any password.
+        _PG_CONNINFO = _cond_arg
+    else:
+        try:
+            from pioneer.conddb.pgservice import ServiceNotFound, resolve_conninfo
+        except ImportError:
+            _COND_PROBLEM = ("CONDITIONS names a database, and expanding it needs "
+                             "pioneer.conddb.pgservice, which is not importable: put the "
+                             "repository's python/ directory on PYTHONPATH, or use "
+                             "python -m pioneer.nearline.process, which renders the job with "
+                             "the conninfo already expanded.")
+        else:
+            try:
+                _PG_CONNINFO = resolve_conninfo(_cond_arg)
+            except ServiceNotFound as _exc:
+                _COND_PROBLEM = (f"{_exc}. Define it in ~/.pg_service.conf (or point "
+                                 "PGSERVICEFILE at a file that does), or process from a JSON "
+                                 "snapshot instead: python -m pioneer.nearline.process <midas "
+                                 "file> --out-dir DIR --conditions json:<snapshot dir> (README, "
+                                 "\"Conditions DB down\").")
+            except ValueError as _exc:
+                # pgservice never echoes the string, so the message is safe to print.
+                _COND_PROBLEM = f"CONDITIONS names a database that cannot be used: {_exc}"
+
+
 def _cond(name):
-    """A container name resolved against CONDITIONS_DIR; absolute stays absolute."""
+    """A container name resolved against the JSON directory; absolute stays absolute."""
+    text = str(name)
+    return text if os.path.isabs(text) else os.path.join(_JSON_DIR, text)
+
+
+def _odb(name):
+    """An ODB spec or overrides file resolved against CONDITIONS_DIR, in either mode."""
     text = str(name)
     return text if os.path.isabs(text) else os.path.join(CONDITIONS_DIR, text)
 
@@ -749,22 +847,49 @@ def hist_file(path):
 
 
 # The containers this configuration will actually load, in layer order. check()
-# verifies them and PIConditionsSvc below is handed these very lists.
+# verifies them and PIConditionsSvc below is handed these very lists. In db mode the
+# overrides file is the only JSON: the database serves every other table, and a
+# container passed next to it would win over it (the JSON layer comes first).
+_JSON_MODE = _COND_KIND == "json"
+# The committed container settings; a test holds them to the settings block. db mode
+# reads none of these files, so a job that changes one -- in the block, an overrides
+# file or a rendered copy -- expects something db mode would silently not do, and
+# check() refuses it.
+_JSON_ONLY_DEFAULTS = {
+    "WD_CONDITIONS_FILES": ["bt2026_wavedream_timebase.json",
+                            "bt2026_wavedream_calibration.json"],
+    "PSM_GEOMETRY_FILES": ["bt2026_psm_geometry.json", "bt2026_psm_readout_map.json"],
+    "PSM_CHANNEL_MAP_FILE": "bt2026_psm_channel_map.json",
+}
+
+
+def _stray_containers():
+    """bt2026_*.json in a CONDITIONS_DIR that is not a reco_testbeam/conditions tree.
+
+    In db mode CONDITIONS_DIR only supplies the ODB specs. A checkout of
+    reco_testbeam/conditions always holds the git containers next to them, which is
+    expected; any other directory holding them is somebody's copy of the constants,
+    which db mode would not read.
+    """
+    tree = os.path.normpath(str(CONDITIONS_DIR))
+    if tree.endswith(os.path.join("reco_testbeam", "conditions")) or not os.path.isdir(tree):
+        return []
+    return sorted(n for n in os.listdir(tree) if n.startswith("bt2026_") and n.endswith(".json"))
 _JSON_FILES = []
 if ODB_OVERRIDES:
-    _JSON_FILES.append(_cond(ODB_OVERRIDES))
-if WD_ENABLED:
+    _JSON_FILES.append(_odb(ODB_OVERRIDES))
+if WD_ENABLED and _JSON_MODE:
     _JSON_FILES += [_cond(f) for f in WD_CONDITIONS_FILES]
-if PSM_DECODE:
+if PSM_DECODE and _JSON_MODE:
     _JSON_FILES += [_cond(f) for f in PSM_GEOMETRY_FILES]
 # The channel map feeds the tracklet reco and, with the timewalk on, the MuPix
 # monitor's counters S1-S5 and the S1 of the correction layer's histograms. The
 # layer runs whenever PSM_DECODE does, so _TWC_TIMEWALK covers _MUPIX_TIMEWALK.
 _MUPIX_TIMEWALK = bool(PSM_MUPIX_MONITOR and PSM_TIMEWALK and PSM_DECODE)
 _TWC_TIMEWALK = bool(PSM_TIMEWALK and PSM_DECODE)
-if (PSM_RECO or _MUPIX_TIMEWALK or _TWC_TIMEWALK) and PSM_CHANNEL_MAP_FILE:
+if (PSM_RECO or _MUPIX_TIMEWALK or _TWC_TIMEWALK) and PSM_CHANNEL_MAP_FILE and _JSON_MODE:
     _JSON_FILES.append(_cond(PSM_CHANNEL_MAP_FILE))
-_ODB_TABLES = [_cond(f) for f in ODB_SPECS]
+_ODB_TABLES = [_odb(f) for f in ODB_SPECS]
 
 
 def check():
@@ -781,6 +906,23 @@ def check():
     out_dir = os.path.dirname(os.path.abspath(NL_OUT)) if NL_OUT else ""
     if NL_OUT and not os.path.isdir(out_dir):
         problems.append(f"the directory of NL_OUT is not an existing directory: {out_dir}")
+    if _COND_PROBLEM:
+        problems.append(_COND_PROBLEM)
+    _use_json = ("use json mode: CONDITIONS = \"json:DIR\", NL_CONDITIONS=json:DIR, "
+                 "or python -m pioneer.nearline.process ... --conditions json:DIR")
+    if _COND_KIND == "db":
+        _changed = [n for n, v in _JSON_ONLY_DEFAULTS.items() if globals()[n] != v]
+        if _changed:
+            problems.append(f"{', '.join(_changed)} differ from the committed containers, but "
+                            "CONDITIONS reads the database, which never opens those files; "
+                            + _use_json + ".")
+        _stray = _stray_containers()
+        if _stray:
+            problems.append(f"CONDITIONS_DIR {CONDITIONS_DIR} holds {', '.join(_stray)}, but "
+                            "CONDITIONS reads the database and takes only the ODB specs from "
+                            "that directory. To process those containers, " + _use_json
+                            + "; to read the database, point NL_CONDITIONS_DIR at a "
+                            "reco_testbeam/conditions checkout or a directory with odb/ only.")
     for path in _JSON_FILES + _ODB_TABLES:
         if not os.path.exists(path):
             problems.append(f"conditions container does not exist: {path}")
@@ -892,21 +1034,24 @@ def check():
                             f"PSM_CURRENT_CHANNEL ({PSM_CURRENT_CHANNEL!r}), or /Event/rf holds "
                             "no RF or the wrong pulses and the SMA monitor's RF phase is "
                             "meaningless.")
-    if PSM_DECODE and PSM_GEOMETRY_BASE and not PSM_GEOMETRY_FILES:
+    # The container checks below are about which JSON file supplies a table, so they
+    # mean nothing in db mode, where the database serves them all.
+    if _JSON_MODE and PSM_DECODE and PSM_GEOMETRY_BASE and not PSM_GEOMETRY_FILES:
         problems.append("PSM_GEOMETRY_BASE is a GEOCOND layer but PSM_GEOMETRY_FILES is "
                         "empty: nothing would supply the table it names.")
     if "COND:isel" in PSM_GEOMETRY_TRANS and "bt2026_isel.json" not in {
             os.path.basename(str(p)) for p in ODB_SPECS}:
         problems.append("PSM_GEOMETRY_TRANS has 'COND:isel' but ODB_SPECS has no "
                         "bt2026_isel.json, so nothing maps the isel table.")
-    if PSM_DECODE and PSM_PIXEL_MASK and "bt2026_psm_readout_map.json" not in {
+    if _JSON_MODE and PSM_DECODE and PSM_PIXEL_MASK and "bt2026_psm_readout_map.json" not in {
             os.path.basename(str(p)) for p in PSM_GEOMETRY_FILES}:
         problems.append("PSM_PIXEL_MASK is on but PSM_GEOMETRY_FILES has no "
                         "bt2026_psm_readout_map.json, so nothing supplies the mupix_pixel_mask "
                         "table and the decoder stops at initialize; add it, or set "
                         "PSM_PIXEL_MASK = False to decode without a mask.")
-    if PSM_DECODE and PSM_TIMEWALK_CORRECTION and "bt2026_psm_readout_map.json" not in {
-            os.path.basename(str(p)) for p in PSM_GEOMETRY_FILES}:
+    if (_JSON_MODE and PSM_DECODE and PSM_TIMEWALK_CORRECTION
+            and "bt2026_psm_readout_map.json" not in {
+                os.path.basename(str(p)) for p in PSM_GEOMETRY_FILES}):
         problems.append("PSM_TIMEWALK_CORRECTION is on but PSM_GEOMETRY_FILES has no "
                         "bt2026_psm_readout_map.json, so nothing supplies the mupix_timewalk "
                         "table and the correction layer stops at initialize; add it, or set "
@@ -935,7 +1080,7 @@ def check():
         problems.append("WD_RF_TABLE is empty while WD_ENABLED is on: PIWDRFPhase runs "
                         "first in WDAnalysisSeq and PIWDWaveformAnalysis reads "
                         "/Event/wd_rf_phase, so WD_RF_TABLE cannot be empty.")
-    if WD_ENABLED and WD_ROLE_TABLE and not WD_CONDITIONS_FILES:
+    if _JSON_MODE and WD_ENABLED and WD_ROLE_TABLE and not WD_CONDITIONS_FILES:
         problems.append("WD_ROLE_TABLE is set but WD_CONDITIONS_FILES is empty: nothing "
                         "would supply the wd_channel_map table.")
     if WD_ENABLED and WD_CHANNEL_SETTINGS_TABLE and not ODB_SPECS:
@@ -1006,8 +1151,11 @@ selector = PIMidasSelector("EventSelector", file=str(NL_MIDAS))
 condSvc = PIConditionsSvc(JsonFiles=_JSON_FILES, OdbTables=_ODB_TABLES,
                           Preload=(list(ODB_PRELOAD) if _ODB_TABLES else [])
                           + ([_TIMEBASE_TABLE] if WD_ENABLED else []))
-if PG_CONNECTIONS:
-    condSvc.PgConnections = [str(c) for c in PG_CONNECTIONS]
+if _COND_KIND == "db":
+    # One server. It is reached once, at initialize, and an unreachable one fails the
+    # job there (about 20 s: two attempts of libpq's connect_timeout); nothing falls
+    # back to the JSON containers.
+    condSvc.PgConnections = [_PG_CONNINFO]
 
 # The ORDER of this list is load-bearing. PIMidasSelector publishes the
 # begin-of-run ODB dump into PIHeaderSvc as "ODBHeader" during its own
@@ -1359,10 +1507,15 @@ print("[nearline] light      "
          if LIGHT is True else "off"))
 print(f"[nearline] rntuple    {NL_OUT if WRITE_NTUPLE else 'no RNTuple'}")
 print(f"[nearline] histograms {hist_file(NL_OUT)}")
-print(f"[nearline] conditions {CONDITIONS_DIR}")
-for conninfo in PG_CONNECTIONS:
-    print("[nearline] database   " + " ".join(
-        t for t in str(conninfo).split() if t.startswith(("host=", "dbname="))))
+# The source, and never the user or a password. The conditions service then prints one
+# "layer=" line per table naming what actually served it.
+if _COND_KIND == "db":
+    print(f"[nearline] conditions db {_describe_conninfo(_PG_CONNINFO)}"
+          + (f" (+ JSON {' '.join(_JSON_FILES)})" if _JSON_FILES else ""))
+else:
+    print(f"[nearline] conditions json {_JSON_DIR}")
+if _COND_KIND == "db" or _JSON_DIR != CONDITIONS_DIR:
+    print(f"[nearline] odb specs  {CONDITIONS_DIR}")
 if NL_OVERRIDES:
     print(f"[nearline] overrides  {NL_OVERRIDES}")
 print(f"[nearline] halves     WD={WD_ENABLED} WD_SCALER_MONITOR={WD_SCALER_MONITOR}"

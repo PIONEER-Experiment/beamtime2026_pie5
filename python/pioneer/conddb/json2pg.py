@@ -6,11 +6,25 @@ cond_loader.py, so the two loaders cannot drift). SQL goes through psql: the
 analysis container carries the postgres client but no python driver, and psql
 with ON_ERROR_STOP is all a loader needs.
 
-    python3 json2pg.py "host=testbeam-pgdb dbname=conditions user=postgres" a.json
-    python3 json2pg.py --docker testbeam-pgdb a.json b.json ...
+    python3 json2pg.py service=pioneer-conditions-admin a.json b.json ...
+    python3 json2pg.py "host=... port=... dbname=conditions user=cond_admin" a.json
+    python3 json2pg.py --docker NAME a.json          # psql inside a container
 
---docker runs psql inside the named container, which is how the host talks to
-the sidecar started by start-conditions-db.sh without a local postgres client.
+The service name (from ~/.pg_service.conf, password in ~/.pgpass) is the normal
+spelling on every host; --docker runs psql inside the named container, for a
+host without a postgres client.
+
+A load replaces every active interval of each tag a container names, so a
+container must hold the complete table (``condtool.py export TABLE`` writes
+one), never the new interval alone.
+
+Lost updates are refused. A file written by ``condtool.py export`` records
+the table's fingerprint (highest row_id, active intervals) in its ``_export``
+key; if the database has moved on since, the load is refused, because it
+would retire intervals the edit never saw. ``--expect-fingerprint
+TABLE=MAX,ACTIVE`` states one explicitly; ``--force`` loads anyway. Every load
+also locks the interval table and re-checks the state it was computed from
+inside its transaction, so two loads at once serialize instead of losing one.
 
 PostgreSQL is the campaign store, so the load is append-only: for every tag the
 container touches, the constants the currently active intervals were serving
@@ -33,7 +47,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from cond_loader import LoaderError, make_executor, load
+from cond_loader import FingerprintMoved, LoaderError, make_executor, load
 
 
 def main() -> int:
@@ -60,7 +74,22 @@ def main() -> int:
                          "point at)")
     ap.add_argument("--set-default", action="store_true",
                     help="allow the container to move the table's default tag")
+    ap.add_argument("--expect-fingerprint", action="append", default=[],
+                    metavar="TABLE=MAX,ACTIVE",
+                    help="refuse unless TABLE's highest row_id is MAX and it has ACTIVE "
+                         "active intervals (automatic for a condtool export file); repeatable")
+    ap.add_argument("--force", action="store_true",
+                    help="load even if a table changed since the export it came from")
     args = ap.parse_args()
+
+    expect = {}
+    for item in args.expect_fingerprint:
+        try:
+            name, _, pair = item.partition("=")
+            top, active = (int(x) for x in pair.split(","))
+        except ValueError:
+            ap.error(f"--expect-fingerprint {item!r}: write TABLE=MAX,ACTIVE")
+        expect[name] = (top, active)
 
     if args.docker:
         conninfo, containers = None, args.words
@@ -78,7 +107,12 @@ def main() -> int:
         ex = make_executor(conninfo=conninfo, docker=args.docker,
                            database=args.database)
         loaded = load(ex, containers, replace=args.replace,
-                      set_default=args.set_default)
+                      set_default=args.set_default, expect=expect, force=args.force)
+    except FingerprintMoved as exc:
+        print(f"error: {exc}\nExport the table again (condtool.py export) and redo the "
+              f"edit on it, or load with --force to replace what is there now.",
+              file=sys.stderr)
+        return 1
     except LoaderError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
