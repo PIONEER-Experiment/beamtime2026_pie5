@@ -855,7 +855,7 @@ def test_a_job_that_fails_to_start_is_marked_failed(daemon_module, monkeypatch, 
     d.db_interface = Db()
     d.message = lambda msg, is_error=False, send_to_slack=False: messages.append((msg, is_error))
     queue = daemon_module.NearlineQueue("nearline", 1)
-    d.dispatch_job(queue, {"midas_run_number": 790, "job_id": 12})
+    d.dispatch_job(queue, {"midas_run_number": 790, "job_id": 12, "job_type": "nearline"})
     assert d.db_interface.status == [("postproc_job", 12, "FAILED")]
     assert queue.active == []
     assert messages == [("Job 12 failed to start: libpq service 'pioneer-conditions' is not "

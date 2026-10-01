@@ -686,7 +686,6 @@ if RENDERED:
     # variant job is made by editing the settings block, or the rendered copy.
     NL_OVERRIDES = ""
 
-    HIST_ONLY = str(_RENDERED["hist_only"]).strip().lower() in ("1", "true", "yes", "on")
 else:
     # A variant job reassigns a few settings in a small file instead of editing
     # this one. Unknown names are not rejected; the banner prints the path.
