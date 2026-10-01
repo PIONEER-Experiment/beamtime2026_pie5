@@ -400,6 +400,79 @@ def test_the_scaler_monitor_counts_the_current_of_the_role_table(job_env):
     assert "RoleTable" not in job["scaler_monitor"].__dict__
 
 
+def test_sma_nim_pairing_knobs_reach_the_calibration_layer(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    job = _run(target)
+    cal = job["sma_cal"]
+    assert cal.input == "/Event/mutrig" and cal.output == "/Event/mutrig_cal"
+    assert cal.hitsOutput == "/Event/sma_hits"
+    assert cal.NimPairing is True and cal.PairWindowNs == 20.0
+    assert cal.TimeSource == "tot" and cal.NimOnlyTot == 1.0
+    # the development override is not set unless asked for
+    assert "OffsetOverrideNs" not in cal.__dict__
+    text = (target.read_text().replace("PSM_SMA_NIM_PAIRING = True", "PSM_SMA_NIM_PAIRING = False")
+            .replace("PSM_SMA_PAIR_WINDOW_NS = 20.0", "PSM_SMA_PAIR_WINDOW_NS = 12")
+            .replace('PSM_SMA_TIME_SOURCE = "tot"', 'PSM_SMA_TIME_SOURCE = "nim"')
+            .replace("PSM_SMA_NIM_ONLY_TOT = 1.0", "PSM_SMA_NIM_ONLY_TOT = 2")
+            .replace("PSM_SMA_OFFSET_OVERRIDE_NS = {}", "PSM_SMA_OFFSET_OVERRIDE_NS = {2024: -153522}"))
+    cal = _run(target, text)["sma_cal"]
+    assert cal.NimPairing is False and cal.PairWindowNs == 12.0 and cal.TimeSource == "nim"
+    assert cal.NimOnlyTot == 2.0 and isinstance(cal.NimOnlyTot, float)
+    assert cal.OffsetOverrideNs == {2024: -153522.0}
+    assert isinstance(cal.OffsetOverrideNs[2024], float)
+
+
+@pytest.mark.parametrize("mode, drops", [("raw", ["drop /Event/mutrig_cal"]),
+                                         ("both", []),
+                                         ("calibrated", ["drop /Event/mutrig"])])
+def test_sma_hits_is_kept_in_every_sma_cal_ntuple_mode(job_env, mode, drops):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text().replace('PSM_SMA_CAL_NTUPLE = "raw"', f'PSM_SMA_CAL_NTUPLE = "{mode}"')
+    rules = list(_run(target, text)["output"].SelectionRules)
+    # the default PSM_TWC_NTUPLE rule first, then the SMA mode's, then the keep rule last
+    assert rules == ["drop /Event/muquad"] + drops + ["keep /Event/sma_hits"]
+
+
+def test_sma_hits_keep_rule_wins_over_the_users_rules(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text().replace("NTUPLE_RULES = []", 'NTUPLE_RULES = ["drop /Event/*"]')
+    rules = list(_run(target, text)["output"].SelectionRules)
+    assert rules[0] == "drop /Event/*" and rules[-1] == "keep /Event/sma_hits"
+
+
+@pytest.mark.parametrize("old, new, match", [
+    ("PSM_SMA_NIM_PAIRING = True", "PSM_SMA_NIM_PAIRING = 'False'", "PSM_SMA_NIM_PAIRING"),
+    ("PSM_SMA_NIM_PAIRING = True", "PSM_SMA_NIM_PAIRING = 1", "PSM_SMA_NIM_PAIRING"),
+    ("PSM_SMA_PAIR_WINDOW_NS = 20.0", "PSM_SMA_PAIR_WINDOW_NS = 0", "PSM_SMA_PAIR_WINDOW_NS"),
+    ("PSM_SMA_PAIR_WINDOW_NS = 20.0", "PSM_SMA_PAIR_WINDOW_NS = -5.0", "PSM_SMA_PAIR_WINDOW_NS"),
+    ("PSM_SMA_PAIR_WINDOW_NS = 20.0", "PSM_SMA_PAIR_WINDOW_NS = 5000.0", "PSM_SMA_PAIR_WINDOW_NS"),
+    ("PSM_SMA_PAIR_WINDOW_NS = 20.0", "PSM_SMA_PAIR_WINDOW_NS = '20'", "PSM_SMA_PAIR_WINDOW_NS"),
+    ("PSM_SMA_PAIR_WINDOW_NS = 20.0", "PSM_SMA_PAIR_WINDOW_NS = True", "PSM_SMA_PAIR_WINDOW_NS"),
+    ("PSM_SMA_PAIR_WINDOW_NS = 20.0", "PSM_SMA_PAIR_WINDOW_NS = float('nan')", "PSM_SMA_PAIR_WINDOW_NS"),
+    ('PSM_SMA_TIME_SOURCE = "tot"', 'PSM_SMA_TIME_SOURCE = "TOT"', "PSM_SMA_TIME_SOURCE"),
+    ('PSM_SMA_TIME_SOURCE = "tot"', "PSM_SMA_TIME_SOURCE = None", "PSM_SMA_TIME_SOURCE"),
+    ("PSM_SMA_NIM_ONLY_TOT = 1.0", "PSM_SMA_NIM_ONLY_TOT = -1.0", "PSM_SMA_NIM_ONLY_TOT"),
+    ("PSM_SMA_NIM_ONLY_TOT = 1.0", "PSM_SMA_NIM_ONLY_TOT = 300", "PSM_SMA_NIM_ONLY_TOT"),
+    ("PSM_SMA_NIM_ONLY_TOT = 1.0", "PSM_SMA_NIM_ONLY_TOT = '1'", "PSM_SMA_NIM_ONLY_TOT"),
+    ("PSM_SMA_OFFSET_OVERRIDE_NS = {}", "PSM_SMA_OFFSET_OVERRIDE_NS = {'2024': 5.0}",
+     "PSM_SMA_OFFSET_OVERRIDE_NS"),
+    ("PSM_SMA_OFFSET_OVERRIDE_NS = {}", "PSM_SMA_OFFSET_OVERRIDE_NS = {2024: '5'}",
+     "PSM_SMA_OFFSET_OVERRIDE_NS"),
+    ("PSM_SMA_OFFSET_OVERRIDE_NS = {}", "PSM_SMA_OFFSET_OVERRIDE_NS = [(2024, 5.0)]",
+     "PSM_SMA_OFFSET_OVERRIDE_NS"),
+])
+def test_a_bad_sma_pairing_knob_is_rejected(job_env, old, new, match):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text()
+    assert old in text
+    with pytest.raises(SystemExit, match=match):
+        _run(target, text.replace(old, new))
+
+
 # -- the conditions source ----------------------------------------------------
 
 def _containers(settings):

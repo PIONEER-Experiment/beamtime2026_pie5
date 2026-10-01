@@ -11,10 +11,13 @@ agreement, registered in midas_files/wavedream-scalar-readout/docs/REGISTRY.md.
     |                           PITMidasMusip      -> /Event/muquad, mutrig, rf
     |
     +-- PSMSMACalSeq ---------- gated on /Event/mutrig; runs whenever PSM_DECODE
-    |     PIPSMSMACalibration  -> /Event/mutrig_cal, the decoder's SMA hits in
-    |                             time order (/Event/mutrig is readout order);
-    |                             the place for later SMA time calibrations;
-    |                             every SMA reader below reads it
+    |     PIPSMSMACalibration  -> /Event/mutrig_cal, the decoder's SMA hits
+    |                             aligned, each counter's TOT word and NIM
+    |                             copy paired into one hit, in time order
+    |                             (/Event/mutrig is readout order); every SMA
+    |                             reader below reads it. /Event/sma_hits, the
+    |                             sidecar index-parallel to it: both times,
+    |                             both widths, raw indices, pairing flags
     |
     +-- PSMTimewalkSeq -------- gated on /Event/muquad; runs whenever PSM_DECODE
     |     PIPSMMuPixTimewalkCorrection -> /Event/muquad_twc, each pixel time
@@ -346,6 +349,32 @@ PSM_SMA_SKIP_STALE_FIRST_FRAME = True
 PSM_PIXEL_MASK = True
 # Tag of mupix_pixel_mask to read; None reads the table's default tag.
 PSM_PIXEL_MASK_TAG = None
+# --- SMA calibration layer: TOT + NIM pairing -------------------------------
+# PIPSMSMACalibration (/Event/mutrig -> /Event/mutrig_cal and /Event/sma_hits) pairs
+# each counter's TOT word with its low-threshold NIM copy (S1L..S5L, ids 2021,
+# 2023-2026) into one hit. A counter is paired when the run's mutrig_channel_map
+# interval cables its NIM copy AND the sma_time_alignment table
+# (bt2026_psm_readout_map.json) has an offset for that copy; a cabled copy without an
+# offset is histogrammed only (histograms/PIPSMSMACalibration/) and its words stay out
+# of /Event/mutrig_cal. The shipped table has no NIM offsets, so until they are
+# measured the output is the TOT hits in time order, as before. NIM ids never reach
+# /Event/mutrig_cal: a NIM-only hit carries its counter's TOT id. False drops the NIM
+# words and applies no offsets at all. Changes the hits, so not a light switch.
+PSM_SMA_NIM_PAIRING = True
+# Largest |t_NIM - t_TOT| of a pair, aligned times, ns (inclusive).
+PSM_SMA_PAIR_WINDOW_NS = 20.0
+# Time of a paired hit: "tot" (the TOT word's leading edge) or "nim" (the NIM copy's
+# CFD time, free of the TOT walk). A NIM-only hit always has the NIM time.
+PSM_SMA_TIME_SOURCE = "tot"
+# ToT (raw SMA units) given to a NIM-only hit, one with no TOT word: above
+# PSM_LAYER_THR, so it fires its layer like any other hit.
+PSM_SMA_NIM_ONLY_TOT = 1.0
+# DEVELOPMENT AND QUICK TESTS ONLY: {detector id: offset in ns} replacing the
+# sma_time_alignment value of that id for this job, e.g. {2024: -153522.0} to try a
+# NIM copy whose offset is not yet in the table. Each one is logged as a warning.
+# Leave it empty in production: constants belong in the conditions table, where the
+# rendered job and every reprocessing find them.
+PSM_SMA_OFFSET_OVERRIDE_NS = {}
 # --- PSM geometry ----------------------------------------------------------
 # Base layer PIGeometrySvc builds the GeoHeader from, as "GEOCOND:<table>".
 PSM_GEOMETRY_BASE = "GEOCOND:psm_geometry"
@@ -659,10 +688,12 @@ PSM_TWC_NTUPLE = "corrected"
 # Which SMA hit collections the RNTuple keeps: "both" (/Event/mutrig and the
 # calibrated /Event/mutrig_cal), "calibrated" (drops /Event/mutrig) or "raw"
 # (drops /Event/mutrig_cal). Appended to NTUPLE_RULES after PSM_TWC_NTUPLE, so
-# it wins too. "raw" by default: while the calibration layer only puts the hits
-# in time order, /Event/mutrig_cal holds nothing /Event/mutrig does not, and the
-# raw-stream analyses need /Event/mutrig in its readout order, so "calibrated"
-# is for when the layer carries real constants and nobody needs that order.
+# it wins too. In every mode a last rule keeps /Event/sma_hits, the calibration
+# layer's sidecar: with the raw /Event/mutrig it rebuilds /Event/mutrig_cal hit
+# for hit (raw word, id, time, ToT), so "raw" loses nothing; and it is the only
+# record of how each hit was paired. "raw" by default: the raw-stream analyses
+# need /Event/mutrig in its readout order, and it keeps both words of every
+# counter, so "calibrated" is for when nobody needs either.
 PSM_SMA_CAL_NTUPLE = "raw"
 # ===== END OF SETTINGS =====
 
@@ -767,6 +798,7 @@ _TES_RF = "/Event/rf"
 _TES_SMA_TIME_STATE = "/Event/sma_time_state"
 _TES_MUQUAD_TWC = "/Event/muquad_twc"
 _TES_MUTRIG_CAL = "/Event/mutrig_cal"
+_TES_SMA_HITS = "/Event/sma_hits"
 # PSM_TWC_NTUPLE -> the collection it drops from the RNTuple (None: nothing).
 _TWC_NTUPLE_DROP = {"both": None, "corrected": _TES_MUQUAD, "raw": _TES_MUQUAD_TWC}
 # PSM_SMA_CAL_NTUPLE -> the collection it drops from the RNTuple (None: nothing).
@@ -1035,7 +1067,8 @@ def check():
                         ("PSM_TIMEWALK_CORRECTION", PSM_TIMEWALK_CORRECTION),
                         ("PSM_SMA_WIDE_DT", PSM_SMA_WIDE_DT),
                         ("PSM_SMA_FINE_OFFSETS", PSM_SMA_FINE_OFFSETS),
-                        ("PSM_SMA_SKIP_STALE_FIRST_FRAME", PSM_SMA_SKIP_STALE_FIRST_FRAME)):
+                        ("PSM_SMA_SKIP_STALE_FIRST_FRAME", PSM_SMA_SKIP_STALE_FIRST_FRAME),
+                        ("PSM_SMA_NIM_PAIRING", PSM_SMA_NIM_PAIRING)):
         if not isinstance(value, bool):
             problems.append(f"{name} is {value!r}: it must be True or False (a string such as "
                             "'False' is true in Python and would switch it on).")
@@ -1051,6 +1084,24 @@ def check():
                         "axis [min, max) in bins: max must be above min and bins an integer "
                         "1-8192, or the correction layer stops at initialize and the monitor "
                         "and the reco book no timewalk histograms.")
+    def _number(value):
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value))
+    if not (_number(PSM_SMA_PAIR_WINDOW_NS) and 0 < PSM_SMA_PAIR_WINDOW_NS <= 1000):
+        problems.append(f"PSM_SMA_PAIR_WINDOW_NS is {PSM_SMA_PAIR_WINDOW_NS!r}: it must be a "
+                        "number of ns above 0 and at most 1000 (the largest aligned "
+                        "|t_NIM - t_TOT| of a pair; the RF period is about 20 ns).")
+    if PSM_SMA_TIME_SOURCE not in ("tot", "nim"):
+        problems.append(f"PSM_SMA_TIME_SOURCE is {PSM_SMA_TIME_SOURCE!r}: it must be 'tot' (the "
+                        "TOT word's time) or 'nim' (the NIM copy's).")
+    if not (_number(PSM_SMA_NIM_ONLY_TOT) and 0 <= PSM_SMA_NIM_ONLY_TOT <= 255):
+        problems.append(f"PSM_SMA_NIM_ONLY_TOT is {PSM_SMA_NIM_ONLY_TOT!r}: it must be a ToT "
+                        "0-255 in raw SMA units (the value a NIM-only hit is written with).")
+    if not (isinstance(PSM_SMA_OFFSET_OVERRIDE_NS, dict) and all(
+            isinstance(k, int) and not isinstance(k, bool) and _number(v)
+            for k, v in PSM_SMA_OFFSET_OVERRIDE_NS.items())):
+        problems.append(f"PSM_SMA_OFFSET_OVERRIDE_NS is {PSM_SMA_OFFSET_OVERRIDE_NS!r}: it must "
+                        "be a dict {detector id (int): offset in ns (number)}, normally empty.")
     def _sma_channel_ok(value):
         return (value is None or (isinstance(value, int) and not isinstance(value, bool)
                                   and 0 <= value <= 15))
@@ -1243,10 +1294,12 @@ if PSM_DECODE:
 algorithms = [PIMidasDecoder(decoders=tools)]
 
 if PSM_DECODE:
-    # The SMA calibration layer, /Event/mutrig -> /Event/mutrig_cal, in a
-    # sequencer of its own straight after the decoder and gated on the raw SMA
-    # hits. Today it only puts the hits in time order (the decoder writes them in
-    # readout order); it is where SMA time calibrations will go. It is not a
+    # The SMA calibration layer, /Event/mutrig -> /Event/mutrig_cal and the
+    # sidecar /Event/sma_hits, in a sequencer of its own straight after the
+    # decoder and gated on the raw SMA hits. It aligns the counter hits, pairs each
+    # counter's TOT word with its NIM copy where the run cables and calibrates one
+    # (PSM_SMA_NIM_PAIRING), and puts the hits in time order (the decoder writes
+    # them in readout order). It is not a
     # member of PSMSMASeq on purpose: the MuPix timewalk layer, the MuPix monitor
     # and the track reco read its output too, and must find it with the SMA
     # monitor switched off. It has to come before PSMTimewalkSeq, whose
@@ -1258,7 +1311,13 @@ if PSM_DECODE:
     # through it by construction.
     # The raw /Event/mutrig stays on the TES in readout order.
     sma_cal = PIPSMSMACalibration("PIPSMSMACalibration", input=_TES_MUTRIG,
-                                  output=_TES_MUTRIG_CAL)
+                                  output=_TES_MUTRIG_CAL, hitsOutput=_TES_SMA_HITS,
+                                  NimPairing=bool(PSM_SMA_NIM_PAIRING),
+                                  PairWindowNs=float(PSM_SMA_PAIR_WINDOW_NS),
+                                  TimeSource=str(PSM_SMA_TIME_SOURCE),
+                                  NimOnlyTot=float(PSM_SMA_NIM_ONLY_TOT))
+    if PSM_SMA_OFFSET_OVERRIDE_NS:
+        sma_cal.OffsetOverrideNs = {int(k): float(v) for k, v in PSM_SMA_OFFSET_OVERRIDE_NS.items()}
     algorithms.append(Gaudi__Sequencer("PSMSMACalSeq", RequireObjects=[_TES_MUTRIG],
                                        Members=[sma_cal]))
 
@@ -1540,6 +1599,9 @@ if WRITE_NTUPLE:
         _ntuple_rules.append("drop " + _TWC_NTUPLE_DROP[PSM_TWC_NTUPLE])
     if PSM_DECODE and _SMA_CAL_NTUPLE_DROP[PSM_SMA_CAL_NTUPLE]:
         _ntuple_rules.append("drop " + _SMA_CAL_NTUPLE_DROP[PSM_SMA_CAL_NTUPLE])
+    # Last, so no earlier rule can drop it: the pairing record (PSM_SMA_CAL_NTUPLE).
+    if PSM_DECODE:
+        _ntuple_rules.append("keep " + _TES_SMA_HITS)
     if _ntuple_rules:
         output.SelectionRules = _ntuple_rules
     output.AuditExecute = output.AuditInitialize = output.AuditFinalize = True
@@ -1578,9 +1640,13 @@ print(f"[nearline] halves     WD={WD_ENABLED} WD_SCALER_MONITOR={WD_SCALER_MONIT
       f" PSM_TIMEWALK_CORRECTION={PSM_TIMEWALK_CORRECTION}"
       f" PSM_SMA_WIDE_DT={PSM_SMA_WIDE_DT} PSM_SMA_DIAGNOSTICS={PSM_SMA_DIAGNOSTICS}")
 print(f"[nearline] layers     "
-      + (f"PIPSMSMACalibration {_TES_MUTRIG}->{_TES_MUTRIG_CAL}"
+      + (f"PIPSMSMACalibration {_TES_MUTRIG}->{_TES_MUTRIG_CAL}+{_TES_SMA_HITS}"
          f" PIPSMMuPixTimewalkCorrection {_TES_MUQUAD}->{_TES_MUQUAD_TWC}"
          if PSM_DECODE else "none (PSM_DECODE off)"))
+print(f"[nearline] sma pair   PSM_SMA_NIM_PAIRING={PSM_SMA_NIM_PAIRING}"
+      f" PSM_SMA_PAIR_WINDOW_NS={PSM_SMA_PAIR_WINDOW_NS} PSM_SMA_TIME_SOURCE={PSM_SMA_TIME_SOURCE}"
+      f" PSM_SMA_NIM_ONLY_TOT={PSM_SMA_NIM_ONLY_TOT}"
+      f" PSM_SMA_OFFSET_OVERRIDE_NS={PSM_SMA_OFFSET_OVERRIDE_NS or 'none'}")
 print(f"[nearline] sma fine   PSM_SMA_FINE_OFFSETS={PSM_SMA_FINE_OFFSETS}"
       f" PSM_SMA_SKIP_STALE_FIRST_FRAME={PSM_SMA_SKIP_STALE_FIRST_FRAME} subrun={_SUBRUN}")
 print(f"[nearline] EvtMax     {EVT_MAX}")
