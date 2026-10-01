@@ -305,6 +305,18 @@ PSM_SMA_COARSE_SHIFT = None
 # them unbooked; the decoder's own default is off, so any other job using it
 # (a MuPix debug job, say) does not grow them.
 PSM_SMA_DIAGNOSTICS = True
+# The decoder's SMA fine-time correction: the S2 k * 2048 ns offset found per
+# frame (with a per-word resolution), the RF words snapped per word, and the S5
+# t/2 field repaired, all before the times are built. Writes the product
+# /Event/sma_time_state and the histograms/musip/sma_fineoffset_* histograms.
+# Off restores the times the decoder gave before the correction existed. It
+# changes the hits, so light mode does not switch it off.
+PSM_SMA_FINE_OFFSETS = True
+# Frame 0 of subrun 0 holds a stale replay of the previous run. With this on, the
+# decoder drops the first H000 bank of the job when the input file is subrun 0
+# (the second number in the file name, run00790_00000); other subruns and a name
+# without a subrun are left alone. Changes the hits, so not a light switch.
+PSM_SMA_SKIP_STALE_FIRST_FRAME = True
 # Drop the MuPix pixel words of hot pixels: the run's interval of the
 # mupix_pixel_mask table in bt2026_psm_readout_map.json, counted per chip in
 # histograms/musip/mupix_masked_hits and per pixel in mupix_masked_hits_per_pixel.
@@ -582,6 +594,8 @@ PSM_PHASE_SPACE_SLOPE_RANGE_MRAD = 950.0
 WRITE_NTUPLE = True
 # Ordered "keep <glob>" / "drop <glob>" rules over TES paths, later rules winning;
 # empty persists everything, so a new collection is never lost by omission.
+# (/Event/sma_time_state, the SMA fine-offset state, is small: one entry per H000
+# bank, so it is kept.)
 NTUPLE_RULES = []
 # Which MuPix hit collections the RNTuple keeps: "both" (/Event/muquad and the
 # corrected /Event/muquad_twc), "corrected" (drops /Event/muquad) or "raw"
@@ -670,13 +684,20 @@ if LIGHT is True:
     PSM_SMA_WIDE_DT = False
     PSM_SMA_DIAGNOSTICS = False
 
+# The subrun of the input: the second number in the file name (run00790_00005 ->
+# 5), None when the name has just one. NL_MIDAS is the file the job reads in both
+# modes (the baked-in in_file when rendered), so this is derived from it here.
+_SUBRUN_NUMBERS = "".join(c if c.isdigit() else " " for c in
+                          Path(str(NL_MIDAS)).name.split(".")[0]).split()
+_SUBRUN = int(_SUBRUN_NUMBERS[1]) if len(_SUBRUN_NUMBERS) > 1 else None
+
 # Measured, not guessed: 501 is ZSTD-1, about 40% less CPU than ROOT's default
 # ZSTD-5 for about 8% more disk, and reusing one entry for the whole job saves
 # an allocation and a free per field per event.
 _NTUPLE_COMPRESSION = 501
 _NTUPLE_REUSE_ENTRY = True
 
-# TES paths. The first five are the decoding tools' own defaults, and changing a
+# TES paths. The first six are the decoding tools' own defaults, and changing a
 # tool's path property without changing these breaks the sequencer gates (and the
 # SMA monitor's RF input) silently. The last four are names this job chooses and
 # passes to the PSM algorithms explicitly: /Event/muquad_twc is the timewalk
@@ -691,6 +712,7 @@ _TES_SCALERS = "/Event/wd_scalers"
 _TES_MUQUAD = "/Event/muquad"
 _TES_MUTRIG = "/Event/mutrig"
 _TES_RF = "/Event/rf"
+_TES_SMA_TIME_STATE = "/Event/sma_time_state"
 _TES_MUQUAD_TWC = "/Event/muquad_twc"
 _TES_MUTRIG_CAL = "/Event/mutrig_cal"
 # PSM_TWC_NTUPLE -> the collection it drops from the RNTuple (None: nothing).
@@ -831,7 +853,9 @@ def check():
     for name, value in (("LIGHT", LIGHT), ("PSM_PIXEL_MASK", PSM_PIXEL_MASK),
                         ("PSM_TIMEWALK", PSM_TIMEWALK),
                         ("PSM_TIMEWALK_CORRECTION", PSM_TIMEWALK_CORRECTION),
-                        ("PSM_SMA_WIDE_DT", PSM_SMA_WIDE_DT)):
+                        ("PSM_SMA_WIDE_DT", PSM_SMA_WIDE_DT),
+                        ("PSM_SMA_FINE_OFFSETS", PSM_SMA_FINE_OFFSETS),
+                        ("PSM_SMA_SKIP_STALE_FIRST_FRAME", PSM_SMA_SKIP_STALE_FIRST_FRAME)):
         if not isinstance(value, bool):
             problems.append(f"{name} is {value!r}: it must be True or False (a string such as "
                             "'False' is true in Python and would switch it on).")
@@ -996,6 +1020,12 @@ if PSM_DECODE:
     if PSM_SMA_COARSE_SHIFT is not None:
         musip.coarseShift = int(PSM_SMA_COARSE_SHIFT)
     musip.smaDiagnostics = bool(PSM_SMA_DIAGNOSTICS)
+    musip.correctFineOffsets = bool(PSM_SMA_FINE_OFFSETS)
+    musip.fineOffsetSnapChannels = [int(PSM_RF_CHANNEL)] if PSM_RF_CHANNEL is not None else []
+    musip.skipFirstBank = bool(PSM_SMA_SKIP_STALE_FIRST_FRAME) and _SUBRUN == 0
+    if PSM_SMA_SKIP_STALE_FIRST_FRAME and _SUBRUN is None:
+        print(f"[nearline] WARNING    PSM_SMA_SKIP_STALE_FIRST_FRAME is on but "
+              f"{Path(str(NL_MIDAS)).name} carries no subrun number, so no frame is skipped")
     musip.applyPixelMask = bool(PSM_PIXEL_MASK)
     if PSM_PIXEL_MASK_TAG:
         musip.pixelMaskTag = str(PSM_PIXEL_MASK_TAG)
@@ -1324,4 +1354,6 @@ print(f"[nearline] layers     "
       + (f"PIPSMSMACalibration {_TES_MUTRIG}->{_TES_MUTRIG_CAL}"
          f" PIPSMMuPixTimewalkCorrection {_TES_MUQUAD}->{_TES_MUQUAD_TWC}"
          if PSM_DECODE else "none (PSM_DECODE off)"))
+print(f"[nearline] sma fine   PSM_SMA_FINE_OFFSETS={PSM_SMA_FINE_OFFSETS}"
+      f" PSM_SMA_SKIP_STALE_FIRST_FRAME={PSM_SMA_SKIP_STALE_FIRST_FRAME} subrun={_SUBRUN}")
 print(f"[nearline] EvtMax     {EVT_MAX}")
