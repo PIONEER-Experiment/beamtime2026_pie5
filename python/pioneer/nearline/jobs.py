@@ -146,9 +146,14 @@ class GaudiJob(BaseJob):
         # `nearline_job.py` is itself the template: rendering it writes the
         # complete job next to the outputs as <filebase>.py. That file names
         # its own input, output and event limit, so it ignores every NL_*
-        # variable and re-running it reproduces this run exactly. The daemon's
-        # NL_CONDITIONS_DIR and NL_PG are baked in at this moment, which is
-        # what makes the artefact valid on a host with no /simulation.
+        # variable and re-running it reproduces this run exactly. The
+        # conditions source is resolved at this moment -- the job's default,
+        # the database by service name, expanded through this user's
+        # ~/.pg_service.conf, or NL_CONDITIONS if the daemon was started with
+        # it -- and baked in with the daemon's NL_CONDITIONS_DIR, which is
+        # what makes the artefact valid on a host with no /simulation. A
+        # service this host does not define makes the render, and so start(),
+        # raise.
         if self.infile is None:
             raise RuntimeError("input file not found in database")
 

@@ -11,10 +11,25 @@ database, a scheduler or a hand-written NL_MIDAS line.
 histograms only, so the artefacts are the <filebase>.py and the _hists.root, and
 no RNTuple.
 
+--conditions picks where the constants come from:
+
+    --conditions db                     the service pioneer-conditions (the default)
+    --conditions db:NAME                another libpq service
+    --conditions db:"host=H dbname=D user=U"   a server named directly
+    --conditions json:DIR               the JSON containers in DIR, e.g. the latest
+                                        snapshot, ~/bt2026/conddb-snapshots/latest
+    --conditions json                   the JSON containers in the job's CONDITIONS_DIR
+
+The last two are the manual path while the conditions database is down (README,
+"Conditions DB down"). Without the flag, NL_CONDITIONS in this shell, else the
+job's own CONDITIONS setting, the database.
+
 Because the rendered job ignores NL_*, the .py left in the output directory
 re-runs the same processing later whatever the environment then says; and
-because it is rendered HERE, NL_CONDITIONS_DIR and NL_PG in this shell are
-baked into it, exactly as the daemon bakes in its own.
+because it is rendered HERE, the conditions source (a service expanded into the
+explicit host/port/dbname/user it names, a snapshot link resolved to the
+directory it points at) and NL_CONDITIONS_DIR in this shell are baked into it,
+exactly as the daemon bakes in its own.
 
 The standard library and render only. No pioneer.rundb, so this runs in the
 testbeam-midas container (no psycopg) and on pinky alike.
@@ -26,6 +41,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from pioneer.conddb.pgservice import ServiceNotFound
 from pioneer.nearline.render import render_job
 
 # What to source before gaudirun.py exists, inside the testbeam-midas
@@ -72,6 +88,11 @@ def main(argv=None) -> int:
                         help="the light job, as the daemon with --light runs it: histograms "
                              "only, no RNTuple, no timewalk histograms, no wide SMA dt plot, "
                              "no SMA raw-word diagnostics")
+    parser.add_argument("--conditions", default=None, metavar="SOURCE",
+                        help="db[:SERVICE|CONNINFO] (the conditions database; default "
+                             "service pioneer-conditions) or json[:DIR] (JSON containers, "
+                             "e.g. json:~/bt2026/conddb-snapshots/latest when the database "
+                             "is down). Default: $NL_CONDITIONS, else the job's CONDITIONS")
     parser.add_argument("--render-only", action="store_true",
                         help="write the rendered job and stop, without running it")
     parser.add_argument("--job", default=None,
@@ -87,9 +108,22 @@ def main(argv=None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     out_file = out_dir / f"{filebase}.root"
-    rendered = render_job(midas_file, out_file, evt_max=args.evt_max,
-                          job_id="manual", run_id=run_id_of(filebase),
-                          light=args.light, job_source=args.job)
+    try:
+        rendered = render_job(midas_file, out_file, evt_max=args.evt_max,
+                              job_id="manual", run_id=run_id_of(filebase),
+                              light=args.light, conditions=args.conditions,
+                              job_source=args.job)
+    except ServiceNotFound as exc:
+        print(f"[process] {exc}")
+        print("[process] Define the service in ~/.pg_service.conf (or set PGSERVICEFILE), or "
+              "process from a JSON snapshot instead:")
+        print(f"[process]   python -m pioneer.nearline.process {args.midas_file} --out-dir "
+              f"{args.out_dir} --conditions json:~/bt2026/conddb-snapshots/latest")
+        print("[process] (README.md, \"Conditions DB down\")")
+        return 2
+    except ValueError as exc:
+        print(f"[process] {exc}")
+        return 2
 
     print(f"[process] job        {rendered}")
     # The out_file is still the name the histogram file is derived from, but the

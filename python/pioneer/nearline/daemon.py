@@ -1,6 +1,8 @@
 
 import pioneer.rundb.interface
 import pioneer.nearline.jobs as nl_jobs
+import pioneer.nearline.render as nl_render
+from pioneer.conddb.pgservice import describe as describe_conninfo
 import pioneer.nearline.run as nl_run
 import pioneer.nearline.tuning as nl_tuning
 from pioneer.nearline.miniTwinInterface import miniTwinInterface as mt_iface
@@ -72,6 +74,37 @@ def num_jobs_to_write(jobs, config_exists: bool):
     return jobs
 
 
+def conditions_announcement(environ = None, job_source = None):
+    """(message, is_error): where this daemon's jobs will take their constants from.
+
+    Resolved the way render_job will resolve it for every job: NL_CONDITIONS in the
+    daemon's environment if set, else the job file's CONDITIONS. The database is the
+    normal answer. Anything else is announced as an error, because a daemon reading
+    JSON is usually one that inherited an NL_CONDITIONS it was not meant to have
+    (from mhttpd's environment, say), and its files would be made from whatever
+    snapshot that names. A source that does not resolve means every job will fail to
+    start, which is said up front rather than once per job.
+    """
+    env = os.environ if environ is None else environ
+    job_source = pathlib.Path(job_source) if job_source else \
+        pathlib.Path(nl_render.__file__).with_name("nearline_job.py")
+    origin = ("NL_CONDITIONS in the daemon's environment" if env.get("NL_CONDITIONS")
+              else "the job's default")
+    try:
+        spec = env.get("NL_CONDITIONS") or nl_render.job_conditions(job_source.read_text())
+        resolved = nl_render.resolve_conditions(spec)
+    except (ValueError, RuntimeError, OSError) as e:
+        return (f"Nearline daemon: the conditions source ({origin}) does not resolve, so "
+                f"every nearline job will fail to start: {e}", True)
+    kind, arg = nl_render.split_conditions(resolved)
+    if kind == "db":
+        return (f"Nearline daemon: conditions from the database {describe_conninfo(arg)} "
+                f"({origin})", False)
+    return (f"Nearline daemon: WARNING: conditions from JSON {arg or 'in CONDITIONS_DIR'}, "
+            f"NOT from the database ({origin}). Every job will record that source. If this "
+            "is not deliberate, unset NL_CONDITIONS and restart the daemon", True)
+
+
 def start_command(args, executable = None, script = None) -> str:
     """The command line /Programs/<client>/Start command gets, so that a
     restart from the MIDAS Programs page brings the daemon back as it is now.
@@ -134,6 +167,9 @@ class NearlineDaemon:
         self.message("Nearline daemon: " + ("LIGHT nearline job (histograms only, no RNTuple, "
                                             "no timewalk, no wide SMA dt, no SMA diagnostics)"
                                             if self.light else "full nearline job"))
+        # Where the constants come from, as every job this daemon renders will resolve it.
+        conditions_msg, conditions_bad = conditions_announcement()
+        self.message(conditions_msg, is_error = conditions_bad)
 
         start_cmd = start_command(args)
         self.client.odb_set(f"/Programs/{args.midas_client}/Start command", start_cmd)
@@ -233,6 +269,15 @@ class NearlineDaemon:
         except Exception as e:
             msg = f"Job {job_cfg['job_id']} failed to start: {e}"
             self.message(msg, is_error = True, send_to_slack = True)
+            # FAILED, not left CLAIMED: a job that never started (its render failed,
+            # say, on a conditions service this host does not define) must show the
+            # same symptom as one that failed, and be requeued the same way.
+            try:
+                self.db_interface.update_status(job_cfg.get('table', 'postproc_job'),
+                                                job_cfg['job_id'], 'FAILED')
+            except Exception as db_e:
+                self.message(f"Job {job_cfg['job_id']} could not be marked FAILED either: "
+                             f"{db_e}", is_error = True)
         else:
             queue.add(theJob)
 
