@@ -138,28 +138,28 @@ class interface:
             configs = cursor.fetchall()
         return configs
 
-    def register_run(self, status : str, author : str, note : str) -> int:
+    def register_run(self, status : str, author : str, note : str, quality : str) -> int:
         conn = connect(self.user, self.password)
         with conn.cursor() as cursor:
             cursor.execute(
                 """
                 WITH new_run AS (
-                    INSERT INTO state.midas_run (status)
-                    VALUES (%s) RETURNING id
+                    INSERT INTO state.midas_run (status, quality)
+                    VALUES (%s, %s) RETURNING id
                 )
                 INSERT INTO logs.run_annotations (run_id, author, note)
                 SELECT new_run.id, %s, %s
                 FROM new_run
                 RETURNING run_id;
                 """,
-                (status, author, note)
+                (status, quality, author, note)
             )
             run_id = cursor.fetchone()[0]
         conn.commit()
         conn.close()
         return run_id
 
-    def start_of_midas_run(self, run_id : int, run_number : int):
+    def start_of_midas_run(self, run_id : int, run_number : int, start_time : str):
         conn = connect(self.user, self.password)
         with conn.cursor() as cursor:
             # Mark the run in the job-list as complete
@@ -168,13 +168,28 @@ class interface:
                 UPDATE state.midas_run
                 SET
                     status = 'RUNNING',
-                    midas_run_number = %s
-                WHERE id = %s
+                    midas_run_number = %s,
+                    start_time = %s,
+                WHERE id = %s AND status IN ('PENDING', 'CLAIMED')
+                RETURNING id
                 """,
-                (run_number, run_id)
+                (run_number, start_time, run_id)
             )
+            id = cursor.fetchone()
+            if id is None:
+                cursor.execute(
+                    "SELECT status FROM state.midas_run WHERE id = %s" , (run_id, )
+                )
+                result = cursor.fetchone()
+                conn.rollback()
+                if result is None:
+                    raise RuntimeError(f"Can't start run with id {run_id}. No such run exists.")
+                else:
+                    raise RuntimeError(f"Can't start run with id {run_id}. Expected status to be 'PENDING' or 'CLAIMED', got {result[0]} instead")
+
         conn.commit()
         conn.close()
+        return id[0]
 
     def get_midas_run_number(self, run_id : int) -> int | None:
         conn = connect(self.user, self.password)
@@ -355,7 +370,8 @@ class interface:
         conn.close()
         return job_id
 
-    def end_of_midas_run(self, run_id : int, schedule_post_processing : bool = True) -> bool:
+    def end_of_midas_run(self, run_id : int, recorded_events : int, stop_time : str,
+                         schedule_post_processing : bool = True) -> bool:
         conn = connect(self.user, self.password)
         with conn.cursor() as cursor:
             # Mark the run in the job-list as complete
@@ -363,11 +379,13 @@ class interface:
                 """
                 UPDATE state.midas_run
                 SET
-                    status = 'DONE'
+                    status = 'DONE',
+                    stop_time = %s,
+                    recorded_events = %s
                 WHERE id = %s AND status IS DISTINCT FROM 'DONE'
                 RETURNING midas_run_number
                 """,
-                (run_id,)
+                (stop_time, recorded_events, run_id)
             )
             result = cursor.fetchone()
             if result is None:
@@ -491,7 +509,8 @@ class interface:
         finally:
             conn.close()
 
-    def schedule_new_run(self, num_ev :int,  configs : list, author : str, note : str) -> int:
+    def schedule_new_run(self, num_ev :int,  configs : list, author : str, note : str,
+                         quality : str | None = None) -> int:
         """
         Schedule a new run in the midas_run table
 
@@ -523,8 +542,8 @@ class interface:
                 cursor.execute(
                     """
                     WITH new_run AS (
-                        INSERT INTO state.midas_run (priority, status, requested_events)
-                        VALUES (%s, 'PENDING', %s)
+                        INSERT INTO state.midas_run (priority, status, requested_events, quality)
+                        VALUES (%s, 'PENDING', %s, %s)
                         RETURNING id
                     )
                     INSERT INTO logs.run_annotations (run_id, author, note)
@@ -532,7 +551,7 @@ class interface:
                     FROM new_run
                     RETURNING run_id;
                     """,
-                    (priority, num_ev, author, note)
+                    (priority, num_ev, quality, author, note)
                 )
                 run_id = cursor.fetchone()[0]
 
@@ -547,6 +566,18 @@ class interface:
             conn.close()
 
         return run_id
+
+    def validate_run_number(self, run_id : int, run_number : int):
+        conn = connect(user = self.user, password= self.password)
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*) FROM state.midas_run WHERE id = %(id)s AND midas_run_number = %(nr)s
+                """, { "id" : run_id, "nr" : run_number})
+            result = cursor.fetchone()[0]
+        conn.close()
+        return bool(result)
+
 
     def register_sequence(self, run_ids : list, on_complete : str) -> int:
         """Create a sequence around `run_ids`; returns the new sequence id."""
@@ -685,15 +716,7 @@ class interface:
 
 
     def update_postproc_status(self, job_id : int, new_status : str) -> bool:
-        conn = connect(user = self.user, password = self.password)
-        retVal = True
-        with conn.cursor() as cursor:
-            cursor.execute(
-                "UPDATE state.postproc_job SET status = %s WHERE id = %s", (new_status, job_id)
-            )
-        conn.commit()
-        conn.close()
-        return retVal
+        return self.update_status("state.postproc_job", job_id, new_status)
 
     def find_pending_postproc_jobs(self, job_type : str | list[str], client : str, max_jobs : int = 1) -> list:
         """

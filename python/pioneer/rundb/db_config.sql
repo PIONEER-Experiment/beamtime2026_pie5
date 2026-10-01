@@ -437,7 +437,11 @@ CREATE TABLE IF NOT EXISTS state.midas_run (
     priority INT,                               -- This is a priority value
     status TEXT REFERENCES utils.status(name),  -- Indicates the status of the job
     midas_run_number INT,                       -- run number assigned when actually run in midas
-    requested_events BIGINT DEFAULT 1000000     -- the number of events desired for this run
+    requested_events BIGINT DEFAULT 1000000,    -- the number of events desired for this run
+    start_time TIMESTAMPTZ,                     -- time at which the run started
+    stop_time TIMESTAMPTZ,                      -- time at which the run stopped
+    recorded_events BIGINT,                     -- number of events recorded for this run
+    quality TEXT                            -- run quality flag
 );
 
 -- midas_run_config: child table of midas_run
