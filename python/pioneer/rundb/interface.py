@@ -747,6 +747,7 @@ class interface:
                             ppj.id,
                             ppj.midas_run_id,
                             ppj.file_id,
+                            ppj.job_type,
                             mr.midas_run_number,
                             fl.producer
                         FROM state.postproc_job AS ppj
@@ -767,6 +768,7 @@ class interface:
                     WHERE s.id = claimed.id
                     RETURNING
                         claimed.id AS job_id,
+                        claimed.job_type as job_type,
                         claimed.midas_run_id AS run_id,
                         claimed.file_id AS file_id,
                         claimed.midas_run_number AS midas_run_number,
