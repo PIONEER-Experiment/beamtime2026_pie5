@@ -361,6 +361,17 @@ def test_rf_and_current_channels_come_from_the_map_by_default(job_env):
     assert job["all_reco"].RFInput == "/Event/rf"
 
 
+def test_reco_and_sma_monitor_read_the_pairing_sidecar(job_env):
+    tmp_path, midas = job_env
+    job = _run(render_job(midas, tmp_path / "run00790_00000.root", light=False))
+    # the sidecar is index-parallel to /Event/mutrig_cal, which both read
+    assert job["all_reco"].S_hits == "/Event/mutrig_cal"
+    assert job["all_reco"].ScintHitsInput == "/Event/sma_hits"
+    assert job["sma_monitor"].input == "/Event/mutrig_cal"
+    assert job["sma_monitor"].ScintHitsInput == "/Event/sma_hits"
+    assert job["sma_cal"].hitsOutput == "/Event/sma_hits"
+
+
 def test_rf_and_current_channels_override_the_map_when_set(job_env):
     tmp_path, midas = job_env
     target = render_job(midas, tmp_path / "run00790_00000.root", light=False)

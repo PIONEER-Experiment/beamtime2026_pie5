@@ -1557,6 +1557,10 @@ if PSM_SMA_MONITOR:
     # initialize, after this file has run, and an absent /Event/rf is an empty
     # pulse list to the monitor.
     sma_monitor.RFInput = _TES_RF
+    # The calibration layer's sidecar, index-parallel to /Event/mutrig_cal: its
+    # NIM-only hits (a configured ToT, not a measured one) are kept out of the ToT
+    # spectra and the degenerate/marker judgement.
+    sma_monitor.ScintHitsInput = _TES_SMA_HITS
     # A frame is left out of dt_to_s1_wide when its wide pairs exceed this cap, so a
     # cap of 0 leaves every frame out; the property's own default (a million pairs)
     # stands otherwise.
@@ -1604,6 +1608,9 @@ if PSM_RECO:
         # phase window is a projection of them. /Event/rf is optional per
         # frame, as there.
         all_reco.RFInput = _TES_RF
+        # The calibration layer's sidecar (index-parallel to S_hits) gives each
+        # tracklet nimMask / incompleteMask, a bit per counter S1..S5.
+        all_reco.ScintHitsInput = _TES_SMA_HITS
     weight_reco = PIPSMComputeWeight(
         input=all_reco.output, output=_TES_PSM_WEIGHTS,
         Strategy=int(PSM_WEIGHT_STRATEGY), DistanceL12=float(PSM_DISTANCE_L12),
