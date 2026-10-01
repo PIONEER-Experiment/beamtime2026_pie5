@@ -303,7 +303,8 @@ WD_SCALER_FILL_STALE = False
 # 2015 (proton_current); a run whose interval marks no RF has no /Event/rf, one
 # that marks no current no histograms/musip/current. An integer overrides the
 # map for every run this job processes, for a file whose interval is wrong or
-# not yet written.
+# not yet written. "off" switches the role off whatever the map says (no
+# /Event/rf, resp. no musip/current; the map's channel is dropped and counted).
 PSM_RF_CHANNEL = None
 PSM_CURRENT_CHANNEL = None
 # MuPix pixel pitch in mm; a wrong pitch scales every position and every slope.
@@ -335,6 +336,20 @@ PSM_SMA_DIAGNOSTICS = True
 # Off restores the times the decoder gave before the correction existed. It
 # changes the hits, so light mode does not switch it off.
 PSM_SMA_FINE_OFFSETS = True
+# Part of the fine-time correction above: the low-threshold NIM copies (S1L..S5L,
+# ids 2021, 2023-2026, wherever the run's mutrig_channel_map cables them) can carry
+# an arbitrary per-frame fine-time lag against S1. The decoder measures it per frame
+# from the copy's words that share a coarse field with an S1 word and removes it
+# down to the copy's nominal delay below, but only when it lies further than 50 ns
+# from it (a real cable delay survives); a frame without S1 (a source run) is never
+# corrected by a guess. Recorded per frame in /Event/sma_time_state (m_lagNs).
+# False leaves the copies' times as the words have them. Changes the hits, so not a
+# light switch.
+PSM_SMA_NIM_LAG = True
+# {NIM copy id: nominal delay from S1 in ns} for the lag above; an id not listed is
+# 0. Empty: S4L's ch 10 copy is a logic output with several delays to S4 and stays
+# uncalibrated, and S3L sits within a few ns of S1.
+PSM_SMA_NIM_NOMINAL_DELAY_NS = {}
 # Frame 0 of subrun 0 holds a stale replay of the previous run. With this on, the
 # decoder drops the first H000 bank of the job when the input file is subrun 0
 # (the second number in the file name, run00790_00000); other subruns and a name
@@ -1067,6 +1082,7 @@ def check():
                         ("PSM_TIMEWALK_CORRECTION", PSM_TIMEWALK_CORRECTION),
                         ("PSM_SMA_WIDE_DT", PSM_SMA_WIDE_DT),
                         ("PSM_SMA_FINE_OFFSETS", PSM_SMA_FINE_OFFSETS),
+                        ("PSM_SMA_NIM_LAG", PSM_SMA_NIM_LAG),
                         ("PSM_SMA_SKIP_STALE_FIRST_FRAME", PSM_SMA_SKIP_STALE_FIRST_FRAME),
                         ("PSM_SMA_NIM_PAIRING", PSM_SMA_NIM_PAIRING)):
         if not isinstance(value, bool):
@@ -1102,20 +1118,26 @@ def check():
             for k, v in PSM_SMA_OFFSET_OVERRIDE_NS.items())):
         problems.append(f"PSM_SMA_OFFSET_OVERRIDE_NS is {PSM_SMA_OFFSET_OVERRIDE_NS!r}: it must "
                         "be a dict {detector id (int): offset in ns (number)}, normally empty.")
+    if not (isinstance(PSM_SMA_NIM_NOMINAL_DELAY_NS, dict) and all(
+            isinstance(k, int) and not isinstance(k, bool) and _number(v) and abs(v) < 2**19
+            for k, v in PSM_SMA_NIM_NOMINAL_DELAY_NS.items())):
+        problems.append(f"PSM_SMA_NIM_NOMINAL_DELAY_NS is {PSM_SMA_NIM_NOMINAL_DELAY_NS!r}: it "
+                        "must be a dict {NIM copy id (int): nominal delay from S1 in ns (number, "
+                        "|ns| < 2^19)}.")
     def _sma_channel_ok(value):
-        return (value is None or (isinstance(value, int) and not isinstance(value, bool)
-                                  and 0 <= value <= 15))
+        return (value is None or value == "off"
+                or (isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 15))
     if not _sma_channel_ok(PSM_RF_CHANNEL):
         problems.append(f"PSM_RF_CHANNEL is {PSM_RF_CHANNEL!r}: it must be None (the RF channel "
-                        "of the run's mutrig_channel_map) or an integer SMA raw channel 0-15 (the "
-                        "word's 4-bit channel field), or /Event/rf holds no RF or the wrong "
-                        "pulses and the SMA monitor's RF phase is meaningless.")
+                        "of the run's mutrig_channel_map), \"off\" or an integer SMA raw channel "
+                        "0-15 (the word's 4-bit channel field), or /Event/rf holds no RF or the "
+                        "wrong pulses and the SMA monitor's RF phase is meaningless.")
     if not _sma_channel_ok(PSM_CURRENT_CHANNEL):
         problems.append(f"PSM_CURRENT_CHANNEL is {PSM_CURRENT_CHANNEL!r}: it must be None (the "
-                        "proton-current channel of the run's mutrig_channel_map) or an integer "
-                        "SMA raw channel 0-15, or histograms/musip/current counts the wrong "
+                        "proton-current channel of the run's mutrig_channel_map), \"off\" or an "
+                        "integer SMA raw channel 0-15, or histograms/musip/current counts the wrong "
                         "pulses.")
-    if (PSM_RF_CHANNEL is not None and PSM_RF_CHANNEL == PSM_CURRENT_CHANNEL
+    if (isinstance(PSM_RF_CHANNEL, int) and PSM_RF_CHANNEL == PSM_CURRENT_CHANNEL
             and _sma_channel_ok(PSM_RF_CHANNEL)):
         problems.append(f"PSM_RF_CHANNEL and PSM_CURRENT_CHANNEL are both {PSM_RF_CHANNEL}: the "
                         "decoder takes the RF channel first, so the current pulses would become "
@@ -1269,19 +1291,25 @@ if PSM_DECODE:
                           quadTimeBinWidth=float(PSM_QUAD_TIME_BIN_NS))
     # Unset, the decoder takes the RF and current channels from the run's raw
     # map (its role ids 2014/2015) and says at initialize where each came from;
-    # set, they override the map. The RF channel is what creates /Event/rf and
-    # the current channel what books histograms/musip/current.
+    # set, they override the map; "off" (the decoder's -2) switches the role
+    # off. The RF channel is what creates /Event/rf and the current channel
+    # what books histograms/musip/current.
     if PSM_RF_CHANNEL is not None:
-        musip.rf_channel = int(PSM_RF_CHANNEL)
+        musip.rf_channel = -2 if PSM_RF_CHANNEL == "off" else int(PSM_RF_CHANNEL)
     if PSM_CURRENT_CHANNEL is not None:
-        musip.current_channel = int(PSM_CURRENT_CHANNEL)
+        musip.current_channel = -2 if PSM_CURRENT_CHANNEL == "off" else int(PSM_CURRENT_CHANNEL)
     if PSM_SMA_COARSE_SHIFT is not None:
         musip.coarseShift = int(PSM_SMA_COARSE_SHIFT)
     musip.smaDiagnostics = bool(PSM_SMA_DIAGNOSTICS)
     musip.correctFineOffsets = bool(PSM_SMA_FINE_OFFSETS)
-    # fineOffsetSnapChannels is left at its default, which snaps the decoder's
-    # resolved RF channel (from the map or PSM_RF_CHANNEL), and nothing on a run
-    # without one.
+    # The correction's roles are the decoder's defaults, by detector id through
+    # the run's raw map: S1 the reference, S2 voted, S5 halved, the RF role
+    # snapped, every cabled NIM copy a lag channel. Only the lag is a job knob.
+    if not PSM_SMA_NIM_LAG:
+        musip.fineOffsetLagVids = []
+    if PSM_SMA_NIM_NOMINAL_DELAY_NS:
+        musip.fineOffsetLagNominalNs = {int(k): float(v)
+                                        for k, v in PSM_SMA_NIM_NOMINAL_DELAY_NS.items()}
     musip.skipFirstBank = bool(PSM_SMA_SKIP_STALE_FIRST_FRAME) and _SUBRUN == 0
     if PSM_SMA_SKIP_STALE_FIRST_FRAME and _SUBRUN is None:
         print(f"[nearline] WARNING    PSM_SMA_SKIP_STALE_FIRST_FRAME is on but "
@@ -1649,5 +1677,7 @@ print(f"[nearline] sma pair   PSM_SMA_NIM_PAIRING={PSM_SMA_NIM_PAIRING}"
       f" PSM_SMA_NIM_ONLY_TOT={PSM_SMA_NIM_ONLY_TOT}"
       f" PSM_SMA_OFFSET_OVERRIDE_NS={PSM_SMA_OFFSET_OVERRIDE_NS or 'none'}")
 print(f"[nearline] sma fine   PSM_SMA_FINE_OFFSETS={PSM_SMA_FINE_OFFSETS}"
+      f" PSM_SMA_NIM_LAG={PSM_SMA_NIM_LAG}"
+      f" PSM_SMA_NIM_NOMINAL_DELAY_NS={PSM_SMA_NIM_NOMINAL_DELAY_NS or 'none'}"
       f" PSM_SMA_SKIP_STALE_FIRST_FRAME={PSM_SMA_SKIP_STALE_FIRST_FRAME} subrun={_SUBRUN}")
 print(f"[nearline] EvtMax     {EVT_MAX}")
