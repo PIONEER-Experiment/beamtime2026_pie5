@@ -169,7 +169,7 @@ class interface:
                 SET
                     status = 'RUNNING',
                     midas_run_number = %s,
-                    start_time = %s,
+                    start_time = %s
                 WHERE id = %s AND status IN ('PENDING', 'CLAIMED')
                 RETURNING id
                 """,
@@ -408,6 +408,8 @@ class interface:
                 else:
                     # run id exists, but was already in 'DONE' state.
                     return True
+        conn.commit()
+        conn.close()
 
         if (schedule_post_processing):
             # Schedule the backup jobs.
@@ -422,7 +424,7 @@ class interface:
             # List all registered files
             all_files = self.find_files(run_ids = [run_id], extensions = ['mid.lz4'])
             for f in all_files:
-                self.schedule_postproc_job_on_file(f, 'farline', 'farline', [remote_job_id])
+                self.schedule_postproc_job_on_file(f['id'], 'farline', 'farline', [remote_job_id])
 
         return True
 

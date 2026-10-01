@@ -347,7 +347,6 @@ class NearlineDaemon:
 
             auth      = client.odb_get("/Nearline/Info/Operator")
             desc      = client.odb_get("/Nearline/Info/Description")
-            quality   = client.odb_get("/Nearline/Info/Quality")
 
             author = "AutoRecovery"
             if auth:
@@ -364,8 +363,6 @@ class NearlineDaemon:
             )
             client.odb_set("/Nearline/Info/Run DB PK", run_db_pk)
 
-
-
         self.db_interface.open_file(f"logger_{log_channel}", run_db_pk, value)
 
     # Small sub-routine to properly close out a file writing for a
@@ -378,7 +375,7 @@ class NearlineDaemon:
             # Schedule the nearline analysis job right now as we finished
             # writing the file. This may give a head start in cases where
             # multiple subruns are produced.
-            self.db_interface.schedule_postproc_job_on_file(i, 'nearline')
+            self.db_interface.schedule_postproc_job_on_file(i, task = 'nearline', client = 'nearline')
 
     def start_of_run_callback(self, client : midas.client.MidasClient , run_number):
         run_db_pk = client.odb_get("/Nearline/Info/Run DB PK")
@@ -396,7 +393,7 @@ class NearlineDaemon:
                 return midas.status_codes["CM_INVALID_TRANSITION"], "Insufficient run description"
 
             run_db_pk = self.db_interface.register_run(
-                status  = "RUNNING",
+                status  = "CLAIMED",
                 author  = author,
                 note    = description,
                 quality = quality
@@ -428,6 +425,7 @@ class NearlineDaemon:
 
     def end_of_run_callback(self, client, run_number):
         run_db_pk = client.odb_get("/Nearline/Info/Run DB PK")
+        run_stop = client.odb_get("/Runinfo/Stop time")
         # the tuning step's stop time and WaveDREAM events (never raises)
         tuning = getattr(self, "tuning", None)
         if tuning is not None:
@@ -438,7 +436,7 @@ class NearlineDaemon:
             self.finish_file(log_channel)
             nEv += self.client.odb_get(f"/Logger/Channels/{log_channel}/Statistics/Events written")
         client.odb_set("/Nearline/Info/Run DB PK", 0)
-        self.db_interface.end_of_midas_run(run_db_pk, recorded_events = nEv)
+        self.db_interface.end_of_midas_run(run_db_pk, stop_time = run_stop, recorded_events = nEv)
         return midas.status_codes['SUCCESS']
 
 
