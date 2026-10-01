@@ -1,0 +1,3 @@
+# UNINITIALIZED (command-line -D not declared by the project)
+CMAKE_CXX_STANDARD:UNINITIALIZED=20
+# -MODIFIED:INTERNAL=ON

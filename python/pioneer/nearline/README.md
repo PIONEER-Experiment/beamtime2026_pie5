@@ -524,7 +524,8 @@ unchanged.
 | `PSM_REQUIRE_L_HITS` | `0` | Requiring exactly one L1 and one L2 pixel cluster discards every delayed tracklet, because delayed pulses have no tracker hits |
 | `PSM_SEED_ON_L` | `0` | Source runs only: seed tracklets on L1 tracker hits and pair each with the nearest L2 hit inside `PSM_LPAIR_WINDOW_NS`. A source on the tracker makes L1/L2 coincidences with no scintillator involved, and both scintillator-seeded modes attach L hits only to a scintillator cluster, so they reconstruct nothing from such a run. On in beam running it throws away the scintillator seed that defines a particle |
 | `PSM_LPAIR_WINDOW_NS` | `40.0` | L1 to L2 half-window in ns for that mode. The two-plane correlation from a source is much broader than the tracker time resolution, so this is generous on purpose; inert while `PSM_SEED_ON_L` is `0` |
-| `PSM_L_WINDOW_BEFORE_NS` / `PSM_L_WINDOW_AFTER_NS` | `100.0` / `160.0` | A scintillator cluster at `t` takes its L1/L2 hits from `[t - before, t + after)` (`thrMupix` / `thrMupixUpper`). Measured with the SMA and MuPix times on one base, t(MuPix) − t(S1) has a sharp edge at −90 ns, peaks at −52 ns and has a timewalk tail to about +150 ns, so the window opens just before the edge and closes past the tail. Too narrow and prompt tracklets lose their L pair; too wide and more of them see a second hit on one plane and are flagged ambiguous. The S-S clustering window (`thrScint`, 2 ns) is separate and untouched. An empty window is rejected by `check()` |
+| `PSM_L_WINDOW_BEFORE_NS` / `PSM_L_WINDOW_AFTER_NS` | `100.0` / `160.0` | A scintillator cluster at `t` takes its L1/L2 hits from `[t - before, t + after)` (`thrMupix` / `thrMupixUpper`). Measured with the SMA and MuPix times on one base, t(MuPix) − t(S1) has a sharp edge at −90 ns, peaks at −52 ns and has a timewalk tail to about +150 ns, so the window opens just before the edge and closes past the tail. Too narrow and prompt tracklets lose their L pair; too wide and more of them see a second hit on one plane and are flagged ambiguous. The S-S clustering window is separate (`PSM_SCINT_WINDOW_NS`). An empty window is rejected by `check()` |
+| `PSM_SCINT_WINDOW_NS` | `5.0` | The S-S clustering window in ns (`thrScint`): in the unseeded mode a cluster takes the scintillator hits in `[t_seed, t_seed + window)`. One particle's S1-S5 hits must end up in one cluster. The SMA counters are not time-aligned yet (S3 and S5 come out about 2 ns before S1, S2 and S4, and SMA times are whole ns), so the algorithm's default of 2 ns splits most particles into two or three clusters. Each cluster takes the same L1/L2 pair (about half of all L pairs become copies), and the cluster holding S1 lacks the layers that went to the other one, so its stop layer and S5 veto are wrong. At 5 ns about 95 % of beam particles reach S5 instead of about 16 %, and the copies drop from ~54 % to ~15 % of L pairs (what is left comes from late hits 5-25 ns after the particle). The S1-gated phase-space histograms and the MuPix monitor do not change. `check()` rejects a window that is not positive or that reaches `PSM_DELAYED_WINDOW_NS[0]`, where it would absorb the delayed pulse into its prompt cluster. Revisit once the SMA channels carry time offsets |
 | `PSM_L_CLUSTER_DIST_MM` | `0.12` | The L hits of each plane inside the L window are clustered by distance (`lClusterDistMm`): two hits at most this far apart in mm, global x/y, are linked (single linkage, 1e-6 mm slack, no time condition beyond the window), and exactly one cluster per plane makes the L pair, placed at the mean of the cluster's pixel centres; more than one cluster on a plane flags the tracklet `lAmbiguous`. 0.12 takes the eight touching pixels at the 0.08 mm pitch (edge 0.08, corner 0.113 mm), also across a chip boundary, and nothing further. `0` switches the clustering off: then a second hit of a plane, even the neighbouring pixel of the same particle, makes the tracklet ambiguous, which is how the reco worked before. A plane with more than 64 hits in the window (the algorithm's `lClusterMaxHits`) is ambiguous without being clustered, which bounds the pairwise work |
 | `PSM_DROP_CROSSTALK_GHOSTS` | `False` | Before the one-cluster-per-plane test, drop MuPix crosstalk ghosts (`dropCrosstalkGhosts`): a cluster whose largest ToT is at most 3 and that has a pixel of higher ToT of another cluster of the window on the same chip, at most one column and 40-43, 81-85 or 122-127 rows away. Most of the ambiguity left after the clustering is this. Needs the `PIGeometrySvc` of `PSM_DECODE`, from which each hit's column and row are recovered; `check()` refuses it without. Off until decided |
 | `PSM_AGGREGATE` | `1` | Fills the phase-space histograms inside the algorithm while the data is in memory. This is what makes the job a monitoring job rather than a converter |
@@ -691,7 +692,17 @@ a negative prompt channel means `PIPSMRecoCore` uses `S1Channel`.
 
 ## Running it
 
-Start the analysis container and source the environment inside it:
+On pinky and piana, source the environment script of this repository. It sets
+up ROOT, Gaudi, MIDAS, the reco install and this repository's `python/` the
+same way on both hosts (piana: the stack `software/install.sh` built, see
+[`../../../software/README.md`](../../../software/README.md)), and strips an
+active conda env from the shell:
+
+```bash
+source <this repo>/software/env.sh
+```
+
+Elsewhere, start the analysis container and source the environment inside it:
 
 ```bash
 cd <your testbeam-env checkout> && ./start-midas-container.sh
@@ -699,12 +710,12 @@ docker exec -it testbeam-midas bash
 source /software/setup_container_env.sh
 pushd /software/root/install && source bin/thisroot.sh && popd
 source /simulation/docker/setenv.sh
+export PYTHONPATH=/workdir/beamtime2026_pie5/python:$PYTHONPATH
 ```
 
 ### Processing a file
 
 ```bash
-export PYTHONPATH=/workdir/beamtime2026_pie5/python:$PYTHONPATH
 python -m pioneer.nearline.process /workdir/scratch/online/run00175.mid.lz4 \
   --out-dir /workdir/scratch/nearline
 ```
@@ -747,7 +758,7 @@ file, and `--light` renders the light job, the one a daemon started with
 | `json` | the JSON containers in `CONDITIONS_DIR` (the git copies) |
 
 A service the host does not define stops the command before anything runs,
-with the file it searched and the `--conditions json:` line to use instead. If `gaudirun.py` is not on `PATH` it exits 2 and prints the three
+with the file it searched and the `--conditions json:` line to use instead. If `gaudirun.py` is not on `PATH` it exits 2 and prints the
 `source` lines above instead of a Gaudi import traceback.
 
 **Reproducing a run is running its `.py`:** `gaudirun.py run00175.py`. The
