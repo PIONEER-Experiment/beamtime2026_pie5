@@ -1,0 +1,8 @@
+144c144
+< SITE:STRING=PINKY
+---
+> SITE:STRING=pioneer-analysis
+149c149
+< UUID_LIBRARIES:FILEPATH=/lib64/libuuid.so
+---
+> UUID_LIBRARIES:FILEPATH=/usr/lib64/libuuid.so

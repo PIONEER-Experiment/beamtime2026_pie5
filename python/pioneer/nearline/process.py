@@ -28,11 +28,16 @@ from pathlib import Path
 
 from pioneer.nearline.render import render_job
 
-# What to source before gaudirun.py exists, inside the testbeam-midas
-# container. Printed rather than guessed at: the job needs the Gaudi
-# environment, ROOT, and the install tree's libraries and genConf, and getting
-# one of the three wrong is the usual reason a hand run fails at import time.
-ENV_HINT = ("source /software/setup_container_env.sh",
+# What to source before gaudirun.py exists. Printed rather than guessed at: the
+# job needs the Gaudi environment, ROOT, and the install tree's libraries and
+# genConf, and getting one of the three wrong is the usual reason a hand run
+# fails at import time. On pinky and piana it is this repository's
+# software/env.sh; inside the testbeam-midas container it is the three lines
+# after it.
+_ENV_SH = Path(__file__).resolve().parents[3] / "software" / "env.sh"
+ENV_HINT = (f"source {_ENV_SH}",
+            "or, inside the testbeam-midas container:",
+            "source /software/setup_container_env.sh",
             "pushd /software/root/install && source bin/thisroot.sh && popd",
             "source /simulation/docker/setenv.sh")
 

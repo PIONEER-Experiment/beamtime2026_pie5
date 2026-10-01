@@ -1,0 +1,2 @@
+# UNINITIALIZED (command-line -D not declared by the project)
+# -MODIFIED:INTERNAL=ON
