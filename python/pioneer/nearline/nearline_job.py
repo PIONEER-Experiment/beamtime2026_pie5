@@ -1419,7 +1419,8 @@ if WD_ENABLED and WD_SCALER_MONITOR:
         timeBinS=float(WD_SCALER_TIME_BIN_S), timeMaxS=float(WD_SCALER_TIME_MAX_S),
         fillStale=bool(WD_SCALER_FILL_STALE))
     # The run's "current" input of the WaveDREAM role table is counted into
-    # proton_current_counts (rate x interval, see PIWDScalerCount.hpp), the
+    # proton_current_counts (rate x interval, see PIWDScalerCount.hpp); the
+    # rate counts / seconds times PIPSMSMACalibration's sma_live_seconds is the
     # normalisation combine_files.py prefers. A run whose table has no current
     # input, or WD_ROLE_TABLE = "", books none.
     if WD_ROLE_TABLE:

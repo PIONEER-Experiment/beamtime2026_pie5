@@ -66,7 +66,7 @@ PIHistogramSvc        histograms/<instance>/<name> -> <out>_hists.root
 | `PITMidasWaveDream` | WaveDREAM banks | `/Event/wd_event_header`, `wd_waveform`, `wd_channel_time`, `wd_timebase`, `wd_scalers` | — |
 | `PITMidasMusip` | `H000` | `/Event/muquad`, `/Event/mutrig`, `/Event/rf` (only on a run with an RF channel) | `musip/current` (only on a run with a proton-current channel); with `PSM_SMA_DIAGNOSTICS` also `musip/sma_word_types`, `sma_words_per_channel`, `sma_bank_words_per_frame`, `sma_trigger_words_per_frame`, `sma_frame_span_ms`, `sma_frame_gap_ms`, `sma_live_time`, `sma_fine_coarse_diff`, `sma_fine_vs_coarse`, `sma_fine_bit_occupancy`; with `PSM_PIXEL_MASK` also `musip/mupix_masked_hits` (pixel words the mask dropped, one bin per chip, labelled `<vid> (raw <id>)`) and `musip/mupix_masked_hits_per_pixel` (one bin per masked pixel, labelled `<vid> c<col> r<row>`) |
 | `PITMidasMusip` | `H000` | (state product) | `/Event/sma_time_state` (PIPSMSMATimeState): per H000 bank and SMA channel, the fine-offset k, how it was found, mixed/undetermined flags, word counters and S5 class counts; one entry per bank |
-| `PIPSMSMACalibration` | `/Event/mutrig` | `/Event/mutrig_cal`; `/Event/sma_hits` (PIPSMSMAHits, index-parallel to `mutrig_cal`: id, time, aligned TOT and NIM times, ToT, NIM width, flags, raw TOT/NIM indices, the ToT written) | per counter whose NIM copy the run cables (named by the TOT id): `dt_raw_<id>`, `dt_aligned_<id>` (t_NIM − nearest t_TOT, ±200 ns), `dt_wide_<id>` (all TOT words within 2^19 ns, the fine-field span), `dt_vs_tot_<id>` (the walk), `classes_<id>`, `nim_width_<id>`, `nim_candidates_<id>` |
+| `PIPSMSMACalibration` | `/Event/mutrig` | `/Event/mutrig_cal`; `/Event/sma_hits` (PIPSMSMAHits, index-parallel to `mutrig_cal`: id, time, aligned TOT and NIM times, ToT, NIM width, flags, raw TOT/NIM indices, the ToT written) | always `sma_live_seconds` (one bin: the summed SMA frame spans, last minus first hit time of every frame, frames over 10 s left out; the live time the merge step multiplies the WaveDREAM rate with); per counter whose NIM copy the run cables (named by the TOT id): `dt_raw_<id>`, `dt_aligned_<id>` (t_NIM − nearest t_TOT, ±200 ns), `dt_wide_<id>` (all TOT words within 2^19 ns, the fine-field span), `dt_vs_tot_<id>` (the walk), `classes_<id>`, `nim_width_<id>`, `nim_candidates_<id>` |
 | `PIPSMMuPixTimewalkCorrection` | `/Event/muquad`; `/Event/mutrig_cal` (optional, only with `PSM_TIMEWALK`) | `/Event/muquad_twc` | `twc_hits` (hits corrected, hits passed through without constants, events without counters (no `/Event/mutrig_cal`), events); with `PSM_TIMEWALK` the all-pairs dt(pixel − S1) vs pixel ToT before and after the correction, `twc_dt_vs_tot_raw_<vid>` / `twc_dt_vs_tot_cor_<vid>` per chip (detector ids 10011-10014, 10021-10024) and `twc_dt_vs_tot_raw_L<n>` / `twc_dt_vs_tot_cor_L<n>` per plane |
 | `PIWDSettingsSummary` | ODB conditions tables | `WDSettingsHeader` | — |
 | `PIWDRFPhase` | `/Event/wd_waveform`, `wd_channel_time` | `/Event/wd_rf_phase` | `rf_phase`, `rf_amplitude`, `rf_residual` |
@@ -231,17 +231,27 @@ external clock; their names are in `wd_scaler_names`, recorded in the
 **Proton current.** The monitor also takes the input the run's interval of
 `wd_channel_map` (`WD_ROLE_TABLE`) calls `current` and counts it into the
 one-bin `proton_current_counts`: each reading's rate times the time since the
-previous reading taken, the first reading of a job counted with the median
-interval of the others (the nominal 5 s when the job has only one). Stale
-readings are skipped as for the other histograms (`WD_SCALER_FILL_STALE`), and
-so is a reading on which the input is disabled; the next reading taken then
-covers the whole interval at its own rate. `proton_current_seconds` holds the
-board time those counts cover, so counts / seconds is the mean rate, and
-`finalize()` prints both. Summed over the subruns of a run this misses only
-the time after the last reading, under one readout period. This is the
-normalisation the merge step prefers (below). A run whose map has no `current`
-input, or `WD_ROLE_TABLE = ""`, books neither histogram and says so at
-`initialize()`.
+previous reading taken. `proton_current_seconds` holds the board time those
+counts cover, so counts / seconds is the mean rate, and `finalize()` prints
+both. Stale readings never feed these two (they are re-sends of an old value),
+whatever `WD_SCALER_FILL_STALE` says, and neither does a reading on which the
+input is disabled; the next reading taken then covers the whole interval at
+its own rate. A reading with the same board time as the previous one is a
+duplicate and is skipped. A reading without a previous one, the job's first or
+the first after the board clock was reset (the board time counts seconds since
+configuration, and the board is reconfigured at the start of a run), is
+counted with min(its own board time, the median of the job's steady
+intervals), so the nominal 5 s when the job has none. The begin of a run is
+therefore approximate: the time between the last reading on the old clock and
+the reset is in no file, and the first readings get estimated intervals, a few
+seconds per run (up to tens of % of one subrun-0 file), plus at most one
+readout period after the run's last reading. The merge step uses only the
+rate, counts / seconds, which these estimates bias far less (below). A run
+whose map has no `current` input (every run before the current was cabled to
+input 15: input 6, cabled for it earlier, never counted and is spare), or
+`WD_ROLE_TABLE = ""`, books neither histogram and says so at `initialize()`.
+A `WD_ROLE_TABLE` that does not resolve for the run (no interval, a bad role)
+stops the job at `initialize()`, as it does for `PIWDWaveformAnalysis`.
 
 | setting | default | what goes wrong if it is wrong |
 |---|---|---|
@@ -1502,7 +1512,7 @@ warning. The result goes into the `scheduled` report as `reply`
 stops a proposal from being scheduled: the service decides what runs next.
 
 **Exposure:** every context carries `measurement.exposure`, so the service can
-normalise rates by run time when the SMA proton current is empty:
+normalise rates by run time when the proton-current normalisation is missing:
 `{"seconds", "wd_events", "per_run": [{"run", "seconds", "wd_events", "bor",
 "eor", "time_source", "complete"}], "source": {"seconds", "wd_events"}}`. The
 daemon records the active step's run in its own transitions: at the start
@@ -1668,20 +1678,33 @@ differ in their selection and binning.
 ## The merge step normalises by the proton current
 
 `combine_files.py` sums the histograms of each run's sub-runs, divides each
-run by its own proton-current count, and adds the runs together. The count
-comes from one source for the whole join:
-`histograms/PIWDScalerMonitor/proton_current_counts` (the WaveDREAM scaler,
-in scaler counts) when every run being joined has it non-empty, else
-`histograms/musip/current` (the SMA pulses) when every run has that, else
-nothing. The two count the same signal over different live times, so a join
-never mixes them; the line it prints names the source and each run's count.
-Factors are comparable only within one source. Without a source it prints one
-warning and every run stays raw counts (factor 1), so the runs remain
-comparable with each other but not per proton. A run lacks a source when its
-map has no such input (no WaveDREAM `current` input before the current was
-cabled to it, no SMA current channel once it left the SMA), when a sub-run's
-file lacks the histogram, or when it is empty (`PSM_DECODE = False`,
-`WD_SCALER_MONITOR = False`). Only the source used is kept in the output.
+run by the proton current delivered while the SMA was live, and adds the runs
+together. The normalisation comes from one source for the whole join:
+
+- **WaveDREAM** when every run being joined has
+  `histograms/PIWDScalerMonitor/proton_current_counts`,
+  `.../proton_current_seconds` and
+  `histograms/PIPSMSMACalibration/sma_live_seconds` non-empty: the mean
+  scaler rate (counts / seconds) times the SMA live time (the summed spans
+  of the SMA readout frames). The printed line gives each run's three
+  numbers and its factor;
+- else **SMA** when every run has `histograms/musip/current` (the pulses of
+  the SMA proton-current channel, counted only inside recorded frames);
+- else nothing.
+
+Both sources are rate x SMA live time of the same ~220 kHz signal, so factors
+from the two mean the same thing and stay comparable with joins made before
+the current left the SMA. A join still never mixes them; the line it prints
+names the source. Without a source it prints one warning and every run stays
+raw counts (factor 1), so the runs remain comparable with each other but not
+per proton. A run lacks a source when its map has no such input (no WaveDREAM
+`current` input before the current was cabled to it, no SMA current channel
+once it left the SMA), when a sub-run's file lacks one of its histograms (a
+note names the file, whichever sub-run it is), when one is empty
+(`PSM_DECODE = False`, `WD_SCALER_MONITOR = False`), or when its files predate
+`sma_live_seconds` (those fall back to the SMA pulses where they have them).
+Only the current histograms of the source used are kept in the output, by
+`combine_runs` and `merge_sub_runs` alike.
 `MergeJob` feeds it the `<filebase>_hists.root` files
 (`jobs.py`), and the loop adding runs together handles any number of runs.
 It builds that list from the run's nearline `root` rows in the run database,
