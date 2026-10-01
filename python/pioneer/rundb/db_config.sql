@@ -437,7 +437,11 @@ CREATE TABLE IF NOT EXISTS state.midas_run (
     priority INT,                               -- This is a priority value
     status TEXT REFERENCES utils.status(name),  -- Indicates the status of the job
     midas_run_number INT,                       -- run number assigned when actually run in midas
-    requested_events BIGINT DEFAULT 1000000     -- the number of events desired for this run
+    requested_events BIGINT DEFAULT 1000000,    -- the number of events desired for this run
+    start_time TIMESTAMPTZ,                     -- time at which the run started
+    stop_time TIMESTAMPTZ,                      -- time at which the run stopped
+    recorded_events BIGINT,                     -- number of events recorded for this run
+    quality TEXT                            -- run quality flag
 );
 
 -- midas_run_config: child table of midas_run
@@ -475,7 +479,8 @@ CREATE TABLE IF NOT EXISTS state.postproc_job (
     id SERIAL PRIMARY KEY,
     midas_run_id INT REFERENCES state.midas_run(id),
     file_id INT REFERENCES state.file_list(id),
-    job_type TEXT,
+    client TEXT NOT NULL,
+    job_type TEXT NOT NULL,
     priority INT,
     status TEXT REFERENCES utils.status(name)
 );
@@ -855,7 +860,7 @@ GRANT USAGE, SELECT ON SEQUENCE state.file_list_id_seq         TO bot;
 GRANT USAGE, SELECT ON SEQUENCE state.run_sequence_id_seq      TO bot;
 GRANT USAGE, SELECT ON SEQUENCE state.runs_in_sequence_id_seq  TO bot;
 
-GRANT UPDATE (status, midas_run_number) ON state.midas_run     TO bot;
+GRANT UPDATE ON state.midas_run     TO bot;
 GRANT UPDATE (status)                   ON state.postproc_job  TO bot;
 GRANT UPDATE (status)                   ON state.file_list     TO bot;
 GRANT UPDATE (status)                   ON state.run_sequence  TO bot;

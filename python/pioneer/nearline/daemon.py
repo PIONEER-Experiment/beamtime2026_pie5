@@ -6,6 +6,7 @@ from pioneer.conddb.pgservice import describe as describe_conninfo
 import pioneer.nearline.run as nl_run
 import pioneer.nearline.tuning as nl_tuning
 from pioneer.nearline.miniTwinInterface import miniTwinInterface as mt_iface
+from pioneer.nearline.queue import NearlineQueue
 
 import midas.client        # connect to MIDAS ODB
 import argparse            # parsing command line arguments
@@ -110,9 +111,14 @@ def start_command(args, executable = None, script = None) -> str:
     restart from the MIDAS Programs page brings the daemon back as it is now.
     --light is part of it: a light host restarted without it would quietly
     switch to the full job."""
+
     invoking_call = [
-        executable or sys.executable,
-        script or os.path.realpath(sys.argv[0]),
+        "tmux", "new-session",
+        "-d",
+        "-s", "pioneer-nearline",
+        "--",
+        sys.executable,
+        "-m", "pioneer.nearline.daemon",
         "--midas-client", args.midas_client,
         "--midas-host", args.midas_host,
         "--midas-expt", args.midas_expt
@@ -121,30 +127,6 @@ def start_command(args, executable = None, script = None) -> str:
         invoking_call.append("--light")
     return " ".join(shlex.quote(arg) for arg in invoking_call)
 
-
-class NearlineQueue:
-    def __init__(self, name : str = None, maxJobs : int = 1):
-        self.name : str  = name
-        self.maxJobs :int = maxJobs
-        self.active : list[nl_jobs.BaseJob] = list()
-
-    def get_finshed(self) -> list[nl_jobs.BaseJob]:
-        completed = list()
-        for aJob in self.active:
-            rc = aJob.poll()
-            if rc is None:
-                # This job is still running
-                continue
-            completed.append(aJob)
-        for j in completed:
-            self.active.remove(j)
-        return completed
-
-    def getOpenSlots(self) -> int:
-        return self.maxJobs - len(self.active)
-
-    def add(self, aJob : nl_jobs.BaseJob) -> None:
-        self.active.append(aJob)
 
 class NearlineDaemon:
     def __init__(self, args):
@@ -171,34 +153,47 @@ class NearlineDaemon:
         conditions_msg, conditions_bad = conditions_announcement()
         self.message(conditions_msg, is_error = conditions_bad)
 
-        start_cmd = start_command(args)
-        self.client.odb_set(f"/Programs/{args.midas_client}/Start command", start_cmd)
+        odb_start_cmd_path = f"/Programs/{args.midas_client}/Start command"
+        if not self.client.odb_exists(odb_start_cmd_path):
+            start_cmd = start_command(args)
+            self.client.odb_set(odb_start_cmd_path, start_cmd)
         config_exists = self.client.odb_exists("/Nearline")
         njobs = num_jobs_to_write(args.jobs, config_exists)
-        if not config_exists:
-            self.client.odb_set("/Nearline", {
-                "config" : {
-                    "Backup path" : os.environ.get("NEARLINE_BACKUP_DIR", "/home/pinky/backup/pim1_epics"),
-                    "Remote path" : os.environ.get("NEARLINE_REMOTE", "analysis:/home/pioneer/inbox"),
-                    "Output path" : os.environ.get("NEARLINE_DIR", "/home/pinky/nearline"),
-                    "Num parallel jobs" : njobs,
-                    "MiniTwin URL" : "http://127.0.0.1:8420",
-                    "MiniTwin updates" : "pim1_epics",
-                    "MiniTwin enable" : True
-                    }
-            })
-        elif njobs is not None:
-            self.client.odb_set("/Nearline/config/Num parallel jobs", njobs)
+        # Main Nearline config in ODB
+        self.client.odb_set("/Nearline", {
+            "Config" : {
+                "Backup path" : os.environ.get("NEARLINE_BACKUP_DIR", "/home/pinky/backup/pim1_epics"),
+                "Remote path" : os.environ.get("NEARLINE_REMOTE", "analysis:/home/pioneer/inbox"),
+                "Output path" : os.environ.get("NEARLINE_DIR", "/home/pinky/nearline"),
+                "Num parallel jobs" : njobs,
+                "MiniTwin URL" : "http://127.0.0.1:8420",
+                "MiniTwin updates" : "pim1_epics",
+                "MiniTwin enable" : True
+                },
+            "Info" : {
+                "Operator" : "",
+                "Description" : "",
+                "Quality" : "",
+                "Run DB PK" : 0
+                }
+            }, update_structure_only=True)
+
+        # Linking
+        self.client.odb_link("/Experiment/Edit on Start/Operator",    "/Nearline/Info/Operator")
+        self.client.odb_link("/Experiment/Edit on Start/Description", "/Nearline/Info/Description")
+        self.client.odb_link("/Experiment/Edit on Start/Quality",     "/Nearline/Info/Quality")
+        self.client.odb_set("/Experiment/Edit on Start/Options Quality", ["Debug", "NL Test"])
+
         # keys of the tuning loop, created with their defaults when missing
         nl_tuning.ensure_odb_keys(self.client)
 
-        self.queues['nearline'].maxJobs = self.client.odb_get("/Nearline/config/Num parallel jobs")
+        self.queues['nearline'].maxJobs = self.client.odb_get("/Nearline/Config/Num parallel jobs")
         self.midas_logger_path     = pathlib.Path(self.client.odb_get("/Logger/Data dir"))
-        self.backup_path           = pathlib.Path(self.client.odb_get("/Nearline/config/Backup path"))
-        self.remote_path           = pathlib.Path(self.client.odb_get("/Nearline/config/Remote path"))
-        self.nearline_output_path  = pathlib.Path(self.client.odb_get("/Nearline/config/Output path"))
-        self.minitwin_update_table = self.client.odb_get("/Nearline/config/MiniTwin updates")
-        self.minitwin_enabled      = self.client.odb_get("/Nearline/config/MiniTwin enable")
+        self.backup_path           = pathlib.Path(self.client.odb_get("/Nearline/Config/Backup path"))
+        self.nearline_output_path  = pathlib.Path(self.client.odb_get("/Nearline/Config/Output path"))
+        self.remote_path           = self.client.odb_get("/Nearline/Config/Remote path")
+        self.minitwin_update_table = self.client.odb_get("/Nearline/Config/MiniTwin updates")
+        self.minitwin_enabled      = self.client.odb_get("/Nearline/Config/MiniTwin enable")
 
         self.client.register_transition_callback(
             transition = midas.TR_START,
@@ -230,7 +225,7 @@ class NearlineDaemon:
 
         # Proper mini twin initialisation goes here.
         self.mt_interface = mt_iface(
-            base_url = self.client.odb_get("/Nearline/config/MiniTwin URL"),
+            base_url = self.client.odb_get("/Nearline/Config/MiniTwin URL"),
             config_type = self.minitwin_update_table
         )
         self.tuning = nl_tuning.TuningLoop(
@@ -255,13 +250,25 @@ class NearlineDaemon:
             # todo: get slack hook and set it up
 
     def dispatch_job(self, queue : NearlineQueue, job_cfg):
-        job_cfg['job_type'] = queue.name
-        job_cfg['input']    = self.midas_logger_path
-        job_cfg['backup']   = self.backup_path
-        job_cfg['remote']   = self.remote_path
-        job_cfg['output']   = self.nearline_output_path / f"run{job_cfg['midas_run_number']:05d}"
-        # read by GaudiJob only; the other job types ignore it
-        job_cfg['light']    = self.light
+        job_type = job_cfg['job_type']
+        if job_type == "nearline":
+            job_cfg['source_path'] = self.midas_logger_path
+            job_cfg['destination_path'] = str(self.nearline_output_path / f"run{job_cfg['midas_run_number']:05d}")
+        elif job_type in ("backup", "remote", "cleanup"):
+            if (job_cfg.get('producer', None) == "nearline"):
+                job_cfg['source_path'] = self.nearline_output_path / f"run{job_cfg['midas_run_number']:05d}"
+            else:
+                job_cfg['source_path'] = self.midas_logger_path
+
+            if job_type == "backup":
+                job_cfg['destination_path'] = str(self.backup_path)
+            elif job_type == "remote":
+                job_cfg['destination_path'] = str(self.remote_path)
+            elif job_type == "cleanup":
+                job_cfg['destination_path'] = None
+
+        job_cfg['log_path'] = self.nearline_output_path / f"run{job_cfg['midas_run_number']:05d}"
+
 
         theJob = nl_jobs.create_job(job_cfg, self.db_interface)
         try:
@@ -284,9 +291,7 @@ class NearlineDaemon:
     def build_and_dispatch_seq(self, seq_cfg : dict):
         on_complete = seq_cfg['on_complete'].split()
         if "merge" in on_complete:
-            seq_cfg['input'] = self.nearline_output_path
-            seq_cfg['output'] = self.nearline_output_path / f"seq{seq_cfg['id']:05d}"
-            seq_cfg['cfg_file'] = seq_cfg['output'] / f"seq{seq_cfg['id']:05d}.json"
+            seq_cfg['source_path'] = self.nearline_output_path
             seq_cfg['job_type'] = "merge"
             seq_cfg['job_id'] = seq_cfg['id']
             seq_cfg['table'] = 'run_sequence'
@@ -309,12 +314,12 @@ class NearlineDaemon:
 
                 # Paths where things shall be going to
                 self.midas_logger_path    = pathlib.Path(self.client.odb_get("/Logger/Data dir"))
-                self.backup_path          = pathlib.Path(self.client.odb_get("/Nearline/config/Backup path"))
-                self.remote_path          = pathlib.Path(self.client.odb_get("/Nearline/config/Remote path"))
-                self.nearline_output_path = pathlib.Path(self.client.odb_get("/Nearline/config/Output path"))
+                self.backup_path          = pathlib.Path(self.client.odb_get("/Nearline/Config/Backup path"))
+                self.nearline_output_path = pathlib.Path(self.client.odb_get("/Nearline/Config/Output path"))
+                self.remote_path          = self.client.odb_get("/Nearline/Config/Remote path")
 
                 # Update max number of jobs in nearline queue
-                self.queues['nearline'].maxJobs = self.client.odb_get("/Nearline/config/Num parallel jobs")
+                self.queues['nearline'].maxJobs = self.client.odb_get("/Nearline/Config/Num parallel jobs")
 
                 # "MiniTwin enable" is the tuning loop's pause switch
                 self.minitwin_enabled = self.tuning.refresh_enable()
@@ -330,7 +335,7 @@ class NearlineDaemon:
             # Step 2.2: Dispatch new jobs should there be open slots.
             numOpen = aQueue.getOpenSlots()
             if (numOpen > 0):
-                newConfigs = self.db_interface.find_pending_postproc_jobs(job_type = aQueue.name, max_jobs = numOpen)
+                newConfigs = self.db_interface.find_pending_postproc_jobs(job_type = aQueue.job_types, client = 'nearline', max_jobs = numOpen)
                 for aConfig in newConfigs:
                     self.dispatch_job(aQueue, aConfig)
 
@@ -368,14 +373,41 @@ class NearlineDaemon:
             # already sent as a MIDAS error and a 'failed' DAQ report
             pass
 
-    def filename_change_callback(self, client, path, value):
+    def filename_change_callback(self, client : midas.client.MidasClient, path, value):
         # path should be
         # /Logger/Channels/<log_channel>/Settings/Current filename
         log_channel = path.split("/")[3]
+        run_number = client.odb_get("/Runinfo/Run number")
+        run_db_pk  = client.odb_get("/Nearline/Info/Run DB PK")
         self.finish_file(log_channel)
-        run_db_pk = 0
-        if client.odb_exists("/Runinfo/Run DB PK"):
-            run_db_pk = client.odb_get("/Runinfo/Run DB PK")
+        is_valid = self.db_interface.validate_run_number(run_id = run_db_pk, run_number = run_number)
+        if not is_valid:
+            client.trigger_internal_alarm("RunDB Corrupted", "ODB run number and rundb primary key don't match the rundatabase entry")
+            self.db_interface.update_status("state.midas_run", run_db_pk, "ERROR") # That id is bugged
+            run_id = self.db_interface.get_run_id(run_number)
+            #If this id exists, it is likely bugged too.
+            if run_id: # None or 0 are both annotating an illegal run id
+                self.db_interface.update_status("state.midas_run", run_id, "ERROR") # That id is bugged
+            # create a new run id, better safe than sorry
+
+            auth      = client.odb_get("/Nearline/Info/Operator")
+            desc      = client.odb_get("/Nearline/Info/Description")
+
+            author = "AutoRecovery"
+            if auth:
+                author += ", " + auth
+
+            description =  "RunID created by auto-recovery"
+            if desc:
+                description += "\n" + desc
+            run_db_pk = self.db_interface.register_run(
+                status = "RUNNING",
+                author = author,
+                note = description,
+                quality= "check"
+            )
+            client.odb_set("/Nearline/Info/Run DB PK", run_db_pk)
+
         self.db_interface.open_file(f"logger_{log_channel}", run_db_pk, value)
 
     # Small sub-routine to properly close out a file writing for a
@@ -388,29 +420,37 @@ class NearlineDaemon:
             # Schedule the nearline analysis job right now as we finished
             # writing the file. This may give a head start in cases where
             # multiple subruns are produced.
-            self.db_interface.schedule_postproc_job_on_file(i, 'nearline')
+            self.db_interface.schedule_postproc_job_on_file(i, task = 'nearline', client = 'nearline')
 
     def start_of_run_callback(self, client : midas.client.MidasClient , run_number):
-        run_db_pk = 0
-        if client.odb_exists("/Runinfo/Run DB PK"):
-            run_db_pk = client.odb_get("/Runinfo/Run DB PK")
+        run_db_pk = client.odb_get("/Nearline/Info/Run DB PK")
+        run_start = client.odb_get("/Runinfo/Start time")
+        quality = None
 
         if run_db_pk == 0:
             # if MIDAS is unaware of a run in the table, register a new run
             # This is likely going to happen if someone started a run manually.
             author      = client.odb_get("/Nearline/Info/Operator")
             description = client.odb_get("/Nearline/Info/Description")
+            quality     = client.odb_get("/Nearline/Info/Quality")
             if not author or not description:
                 client.msg("Insufficient Run Description: Provide at least operator and description", is_error=True)
-                return 1, "Insufficient run description"
-            run_db_pk = self.db_interface.register_run(status = "RUNNING", author= author, note= description)
+                return midas.status_codes["CM_INVALID_TRANSITION"], "Insufficient run description"
+
+            run_db_pk = self.db_interface.register_run(
+                status  = "CLAIMED",
+                author  = author,
+                note    = description,
+                quality = quality
+                )
             client.odb_set("/Nearline/Info/Operator", "")
             client.odb_set("/Nearline/Info/Description", "")
-            client.odb_set("/Runinfo/Run DB PK", run_db_pk)
+            client.odb_set("/Nearline/Info/Run DB PK", run_db_pk)
 
         self.db_interface.start_of_midas_run(
-            run_id = run_db_pk,
-            run_number =  run_number
+            run_id      = run_db_pk,
+            run_number  = run_number,
+            start_time  = run_start
         )
         return midas.status_codes['SUCCESS']
 
@@ -419,8 +459,8 @@ class NearlineDaemon:
         # measurement.exposure; never fails the transition
         try:
             run_db_pk = 0
-            if client.odb_exists("/Runinfo/Run DB PK"):
-                run_db_pk = client.odb_get("/Runinfo/Run DB PK")
+            if client.odb_exists("/Nearline/Info/Run DB PK"):
+                run_db_pk = client.odb_get("/Nearline/Info/Run DB PK")
             tuning = getattr(self, "tuning", None)
             if tuning is not None:
                 tuning.record_run_start(run_db_pk, run_number)
@@ -429,16 +469,19 @@ class NearlineDaemon:
         return midas.status_codes['SUCCESS']
 
     def end_of_run_callback(self, client, run_number):
-        run_db_pk = client.odb_get("/Runinfo/Run DB PK")
+        run_db_pk = client.odb_get("/Nearline/Info/Run DB PK")
+        run_stop = client.odb_get("/Runinfo/Stop time")
         # the tuning step's stop time and WaveDREAM events (never raises)
         tuning = getattr(self, "tuning", None)
         if tuning is not None:
             tuning.record_run_stop(run_db_pk, run_number)
         logger_channels = self.client.odb_get("/Logger/Channels", just_key_list = True)
+        nEv = 0
         for log_channel in logger_channels:
             self.finish_file(log_channel)
-        client.odb_set("/Runinfo/Run DB PK", 0)
-        self.db_interface.end_of_midas_run(run_db_pk)
+            nEv += self.client.odb_get(f"/Logger/Channels/{log_channel}/Statistics/Events written")
+        client.odb_set("/Nearline/Info/Run DB PK", 0)
+        self.db_interface.end_of_midas_run(run_db_pk, stop_time = run_stop, recorded_events = nEv)
         return midas.status_codes['SUCCESS']
 
 

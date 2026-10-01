@@ -77,6 +77,7 @@ run it came from no matter what the caller's environment says.
 The settings are the block below; the prose explaining them is in README.md.
 """
 
+import math
 import os
 from pathlib import Path
 
@@ -535,6 +536,24 @@ PSM_AGGREGATE = 1
 # and it piles up in the overflow bins of every phase-space plot. Turn it off only
 # to look at everything the clustering made, and expect those overflows.
 PSM_AGGREGATE_PROMPT_ONLY = 1
+# The MuPix hits are not consumed: every scintillator cluster takes the L1/L2 hits
+# of its own window, so one pair can sit on several tracklets of a frame (a
+# particle's late hits, a decay pulse inside the prompt's window). The reco marks
+# one owner per pair, a pair being the same lead pixel on L1 and on L2
+# (lPairOwner / lPairShares in the tracklets): a tracklet holding a prompt-channel
+# hit (S1) before one without, then the best match of t(L1) - t(S1) to
+# PSM_LPAIR_OWNER_OFFSET_NS (the seed time standing in for t(S1) without an S1
+# hit), then the earliest seed. With this on, only owners fill the phase-space
+# histograms, so a pair fills once; with the prompt gate on it removes only pairs
+# carried by two or more S1 tracklets.
+PSM_AGGREGATE_OWNERS_ONLY = 1
+# Expected t(L1) - t(S1) in ns for choosing that owner, on the time base of the
+# MuPix collection the reco reads (/Event/muquad_twc). With the timewalk
+# correction (mupix_timewalk constants, every run from 467 on) the corrected
+# times line up with S1: the peak is -3..-1 ns on both planes (runs 528, 920),
+# so 0. A run without constants passes the raw times through, which peak
+# 30-60 ns earlier (rate dependent); set the measured peak for such a run.
+PSM_LPAIR_OWNER_OFFSET_NS = 0.0
 # L1 -> L2 lever arm in mm, used to turn (x2 - x1) into a slope.
 PSM_DISTANCE_L12 = 30.0
 # Delayed-coincidence window in ns for the pi -> mu tag, [MIN, MAX).
@@ -666,6 +685,8 @@ if RENDERED:
     # fold one in, so NL_OVERRIDES set while rendering has no effect at all -- a
     # variant job is made by editing the settings block, or the rendered copy.
     NL_OVERRIDES = ""
+
+    HIST_ONLY = str(_RENDERED["hist_only"]).strip().lower() in ("1", "true", "yes", "on")
 else:
     # A variant job reassigns a few settings in a small file instead of editing
     # this one. Unknown names are not rejected; the banner prints the path.
@@ -1096,6 +1117,16 @@ def check():
         problems.append(f"PSM_L_WINDOW_BEFORE_NS ({PSM_L_WINDOW_BEFORE_NS}) and "
                         f"PSM_L_WINDOW_AFTER_NS ({PSM_L_WINDOW_AFTER_NS}) make the L-hit window "
                         "[t - before, t + after) empty, so no tracklet would get an L pair.")
+    try:
+        _owner_offset_ok = math.isfinite(float(PSM_LPAIR_OWNER_OFFSET_NS))
+    except (TypeError, ValueError):
+        _owner_offset_ok = False
+    if PSM_RECO and not _owner_offset_ok:
+        problems.append(f"PSM_LPAIR_OWNER_OFFSET_NS is {PSM_LPAIR_OWNER_OFFSET_NS!r}; it must be a finite number "
+                        "of ns (the expected t(L1) - t(S1) used to choose the owner of a shared L1/L2 pair).")
+    if PSM_RECO and PSM_AGGREGATE_OWNERS_ONLY not in (0, 1):
+        problems.append(f"PSM_AGGREGATE_OWNERS_ONLY is {PSM_AGGREGATE_OWNERS_ONLY!r}; use 1 (only the owner "
+                        "of each L1/L2 pair fills the phase-space histograms) or 0 (every tracklet).")
     if PSM_RECO and not (0 < float(PSM_SCINT_WINDOW_NS) < float(PSM_DELAYED_WINDOW_NS[0])):
         problems.append(f"PSM_SCINT_WINDOW_NS ({PSM_SCINT_WINDOW_NS}) must be positive and below "
                         f"PSM_DELAYED_WINDOW_NS[0] ({PSM_DELAYED_WINDOW_NS[0]}): a wider S-S "
@@ -1392,6 +1423,8 @@ if PSM_RECO:
         thrScint=float(PSM_SCINT_WINDOW_NS),
         aggregate=int(PSM_AGGREGATE),
         AggregatePromptOnly=int(PSM_AGGREGATE_PROMPT_ONLY),
+        AggregateOwnersOnly=int(PSM_AGGREGATE_OWNERS_ONLY),
+        lPairOwnerOffsetNs=float(PSM_LPAIR_OWNER_OFFSET_NS),
         distanceL12=float(PSM_DISTANCE_L12),
         thr=float(PSM_LAYER_THR),
         xrange=float(PSM_PHASE_SPACE_POS_RANGE_MM),
