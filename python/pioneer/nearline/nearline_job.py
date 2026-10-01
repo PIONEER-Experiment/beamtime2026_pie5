@@ -481,10 +481,21 @@ PSM_LPAIR_WINDOW_NS = 40.0
 # peaks at -52 ns and has a timewalk tail to about +150 ns over a flat background,
 # so the window opens just before the edge and closes past the tail. The
 # algorithm's own defaults (8 before, thrScint = 2 after) sit entirely on the
-# near side of the edge. The S-S clustering window (thrScint) is separate and
-# stays at its default.
+# near side of the edge. The S-S clustering window is separate:
+# PSM_SCINT_WINDOW_NS below.
 PSM_L_WINDOW_BEFORE_NS = 100.0
 PSM_L_WINDOW_AFTER_NS = 160.0
+# S-S clustering window in ns (thrScint): in the unseeded mode a cluster takes the
+# scintillator hits in [t_seed, t_seed + window). One particle's S1-S5 hits must
+# land in one cluster, but the SMA counters are not time-aligned yet (S3 and S5
+# come out about 2 ns before S1, S2 and S4, and SMA times are whole ns), so the
+# algorithm's default of 2 splits most particles into two or three clusters. Each
+# of them takes the same L1/L2 pair (about half of all L pairs are copies), and
+# the cluster holding S1 is missing the layers that went to the other one, so its
+# stop layer and S5 veto are wrong. 5 ns keeps the particle together; it stays
+# far below PSM_DELAYED_WINDOW_NS[0], so a delayed pulse is never absorbed into
+# its prompt cluster. Revisit once the SMA channels carry time offsets.
+PSM_SCINT_WINDOW_NS = 5.0
 # The L hits of each plane inside that window are clustered: two hits at most
 # this far apart in mm (global x/y, single linkage) are one cluster, and exactly
 # one cluster per plane makes the L pair, at the mean of the cluster's pixel
@@ -939,6 +950,11 @@ def check():
         problems.append(f"PSM_L_WINDOW_BEFORE_NS ({PSM_L_WINDOW_BEFORE_NS}) and "
                         f"PSM_L_WINDOW_AFTER_NS ({PSM_L_WINDOW_AFTER_NS}) make the L-hit window "
                         "[t - before, t + after) empty, so no tracklet would get an L pair.")
+    if PSM_RECO and not (0 < float(PSM_SCINT_WINDOW_NS) < float(PSM_DELAYED_WINDOW_NS[0])):
+        problems.append(f"PSM_SCINT_WINDOW_NS ({PSM_SCINT_WINDOW_NS}) must be positive and below "
+                        f"PSM_DELAYED_WINDOW_NS[0] ({PSM_DELAYED_WINDOW_NS[0]}): a wider S-S "
+                        "clustering window absorbs the delayed pulse into its prompt cluster, "
+                        "and the delayed-coincidence tag can no longer find it.")
     if PSM_RECO and PSM_DROP_CROSSTALK_GHOSTS and not (PSM_DECODE and PSM_GEOMETRY_BASE):
         problems.append("PSM_DROP_CROSSTALK_GHOSTS is on but there is no PIGeometrySvc "
                         "(PSM_DECODE, PSM_GEOMETRY_BASE): the ghost rule recovers each hit's "
@@ -1224,6 +1240,7 @@ if PSM_RECO:
         SeedOn=int(PSM_SEED_ON), requireLHits=int(PSM_REQUIRE_L_HITS),
         seedOnL=int(PSM_SEED_ON_L), thrLPair=float(PSM_LPAIR_WINDOW_NS),
         thrMupix=float(PSM_L_WINDOW_BEFORE_NS), thrMupixUpper=float(PSM_L_WINDOW_AFTER_NS),
+        thrScint=float(PSM_SCINT_WINDOW_NS),
         aggregate=int(PSM_AGGREGATE),
         AggregatePromptOnly=int(PSM_AGGREGATE_PROMPT_ONLY),
         distanceL12=float(PSM_DISTANCE_L12),
