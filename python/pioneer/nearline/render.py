@@ -134,7 +134,11 @@ def render_job(in_file, out_file, *, evt_max=-1, job_id="", run_id="",
         "job_git": _job_git(job_source),
         "job_id": str(job_id),
         "run_id": str(run_id),
+<<<<<<< HEAD
         "light": "1" if light else "0",
+=======
+        "hist_only" : str(hist_only)
+>>>>>>> 96a9741
     }
 
     source = job_source.read_text()

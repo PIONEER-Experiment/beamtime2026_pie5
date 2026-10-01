@@ -84,7 +84,7 @@ SUCCESS_STATUSES = {"DONE"}
 FAILURE_STATUSES = {"FAILED", "BLOCKED", "ERROR", "CANCELLED"}
 
 #: what the running experiment shows about the run in progress
-ODB_RUN_DB_PK = "/Runinfo/Run DB PK"
+ODB_RUN_DB_PK = "/Nearline/Info/Run DB PK"
 ODB_EVENTS_SENT = "/Equipment/WDWaveforms/Statistics/Events sent"
 ODB_START_TIME = "/Runinfo/Start time binary"
 ODB_STOP_TIME = "/Runinfo/Stop time binary"
@@ -555,9 +555,10 @@ def schedule_configs(db, configs, table, target_config, dry_run=False, iter_even
                 "run_ids": [],
             }
             if not dry_run:
-                mrs = nl_run.midas_run_sequence(db, author = "AutoTune", description = description, num_ev = int(iter_events) )
+                quality = "iter"
+                mrs = nl_run.midas_run_sequence(db, author = "AutoTune", description = description, quality = quality, num_ev = int(iter_events) )
                 mrs.set_config_list(table, aConfig['currents'])
-                centre_seq = nl_run.midas_run_sequence(db, author = "AutoTune", description = "Position")
+                centre_seq = nl_run.midas_run_sequence(db, author = "AutoTune", description = "Position", quality = quality)
                 centre_seq.set_config_seq("target_position", target_config)
                 centre_seq.set_on_complete("mt_add")
                 mrs.set_subsequence(centre_seq)
@@ -577,11 +578,12 @@ def schedule_configs(db, configs, table, target_config, dry_run=False, iter_even
                 "run_ids": [],
             }
             if not dry_run:
-                mrs = nl_run.midas_run_sequence(db, author = "AutoTune", description = description, num_ev = FINAL_EVENTS)
+                quality = 'final'
+                mrs = nl_run.midas_run_sequence(db, author = "AutoTune", description = description, quality = quality, num_ev = FINAL_EVENTS)
                 mrs.set_config_list(table, aConfig['currents'])
-                fiveScan = nl_run.five_point_sequence(db, author = "AutoTune", description = "Position")
+                fiveScan = nl_run.five_point_sequence(db, author = "AutoTune", description = "Position", quality = quality )
                 fiveScan.set_on_complete("merge") # it shall only merge and not submit to minitwin.
-                dscan = nl_run.degrader_scan(db, author = "AutoTune", description = "Degrader")
+                dscan = nl_run.degrader_scan(db, author = "AutoTune", description = "Degrader", quality = quality)
                 dscan.set_subsequence(fiveScan)
                 mrs.set_subsequence(dscan)
                 entry["run_ids"] = mrs.schedule()
