@@ -481,7 +481,8 @@ class NearlineDaemon:
             self.finish_file(log_channel)
             nEv += self.client.odb_get(f"/Logger/Channels/{log_channel}/Statistics/Events written")
         client.odb_set("/Nearline/Info/Run DB PK", 0)
-        self.db_interface.end_of_midas_run(run_db_pk, stop_time = run_stop, recorded_events = nEv)
+        qual =str(client.odb_get("/Nearline/Info/Quality")).lower()
+        self.db_interface.end_of_midas_run(run_db_pk, stop_time = run_stop, recorded_events = nEv, schedule_post_processing= (qual != 'debug'))
         return midas.status_codes['SUCCESS']
 
 
