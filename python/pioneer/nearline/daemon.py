@@ -129,7 +129,7 @@ class NearlineDaemon:
                 "Backup path" : os.environ.get("NEARLINE_BACKUP_DIR", "/home/pinky/backup/pim1_epics"),
                 "Remote path" : os.environ.get("NEARLINE_REMOTE", "analysis:/home/pioneer/inbox"),
                 "Output path" : os.environ.get("NEARLINE_DIR", "/home/pinky/nearline"),
-                "Num parallel jobs" : njobs,
+                "Num parallel jobs" : njobs if njobs else kDefaultNumJobs,
                 "MiniTwin URL" : "http://127.0.0.1:8420",
                 "MiniTwin updates" : "pim1_epics",
                 "MiniTwin enable" : True
