@@ -722,13 +722,9 @@ step_verify() {
     vcheck "root-config --version" "root-config --version" "$ROOT_VERSION"
     vcheck "cmake --version" "cmake --version | head -1" "4.3.0"
     vcheck "gcc --version" "gcc --version | head -1" "16.2.1"
-    vcheck "python imports" 'cd / && python3 -c "
-import os, ROOT, midas, midas.client, psycopg, numpy
-rs, ms = os.environ[\"ROOTSYS\"], os.environ[\"MIDASSYS\"]
-assert ROOT.gROOT.GetVersion() == \"'"$ROOT_VERSION"'\", ROOT.gROOT.GetVersion()
-assert os.path.realpath(ROOT.__file__).startswith(os.path.realpath(rs) + os.sep), ROOT.__file__
-assert os.path.realpath(midas.__file__).startswith(os.path.realpath(ms) + os.sep), midas.__file__
-print(\"ROOT\", ROOT.gROOT.GetVersion(), \"from ROOTSYS, midas from MIDASSYS, psycopg\", psycopg.__version__, \"numpy\", numpy.__version__)"'
+    # One line on purpose: ROOT's thisroot.sh finds the shell by splitting
+    # /proc/$$/cmdline with cut, which goes wrong when the bash -c string has newlines.
+    vcheck "python imports" 'cd / && python3 -c "import os, ROOT, midas, midas.client, psycopg, numpy; rs, ms = os.environ[\"ROOTSYS\"], os.environ[\"MIDASSYS\"]; assert ROOT.gROOT.GetVersion() == \"'"$ROOT_VERSION"'\", ROOT.gROOT.GetVersion(); assert os.path.realpath(ROOT.__file__).startswith(os.path.realpath(rs) + os.sep), ROOT.__file__; assert os.path.realpath(midas.__file__).startswith(os.path.realpath(ms) + os.sep), midas.__file__; print(\"ROOT\", ROOT.gROOT.GetVersion(), \"from ROOTSYS, midas from MIDASSYS, psycopg\", psycopg.__version__, \"numpy\", numpy.__version__)"'
     vcheck "gaudirun.py --help" "cd / && gaudirun.py --help | head -3" "sage"
     vcheck "PIONEERSYS" 'test -d "$PIONEERSYS/reco_testbeam/conditions" && echo "PIONEERSYS=$PIONEERSYS"'
     vcheck "shared libs resolve" 'bad=; for f in "$BT2026_SW"/gaudi/install/lib/*.so "$PIONEERSYS"/install/lib/*.so "$BT2026_SW"/midas/lib/*.so; do if ldd "$f" | grep -q "not found"; then echo "$f:"; ldd "$f" | grep "not found"; bad=1; fi; done; test -z "$bad" && echo "all libraries resolve"'

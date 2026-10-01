@@ -38,16 +38,10 @@ A complete install needs about 6 GB of disk.
 
 ### Install (piana)
 
-First, a clone of this repository inside the prefix, on the branch that
-carries `software/` (it has to be pushed first; the website's checkout at
-`/home/pioneer/bt2026/beamtime2026_pie5` is only read, and stays on `develop`):
-
-```bash
-git clone --no-hardlinks /home/pioneer/bt2026/beamtime2026_pie5 \
-    /home/pioneer/bt2026/software/src/beamtime2026_pie5
-cd /home/pioneer/bt2026/software/src/beamtime2026_pie5
-git fetch origin feature/piana-software && git checkout feature/piana-software
-```
+The installer runs from piana's one checkout of this repository,
+`/home/pioneer/bt2026/beamtime2026_pie5` (the same checkout the website reads,
+kept on pinky's commit). `install.sh` only reads it: nothing is written into
+the checkout, and the build goes entirely into the prefix.
 
 Then run the installer inside `tmux` (a `systemd-run --scope` dies with the ssh
 session that started it), niced, at idle I/O priority and inside a
@@ -55,7 +49,7 @@ memory-capped scope, so it cannot starve the website:
 
 ```bash
 tmux new -s bt2026-install
-cd /home/pioneer/bt2026/software/src/beamtime2026_pie5
+cd /home/pioneer/bt2026/beamtime2026_pie5
 nice -n 19 ionice -c3 systemd-run --user --scope \
     -p MemoryMax=16G -p MemoryHigh=12G -p MemorySwapMax=0 \
     bash software/install.sh /home/pioneer/bt2026/software
@@ -69,8 +63,7 @@ warning (a host package that is not pinky's build, for example).
 
 `install.sh` only runs on piana (hostname `pioneer-analysis`; any other host
 needs `BT2026_ALLOW_HOST=1`, and pinky is always refused). It only installs
-into an empty directory, one holding nothing but this clone at `src/<name>`,
-or one it has marked with `.bt2026-software` before; it refuses a prefix that
+into an empty directory or one it has marked with `.bt2026-software` before; it refuses a prefix that
 is, contains or lies inside `main`'s checkout or the website's
 `beamtime2026_pie5`, and one that is or contains the home directory.
 
@@ -90,7 +83,7 @@ Options, set in front of the command:
 ### Use it
 
 ```bash
-source /home/pioneer/bt2026/software/src/beamtime2026_pie5/software/env.sh
+source /home/pioneer/bt2026/beamtime2026_pie5/software/env.sh
 ```
 
 It works in an interactive shell and in `bash -lc '...'`. It prints one line:
@@ -122,7 +115,7 @@ install into `~/.local` by default: always give it `--target`.
 ### Process one subrun by hand
 
 ```bash
-source /home/pioneer/bt2026/software/src/beamtime2026_pie5/software/env.sh
+source /home/pioneer/bt2026/beamtime2026_pie5/software/env.sh
 nice -n 19 ionice -c3 systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 \
     python -m pioneer.nearline.process /home/pioneer/inbox/run01012_00001.mid.lz4 \
     --out-dir /home/pioneer/bt2026/software/parity/out
