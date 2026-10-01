@@ -489,8 +489,8 @@ last SMA hit) and `echo`. With the raw `/Event/mutrig` it rebuilds
 **Histograms** under `histograms/PIPSMSMACalibration/`, per counter whose copy is
 cabled, calibrated or not (table above). Two are for finding an offset:
 `dt_raw_<id>` (±200 ns, the nearest TOT word) and `dt_wide_<id>` (every TOT word
-within 2^19 ns of the first 32 NIM words of each frame, 256 ns bins over the
-whole fine-field span). A NIM channel whose fine field carries an offset (the
+within 2^19 ns of a sample of NIM words spread over each frame, up to 8192 pairs
+per counter and frame, 256 ns bins over the whole fine-field span). A NIM channel whose fine field carries an offset (the
 decoder folds any value mod 2^20 into [−2^19, 2^19)) peaks in `dt_wide` and not
 in `dt_raw`. The finalize line per counter gives the paired, TOT-only and
 NIM-only counts and fractions and the median aligned dt.
