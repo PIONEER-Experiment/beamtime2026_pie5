@@ -32,7 +32,9 @@ agreement, registered in midas_files/wavedream-scalar-readout/docs/REGISTRY.md.
     |
     +-- WDScalerSeq ----------- gated on /Event/wd_scalers
     |     PIWDScalerMonitor    -> histograms only: rate, threshold and FPGA
-    |                             temperature per board from the scaler events
+    |                             temperature per board from the scaler events,
+    |                             and the proton-current counts the merge
+    |                             step normalises by
     |
     +-- PSMMuPixSeq ----------- gated on /Event/muquad, reads /Event/muquad_twc
     |     PIPSMMuPixMonitor    -> histograms only: a hit map per MuPix chip and
@@ -45,15 +47,16 @@ agreement, registered in midas_files/wavedream-scalar-readout/docs/REGISTRY.md.
     +-- PSMSMASeq ------------- gated on /Event/mutrig_cal
     |     PIPSMSMAMonitor      -> histograms only: rate, ToT and fine time per
     |                             counter, with no pixel hits or tracklets;
-    |                             with PSM_RF_CHANNEL set also reads /Event/rf
-    |                             (optional per frame) for the S1-gated RF
-    |                             phase and RF phase vs ToT per counter
+    |                             also reads /Event/rf (optional per frame;
+    |                             absent on a run with no RF channel) for the
+    |                             S1-gated RF phase and RF phase vs ToT per
+    |                             counter
     |
     +-- PSMRecoSeq ------------ gated on /Event/mutrig_cal, which is also the
     |                             S hits; L hits /Event/muquad_twc
     |     PIPSMSimpleTrackReco   -> /Event/exp_all_tracks   (+ histograms);
-    |                             with PSM_RF_CHANNEL set also reads /Event/rf
-    |                             for each tracklet's S1 RF phase
+    |                             with PSM_DECODE also reads /Event/rf for
+    |                             each tracklet's S1 RF phase
     |     PIPSMPatternReco       -> /Event/exp_pattern
     |     PIPSMComputeWeight     -> /Event/exp_track_weights
     |     PIPSMDelayedCoincidence-> /Event/exp_tagged       (+ histograms)
@@ -291,12 +294,15 @@ WD_SCALER_TIME_MAX_S = 7200.0
 WD_SCALER_FILL_STALE = False
 # --- PSM decode ------------------------------------------------------------
 # MuTrig RAW readout channels (chipid*32+channel, read before the map lookup)
-# carrying the RF and the beam current. These follow the SMA board's cabling,
-# which the open interval of mutrig_channel_map in bt2026_psm_readout_map.json
-# documents: RF gated by S1 on 6, proton current on 7. None drops /Event/rf
-# resp. histograms/musip/current.
-PSM_RF_CHANNEL = 6
-PSM_CURRENT_CHANNEL = 7
+# carrying the RF gated by S1 and the proton current. None (the default) leaves
+# the decoder to take each from the run's interval of mutrig_channel_map in
+# bt2026_psm_readout_map.json, which marks them with the role ids 2014 (rf) and
+# 2015 (proton_current); a run whose interval marks no RF has no /Event/rf, one
+# that marks no current no histograms/musip/current. An integer overrides the
+# map for every run this job processes, for a file whose interval is wrong or
+# not yet written.
+PSM_RF_CHANNEL = None
+PSM_CURRENT_CHANNEL = None
 # MuPix pixel pitch in mm; a wrong pitch scales every position and every slope.
 PSM_QUAD_PIXEL_PITCH = 0.08
 # MuPix timestamp bin width in ns. There is no MuTrig counterpart any more: the
@@ -1045,19 +1051,24 @@ def check():
                         "axis [min, max) in bins: max must be above min and bins an integer "
                         "1-8192, or the correction layer stops at initialize and the monitor "
                         "and the reco book no timewalk histograms.")
-    if PSM_RF_CHANNEL is not None:
-        try:
-            rf_ok = (int(PSM_RF_CHANNEL) == PSM_RF_CHANNEL and 0 <= int(PSM_RF_CHANNEL) <= 15
-                     and (PSM_CURRENT_CHANNEL is None
-                          or int(PSM_RF_CHANNEL) != int(PSM_CURRENT_CHANNEL)))
-        except (TypeError, ValueError):
-            rf_ok = False
-        if not rf_ok:
-            problems.append(f"PSM_RF_CHANNEL is {PSM_RF_CHANNEL!r}: it must be an integer SMA "
-                            "raw channel (0-15, the word's 4-bit channel field) and not "
-                            f"PSM_CURRENT_CHANNEL ({PSM_CURRENT_CHANNEL!r}), or /Event/rf holds "
-                            "no RF or the wrong pulses and the SMA monitor's RF phase is "
-                            "meaningless.")
+    def _sma_channel_ok(value):
+        return (value is None or (isinstance(value, int) and not isinstance(value, bool)
+                                  and 0 <= value <= 15))
+    if not _sma_channel_ok(PSM_RF_CHANNEL):
+        problems.append(f"PSM_RF_CHANNEL is {PSM_RF_CHANNEL!r}: it must be None (the RF channel "
+                        "of the run's mutrig_channel_map) or an integer SMA raw channel 0-15 (the "
+                        "word's 4-bit channel field), or /Event/rf holds no RF or the wrong "
+                        "pulses and the SMA monitor's RF phase is meaningless.")
+    if not _sma_channel_ok(PSM_CURRENT_CHANNEL):
+        problems.append(f"PSM_CURRENT_CHANNEL is {PSM_CURRENT_CHANNEL!r}: it must be None (the "
+                        "proton-current channel of the run's mutrig_channel_map) or an integer "
+                        "SMA raw channel 0-15, or histograms/musip/current counts the wrong "
+                        "pulses.")
+    if (PSM_RF_CHANNEL is not None and PSM_RF_CHANNEL == PSM_CURRENT_CHANNEL
+            and _sma_channel_ok(PSM_RF_CHANNEL)):
+        problems.append(f"PSM_RF_CHANNEL and PSM_CURRENT_CHANNEL are both {PSM_RF_CHANNEL}: the "
+                        "decoder takes the RF channel first, so the current pulses would become "
+                        "RF pulses and the current would never be counted.")
     # The container checks below are about which JSON file supplies a table, so they
     # mean nothing in db mode, where the database serves them all.
     if _JSON_MODE and PSM_DECODE and PSM_GEOMETRY_BASE and not PSM_GEOMETRY_FILES:
@@ -1205,9 +1216,10 @@ tools = [PITMidasWaveDream()] if WD_ENABLED else []
 if PSM_DECODE:
     musip = PITMidasMusip(quadPixelPitch=float(PSM_QUAD_PIXEL_PITCH),
                           quadTimeBinWidth=float(PSM_QUAD_TIME_BIN_NS))
-    # rf_channel is what creates /Event/rf at all and current_channel what books
-    # histograms/musip/current; the tool's own sentinel cannot be written from
-    # Python, so "unset" means not assigning the property.
+    # Unset, the decoder takes the RF and current channels from the run's raw
+    # map (its role ids 2014/2015) and says at initialize where each came from;
+    # set, they override the map. The RF channel is what creates /Event/rf and
+    # the current channel what books histograms/musip/current.
     if PSM_RF_CHANNEL is not None:
         musip.rf_channel = int(PSM_RF_CHANNEL)
     if PSM_CURRENT_CHANNEL is not None:
@@ -1216,7 +1228,9 @@ if PSM_DECODE:
         musip.coarseShift = int(PSM_SMA_COARSE_SHIFT)
     musip.smaDiagnostics = bool(PSM_SMA_DIAGNOSTICS)
     musip.correctFineOffsets = bool(PSM_SMA_FINE_OFFSETS)
-    musip.fineOffsetSnapChannels = [int(PSM_RF_CHANNEL)] if PSM_RF_CHANNEL is not None else []
+    # fineOffsetSnapChannels is left at its default, which snaps the decoder's
+    # resolved RF channel (from the map or PSM_RF_CHANNEL), and nothing on a run
+    # without one.
     musip.skipFirstBank = bool(PSM_SMA_SKIP_STALE_FIRST_FRAME) and _SUBRUN == 0
     if PSM_SMA_SKIP_STALE_FIRST_FRAME and _SUBRUN is None:
         print(f"[nearline] WARNING    PSM_SMA_SKIP_STALE_FIRST_FRAME is on but "
@@ -1345,6 +1359,14 @@ if WD_ENABLED and WD_SCALER_MONITOR:
         input=_TES_SCALERS, boards=[int(b) for b in WD_SCALER_BOARDS],
         timeBinS=float(WD_SCALER_TIME_BIN_S), timeMaxS=float(WD_SCALER_TIME_MAX_S),
         fillStale=bool(WD_SCALER_FILL_STALE))
+    # The run's "current" input of the WaveDREAM role table is counted into
+    # proton_current_counts (rate x interval, see PIWDScalerCount.hpp), the
+    # normalisation combine_files.py prefers. A run whose table has no current
+    # input, or WD_ROLE_TABLE = "", books none.
+    if WD_ROLE_TABLE:
+        scaler_monitor.RoleTable = WD_ROLE_TABLE
+        if WD_ROLE_TAG or WD_TAG:
+            scaler_monitor.RoleTag = WD_ROLE_TAG or WD_TAG
     algorithms.append(Gaudi__Sequencer("WDScalerSeq", RequireObjects=[_TES_SCALERS],
                                        Members=[scaler_monitor]))
 
@@ -1432,8 +1454,10 @@ if PSM_SMA_MONITOR:
         HitsPerEventMax=int(PSM_SMA_HITS_PER_EVENT_MAX),
         DegenerateTotShare=float(PSM_SMA_DEGENERATE_TOT_SHARE),
         MarkerTotShare=float(PSM_SMA_MARKER_TOT_SHARE))
-    if PSM_RF_CHANNEL is not None:
-        sma_monitor.RFInput = _TES_RF
+    # Always wired: whether a run has an RF channel is decided by its raw map at
+    # initialize, after this file has run, and an absent /Event/rf is an empty
+    # pulse list to the monitor.
+    sma_monitor.RFInput = _TES_RF
     # A frame is left out of dt_to_s1_wide when its wide pairs exceed this cap, so a
     # cap of 0 leaves every frame out; the property's own default (a million pairs)
     # stands otherwise.
@@ -1473,7 +1497,7 @@ if PSM_RECO:
         # Plane membership (which VID is L1 vs L2) from the psm_geometry table,
         # set only when PIGeometrySvc was actually created above.
         all_reco.GeometrySvc = "PIGeometrySvc"
-    if PSM_RF_CHANNEL is not None:
+    if PSM_DECODE:
         # Each tracklet's S1 hit gets its RF phase (s1rfphase) under the same
         # rule and defaults as the SMA monitor's rf_phase, and the prompt
         # tracklets fill xy_vs_s1phase, xxp_vs_s1phase and yyp_vs_s1phase (and

@@ -64,7 +64,7 @@ PIHistogramSvc        histograms/<instance>/<name> -> <out>_hists.root
 | instance | TES inputs | TES outputs | histograms |
 |---|---|---|---|
 | `PITMidasWaveDream` | WaveDREAM banks | `/Event/wd_event_header`, `wd_waveform`, `wd_channel_time`, `wd_timebase`, `wd_scalers` | — |
-| `PITMidasMusip` | `H000` | `/Event/muquad`, `/Event/mutrig`, `/Event/rf` | `musip/current` (only when `PSM_CURRENT_CHANNEL` is set); with `PSM_SMA_DIAGNOSTICS` also `musip/sma_word_types`, `sma_words_per_channel`, `sma_bank_words_per_frame`, `sma_trigger_words_per_frame`, `sma_frame_span_ms`, `sma_frame_gap_ms`, `sma_live_time`, `sma_fine_coarse_diff`, `sma_fine_vs_coarse`, `sma_fine_bit_occupancy`; with `PSM_PIXEL_MASK` also `musip/mupix_masked_hits` (pixel words the mask dropped, one bin per chip, labelled `<vid> (raw <id>)`) and `musip/mupix_masked_hits_per_pixel` (one bin per masked pixel, labelled `<vid> c<col> r<row>`) |
+| `PITMidasMusip` | `H000` | `/Event/muquad`, `/Event/mutrig`, `/Event/rf` (only on a run with an RF channel) | `musip/current` (only on a run with a proton-current channel); with `PSM_SMA_DIAGNOSTICS` also `musip/sma_word_types`, `sma_words_per_channel`, `sma_bank_words_per_frame`, `sma_trigger_words_per_frame`, `sma_frame_span_ms`, `sma_frame_gap_ms`, `sma_live_time`, `sma_fine_coarse_diff`, `sma_fine_vs_coarse`, `sma_fine_bit_occupancy`; with `PSM_PIXEL_MASK` also `musip/mupix_masked_hits` (pixel words the mask dropped, one bin per chip, labelled `<vid> (raw <id>)`) and `musip/mupix_masked_hits_per_pixel` (one bin per masked pixel, labelled `<vid> c<col> r<row>`) |
 | `PITMidasMusip` | `H000` | (state product) | `/Event/sma_time_state` (PIPSMSMATimeState): per H000 bank and SMA channel, the fine-offset k, how it was found, mixed/undetermined flags, word counters and S5 class counts; one entry per bank |
 | `PIPSMSMACalibration` | `/Event/mutrig` | `/Event/mutrig_cal` | — |
 | `PIPSMMuPixTimewalkCorrection` | `/Event/muquad`; `/Event/mutrig_cal` (optional, only with `PSM_TIMEWALK`) | `/Event/muquad_twc` | `twc_hits` (hits corrected, hits passed through without constants, events without counters (no `/Event/mutrig_cal`), events); with `PSM_TIMEWALK` the all-pairs dt(pixel − S1) vs pixel ToT before and after the correction, `twc_dt_vs_tot_raw_<vid>` / `twc_dt_vs_tot_cor_<vid>` per chip (detector ids 10011-10014, 10021-10024) and `twc_dt_vs_tot_raw_L<n>` / `twc_dt_vs_tot_cor_L<n>` per plane |
@@ -72,10 +72,10 @@ PIHistogramSvc        histograms/<instance>/<name> -> <out>_hists.root
 | `PIWDRFPhase` | `/Event/wd_waveform`, `wd_channel_time` | `/Event/wd_rf_phase` | `rf_phase`, `rf_amplitude`, `rf_residual` |
 | `PIWDWaveformAnalysis` | `/Event/wd_waveform`, `wd_channel_time`, `wd_rf_phase` | `/Event/wd_features` | `ppamp`, `le_time`, `ppamp_vs_channel`; with a role table also `baseline_vs_channel`, `baseline_rms_vs_channel`, `fired_vs_channel`, `coincidence` and, per scintillator channel, `charge_vs_amp_chNN`, `letime_vs_amp_chNN`, `charge_vs_rfphase_chNN` |
 | `PIWDCalibrator` | `/Event/wd_features`, `wd_rf_phase` | `/Event/wd_hits` | — |
-| `PIWDScalerMonitor` | `/Event/wd_scalers` | — | `readings` and, per board `NNN` in `WD_SCALER_BOARDS`, `rate_vs_time_bNNN`, `mean_rate_bNNN`, `threshold_bNNN`, `fpga_temp_vs_time_bNNN` |
+| `PIWDScalerMonitor` | `/Event/wd_scalers` | — | `readings` and, per board `NNN` in `WD_SCALER_BOARDS`, `rate_vs_time_bNNN`, `mean_rate_bNNN`, `threshold_bNNN`, `fpga_temp_vs_time_bNNN`; with a `"current"` input in the run's `wd_channel_map` (`WD_ROLE_TABLE`) also `proton_current_counts` and `proton_current_seconds` (board 036) |
 | `PIPSMMuPixMonitor` | `/Event/muquad_twc`; `/Event/mutrig_cal` (optional, only with `PSM_TIMEWALK`) | — | `L<n>_chip<vid>_xy` and `L<n>_xy` per MuPix chip and plane, `hits_per_chip`, `tot_vs_chip`, `L<n>_mult`, and from the L1/L2 coincidence `dt`, `npairs`, `npartners`, `dx`, `dy`, `track_xy`, `xxp`, `yyp` (bin edges between pixel centres and slope steps: 2 pixels and 7 slope steps per bin), the same tracks on the minitwin window `xy_mt`, `xxp_mt`, `yyp_mt` (the beam-tuning feed's maps, `PSM_PHASE_SPACE_*`, stage-weighted like the `_w` views), and the same tracks on fixed axes `track_xy_expanded`, `xxp_central`, `yyp_central`, plus their acceptance-weighted twins `track_xy_expanded_w`, `xxp_central_w`, `yyp_central_w`; with `PSM_TIMEWALK` the all-pairs timewalk `tw_dt_vs_tot_L<n>_<vid>`, `tw_dt_vs_stot_L<n>_<vid>`, `tw_tot_vs_stot_L<n>_<vid>` per plane and counter S1-S5 (`<vid>` 2001, 2003-2006) |
-| `PIPSMSMAMonitor` | `/Event/mutrig_cal`; `/Event/rf` (optional, only when `PSM_RF_CHANNEL` is set) | — | `hits_per_counter`, `tot_vs_counter`, `hits_per_event_vs_counter`, `tot`, `fine_time_vs_counter`, `counters`, the S1-S5 coincidence views `pattern`, `s1_partners`, `pattern_duplicates`, `dt_to_s1`, `dt_to_s1_wide`, `pattern_counters`; with the RF input also `rf_period`, `rf_pulses_per_gate`, `rf_offset_vs_pulse`, `rf_phase`, `rf_veto_gap`, `rf_counters` and one `rf_phase_vs_tot_<vid>` per cabled counter |
-| `PIPSMAllTrackReco` (a `PIPSMSimpleTrackReco`) | `/Event/muquad_twc`, `/Event/mutrig_cal`; `/Event/rf` (optional, only when `PSM_RF_CHANNEL` is set) | `/Event/exp_all_tracks` | `xy`, `xxp`, `yyp`, `nhits`, `nseed`, plus their acceptance-weighted twins `xy_w`, `xxp_w`, `yyp_w`; with the RF input also `xy_vs_s1phase`, `xxp_vs_s1phase`, `yyp_vs_s1phase` and their weighted twins `xy_vs_s1phase_w`, `xxp_vs_s1phase_w`, `yyp_vs_s1phase_w`; with `PSM_TIMEWALK` the track-only timewalk `tw_dt_vs_tot_L<n>_<vid>`, `tw_tot_vs_stot_L<n>_<vid>`, and `tw_cluster_size_L<n>`, `tw_seeds` |
+| `PIPSMSMAMonitor` | `/Event/mutrig_cal`; `/Event/rf` (optional per frame, absent on a run without an RF channel) | — | `hits_per_counter`, `tot_vs_counter`, `hits_per_event_vs_counter`, `tot`, `fine_time_vs_counter`, `counters`, the S1-S5 coincidence views `pattern`, `s1_partners`, `pattern_duplicates`, `dt_to_s1`, `dt_to_s1_wide`, `pattern_counters`; with the RF input also `rf_period`, `rf_pulses_per_gate`, `rf_offset_vs_pulse`, `rf_phase`, `rf_veto_gap`, `rf_counters` and one `rf_phase_vs_tot_<vid>` per cabled counter |
+| `PIPSMAllTrackReco` (a `PIPSMSimpleTrackReco`) | `/Event/muquad_twc`, `/Event/mutrig_cal`; `/Event/rf` (optional per frame, absent on a run without an RF channel) | `/Event/exp_all_tracks` | `xy`, `xxp`, `yyp`, `nhits`, `nseed`, plus their acceptance-weighted twins `xy_w`, `xxp_w`, `yyp_w`; with the RF input also `xy_vs_s1phase`, `xxp_vs_s1phase`, `yyp_vs_s1phase` and their weighted twins `xy_vs_s1phase_w`, `xxp_vs_s1phase_w`, `yyp_vs_s1phase_w`; with `PSM_TIMEWALK` the track-only timewalk `tw_dt_vs_tot_L<n>_<vid>`, `tw_tot_vs_stot_L<n>_<vid>`, and `tw_cluster_size_L<n>`, `tw_seeds` |
 | `PIPSMPatternReco` | `/Event/exp_all_tracks` | `/Event/exp_pattern` | — |
 | `PIPSMComputeWeight` | `/Event/exp_all_tracks` | `/Event/exp_track_weights` | — |
 | `PIPSMDelayedCoincidence` | `/Event/exp_all_tracks`, `exp_track_weights` | `/Event/exp_tagged` | `counters`, `class`, `dt`, `sb`, `stop`, `xp`, `xp_w`, `yp`, `yp_w`, `xy`, `xy_w`, `xxp`, `xxp_w`, `yyp`, `yyp_w` |
@@ -228,6 +228,21 @@ analogue inputs, 16 the pattern trigger, 17 the external trigger, 18 the
 external clock; their names are in `wd_scaler_names`, recorded in the
 `WDSettingsHeader`.
 
+**Proton current.** The monitor also takes the input the run's interval of
+`wd_channel_map` (`WD_ROLE_TABLE`) calls `current` and counts it into the
+one-bin `proton_current_counts`: each reading's rate times the time since the
+previous reading taken, the first reading of a job counted with the median
+interval of the others (the nominal 5 s when the job has only one). Stale
+readings are skipped as for the other histograms (`WD_SCALER_FILL_STALE`), and
+so is a reading on which the input is disabled; the next reading taken then
+covers the whole interval at its own rate. `proton_current_seconds` holds the
+board time those counts cover, so counts / seconds is the mean rate, and
+`finalize()` prints both. Summed over the subruns of a run this misses only
+the time after the last reading, under one readout period. This is the
+normalisation the merge step prefers (below). A run whose map has no `current`
+input, or `WD_ROLE_TABLE = ""`, books neither histogram and says so at
+`initialize()`.
+
 | setting | default | what goes wrong if it is wrong |
 |---|---|---|
 | `WD_SCALER_MONITOR` | `True` | Off drops the module. Requires `WD_ENABLED`: only `PITMidasWaveDream` decodes the scaler banks into `/Event/wd_scalers` |
@@ -239,12 +254,12 @@ external clock; their names are in `wd_scaler_names`, recorded in the
 
 | setting | default | what goes wrong if it is wrong |
 |---|---|---|
-| `PSM_RF_CHANNEL` | `6` | MuTrig **raw** readout channel (`chipid*32 + channel`, consumed before the map lookup) carrying the accelerator RF gated by S1. `None` means no `/Event/rf` at all. Follows the SMA board cabling documented in the open interval of `mutrig_channel_map`; it is a job flag, not a conditions interval, so a file from an earlier cabling reprocessed with this job needs an override |
-| `PSM_CURRENT_CHANNEL` | `7` | Same raw-id convention, the proton-current pulse. It is what books `histograms/musip/current`, and **without it `combine_files.py` cannot merge sub-runs**. Same cabling caveat as `PSM_RF_CHANNEL` |
+| `PSM_RF_CHANNEL` | `None` | MuTrig **raw** readout channel (`chipid*32 + channel`, consumed before the map lookup) carrying the accelerator RF gated by S1. `None` takes it from the run's interval of `mutrig_channel_map`: the one raw channel it sends to the role id 2014 (`rf`), and a run whose interval has none (any run before the board was recabled with the RF on it) has no `/Event/rf` and empty RF histograms. The decoder's `initialize()` line names the channel and where it came from. An integer 0-15 overrides the map for every file the job processes, for a file whose interval is wrong or not yet written; the map's own RF channel is then dropped and counted. The SMA monitor and the track reco are always handed `/Event/rf`, because whether a run has RF is only known at `initialize()` |
+| `PSM_CURRENT_CHANNEL` | `None` | Same raw-id convention and rule, the proton-current pulse on the SMA, role id 2015 (`proton_current`). A run whose interval marks it books `histograms/musip/current`; the proton current left the SMA when the NIM copies were cabled, so later runs book none and the merge step normalises them by the WaveDREAM scaler (see below). An integer 0-15 overrides the map; `check()` rejects it equal to `PSM_RF_CHANNEL` |
 | `PSM_QUAD_PIXEL_PITCH` | `0.08` | MuPix pitch in mm; the local hit position is `(col + 0.5) * pitch`, so a wrong pitch scales every position and every slope |
 | `PSM_SMA_COARSE_SHIFT` | `None` | The SMA word's coarse field is the time in ns shifted right by this, and it has differed between run ranges (3, i.e. 8 ns ticks, then 15, then 14). `None` takes the run's value from the `sma_coarse_shift` table in `bt2026_psm_readout_map.json`; a run no interval covers stops the job at `initialize()` rather than guessing. An integer here overrides the table, for a run whose shift has been measured (psm-analysis `sma-tot-vs-wd/mupix_phase.py RUN --time-check`) but not yet entered. Wrong, and every counter hit and RF pulse lands at a time no MuPix hit shares: the tracklets lose their L pairs while the SMA monitor's RF plots still look fine. Outside 0-18 is rejected by `check()` |
 | `PSM_SMA_DIAGNOSTICS` | `True` | Books the decoder's raw-word SMA diagnostics under `histograms/musip/sma_*` (the list is in the table above). Off, they are simply absent; the decoder's own default is off so that other jobs using it do not grow them. Read them as counts: the live fraction is `sma_live_time` bin 1 / (bin 1 + bin 2), and for a subrun run the gaps *between* subruns are in no file, so the merged value is slightly high. Below coarse shift 12 the SMA time wraps (2.1 s at shift 3), so a frame span or gap longer than about 1.07 s folds back and is not caught by the decoder's `smaDiagMaxMs` cut. `sma_fine_coarse_diff` is coarse minus fine over the shared bits in ns: the latch offset of the two fields sits near 0 (up to ~16 us at shift 3), a flipped fine bit b at ±2^b ns; `sma_fine_vs_coarse` calls a word a mismatch beyond ±20 us (`smaDiagLatchToleranceNs`) and names the fine bits that differ |
-| `PSM_SMA_FINE_OFFSETS` | `True` | The decoder's SMA fine-time correction, applied before the times are built: the S2 k * 2048 ns offset per frame (with a per-word resolution), the RF words snapped per word on `PSM_RF_CHANNEL`, and the S5 t/2 field repaired. Writes `/Event/sma_time_state` and `histograms/musip/sma_fineoffset_*`. Off restores the times from before the correction. It changes the hits, so `LIGHT` does not switch it off |
+| `PSM_SMA_FINE_OFFSETS` | `True` | The decoder's SMA fine-time correction, applied before the times are built: the S2 k * 2048 ns offset per frame (with a per-word resolution), the RF words snapped per word on the decoder's RF channel (from the map, or `PSM_RF_CHANNEL`), and the S5 t/2 field repaired. Writes `/Event/sma_time_state` and `histograms/musip/sma_fineoffset_*`. Off restores the times from before the correction. It changes the hits, so `LIGHT` does not switch it off |
 | `PSM_SMA_SKIP_STALE_FIRST_FRAME` | `True` | Frame 0 of subrun 0 holds a stale replay of the previous run. On, the decoder drops the first H000 bank when the input file is subrun 0 (the second number in the name, `run00790_00000`); other subruns, and a name with no subrun (the banner warns), are left alone. Changes the hits, so `LIGHT` does not switch it off |
 | `PSM_PIXEL_MASK` | `True` | Drops MuPix pixel words on hot pixels: the run's interval of `mupix_pixel_mask` in `bt2026_psm_readout_map.json`, a list of (detector id, column, row). The decoder counts what it drops in `histograms/musip/mupix_masked_hits` (per chip) and `mupix_masked_hits_per_pixel` and in its finalize line `N pixel word(s) on the M masked pixel(s) dropped`. The shipped table masks **nothing** on [0, open); a noisy-pixel study adds an interval through `python -m pioneer.conddb.mupix_mask` (see *Masking hot pixels* below). A run the table does not resolve for — the container missing from the job, or an interval closed without a replacement — stops the job at `initialize()` rather than running unmasked. `False` decodes every pixel word and books neither histogram. Noise bursts are not treated by the mask |
 | `PSM_PIXEL_MASK_TAG` | `None` | Tag of `mupix_pixel_mask` to read; `None` is the table's default tag. A trial mask under its own tag is tried by naming it here; anything but `None` or a non-empty string is rejected by `check()` |
@@ -484,8 +499,8 @@ parked id in the map and this number has to follow it.
 Both shares are judgements about **cabled** counters only. The parked index is
 expected to be all 0 and 255 and is never reported for it.
 
-**RF phase.** When `PSM_RF_CHANNEL` is set, the job also hands the monitor
-`/Event/rf` (`RFInput`). The SMA sees the accelerator RF only through S1's gate:
+**RF phase.** The job also hands the monitor
+`/Event/rf` (`RFInput`); it exists on runs whose map (or `PSM_RF_CHANNEL`) gives an RF channel. The SMA sees the accelerator RF only through S1's gate:
 after each S1 hit a burst of three or four RF pulses about 19.75 ns apart comes
 through. Every S1 hit opens a 125 ns gate (`RFGateNs`); the burst ends about
 115 ns after S1. A gate that holds another S1 hit is **vetoed**:
@@ -514,8 +529,8 @@ measurement. The rule and its parameters are the algorithm's `RF*` properties,
 left at their defaults here. `/Event/rf` exists only in frames where the decoder
 saw an RF pulse, which the monitor treats as an empty pulse list, and when the
 run's map does not cable S1 the monitor says so at `initialize()` and books no
-RF histograms. With `PSM_RF_CHANNEL = None` none of this runs and the monitor is
-unchanged.
+RF histograms. On a run without an RF channel the RF histograms are booked and
+stay empty.
 
 ### PSM reco
 
@@ -546,7 +561,7 @@ unchanged.
 | `PSM_PHASE_SPACE_POS_RANGE_MM` | `37.0` | Half-width of the x/y axis in mm, applied to both PSM algorithms. This is the minitwin det10 window (`psm_scan_config.py` `X_WINDOW`), not a display choice — move it and the histograms stop being model input. The algorithm's own default, 2.5, is a single-position zoom |
 | `PSM_PHASE_SPACE_SLOPE_RANGE_MRAD` | `950.0` | Half-width of the x'/y' axis in **mrad** (`psm_scan_config.py` `A_WINDOW`), likewise on both algorithms. The 1D `xp`/`yp` spectra keep their own narrower `SlopeRange`: they are the shift zoom, not model input |
 
-**S1 RF phase of a tracklet.** With `PSM_RF_CHANNEL` set, `PIPSMAllTrackReco`
+**S1 RF phase of a tracklet.** With `PSM_DECODE`, `PIPSMAllTrackReco`
 also reads `/Event/rf` (`RFInput`) and gives every tracklet holding an S1 hit the
 RF phase of its earliest S1 hit, in the new `s1rfphase` column of
 `/Event/exp_all_tracks` (NaN when the tracklet has no S1 hit, the gate is not
@@ -1548,7 +1563,7 @@ where an unreachable server fails the job (*Conditions DB down*).
 21. `PSM_SMA_CAL_NTUPLE` not one of `"both"`, `"calibrated"`, `"raw"`.
 22. `LIGHT`, `PSM_PIXEL_MASK`, `PSM_TIMEWALK`, `PSM_TIMEWALK_CORRECTION` or `PSM_SMA_WIDE_DT` not a bool (`NL_LIGHT` or a rendered `light` other than `1`/`0` ends up here): a string such as `"False"` is true in Python and would switch the setting on.
 23. `PSM_TIMEWALK` on and `PSM_TIMEWALK_DT_MIN`/`_MAX`/`_BINS` not an axis: max not above min, or bins not an integer 1-8192.
-24. `PSM_RF_CHANNEL` not an integer, outside 0-15, or equal to `PSM_CURRENT_CHANNEL`: the SMA word's channel field is 4 bits, and the decoder takes the RF channel first, so the current pulses would become RF pulses.
+24. `PSM_RF_CHANNEL` or `PSM_CURRENT_CHANNEL` neither `None` nor an integer 0-15, or the two equal: the SMA word's channel field is 4 bits, and the decoder takes the RF channel first, so the current pulses would become RF pulses.
 25. A `GEOCOND` base with an empty `PSM_GEOMETRY_FILES` (json mode): nothing supplies the table it names.
 26. `COND:isel` in `PSM_GEOMETRY_TRANS` without `bt2026_isel.json` in `ODB_SPECS`.
 27. json mode, `PSM_PIXEL_MASK` on (with `PSM_DECODE`) and a `PSM_GEOMETRY_FILES` without `bt2026_psm_readout_map.json`: nothing would supply the `mupix_pixel_mask` table, and the decoder stops at `initialize()`.
@@ -1604,15 +1619,24 @@ factor of 1000 off from every other consumer — the nearline site's cubes,
 fixed, so the two `xxp` histograms in this job now mean the same thing and only
 differ in their selection and binning.
 
-## The merge step normalises by `PSM_CURRENT_CHANNEL`
+## The merge step normalises by the proton current
 
 `combine_files.py` sums the histograms of each run's sub-runs, divides each
-run by its own `Integral()` of `histograms/musip/current`, and adds the runs
-together. Normalisation is all or nothing: when any run's current histogram
-is missing or empty (`PSM_DECODE = False`, `PSM_CURRENT_CHANNEL = None`, or a
-run with no current pulses) it prints one warning and every run stays raw
-counts (factor 1), so the runs remain comparable with each other but not per
-current pulse. `MergeJob` feeds it the `<filebase>_hists.root` files
+run by its own proton-current count, and adds the runs together. The count
+comes from one source for the whole join:
+`histograms/PIWDScalerMonitor/proton_current_counts` (the WaveDREAM scaler,
+in scaler counts) when every run being joined has it non-empty, else
+`histograms/musip/current` (the SMA pulses) when every run has that, else
+nothing. The two count the same signal over different live times, so a join
+never mixes them; the line it prints names the source and each run's count.
+Factors are comparable only within one source. Without a source it prints one
+warning and every run stays raw counts (factor 1), so the runs remain
+comparable with each other but not per proton. A run lacks a source when its
+map has no such input (no WaveDREAM `current` input before the current was
+cabled to it, no SMA current channel once it left the SMA), when a sub-run's
+file lacks the histogram, or when it is empty (`PSM_DECODE = False`,
+`WD_SCALER_MONITOR = False`). Only the source used is kept in the output.
+`MergeJob` feeds it the `<filebase>_hists.root` files
 (`jobs.py`), and the loop adding runs together handles any number of runs.
 It builds that list from the run's nearline `root` rows in the run database,
 which a full job registers as `<filebase>.root` and a light job as

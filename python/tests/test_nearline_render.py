@@ -348,6 +348,58 @@ def test_a_scint_window_that_is_empty_or_reaches_the_delayed_window_is_rejected(
         _run(target, text)
 
 
+def test_rf_and_current_channels_come_from_the_map_by_default(job_env):
+    tmp_path, midas = job_env
+    job = _run(render_job(midas, tmp_path / "run00790_00000.root", light=False))
+    assert job["PSM_RF_CHANNEL"] is None and job["PSM_CURRENT_CHANNEL"] is None
+    musip = job["musip"].__dict__
+    assert "rf_channel" not in musip and "current_channel" not in musip
+    # the snap list is the decoder's default: its resolved RF channel
+    assert "fineOffsetSnapChannels" not in musip
+    # whether a run has RF is decided by its map, so the consumers always get it
+    assert job["sma_monitor"].RFInput == "/Event/rf"
+    assert job["all_reco"].RFInput == "/Event/rf"
+
+
+def test_rf_and_current_channels_override_the_map_when_set(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = (target.read_text().replace("PSM_RF_CHANNEL = None", "PSM_RF_CHANNEL = 5")
+            .replace("PSM_CURRENT_CHANNEL = None", "PSM_CURRENT_CHANNEL = 9"))
+    job = _run(target, text)
+    assert job["musip"].rf_channel == 5 and job["musip"].current_channel == 9
+    assert "fineOffsetSnapChannels" not in job["musip"].__dict__
+
+
+@pytest.mark.parametrize("rf, current, match", [
+    ("16", "None", "PSM_RF_CHANNEL is 16"),
+    ("-1", "None", "PSM_RF_CHANNEL is -1"),
+    ("'6'", "None", "PSM_RF_CHANNEL is '6'"),
+    ("True", "None", "PSM_RF_CHANNEL is True"),
+    ("None", "16", "PSM_CURRENT_CHANNEL is 16"),
+    ("None", "6.0", "PSM_CURRENT_CHANNEL is 6.0"),
+    ("6", "6", "are both 6"),
+])
+def test_a_bad_rf_or_current_channel_is_rejected(job_env, rf, current, match):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = (target.read_text().replace("PSM_RF_CHANNEL = None", f"PSM_RF_CHANNEL = {rf}")
+            .replace("PSM_CURRENT_CHANNEL = None", f"PSM_CURRENT_CHANNEL = {current}"))
+    with pytest.raises(SystemExit, match=match):
+        _run(target, text)
+
+
+def test_the_scaler_monitor_counts_the_current_of_the_role_table(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    job = _run(target)
+    assert job["scaler_monitor"].RoleTable == "wd_channel_map"
+    assert "RoleTag" not in job["scaler_monitor"].__dict__
+    job = _run(target, target.read_text().replace('WD_ROLE_TABLE = "wd_channel_map"',
+                                                  'WD_ROLE_TABLE = ""'))
+    assert "RoleTable" not in job["scaler_monitor"].__dict__
+
+
 # -- the conditions source ----------------------------------------------------
 
 def _containers(settings):

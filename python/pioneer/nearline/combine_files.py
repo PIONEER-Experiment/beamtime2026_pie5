@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import argparse
 from pathlib import Path
@@ -8,11 +10,21 @@ header_paths = [
     "beamline"
 ]
 
-# the current pulses the histograms are normalised by; optional, see below
-current_path = "histograms/musip/current"
+# The proton current the histograms are normalised by, in order of preference;
+# each is optional, see normalise. Both count the same ~220 kHz signal, but with
+# different live times, so one join never mixes them.
+#  - the WaveDREAM scaler of the input the run's wd_channel_map calls "current"
+#    (PIWDScalerMonitor: rate x interval per reading, in scaler counts);
+#  - the SMA channel the run's mutrig_channel_map marks as the proton current
+#    (PITMidasMusip: one count per pulse the FEB recorded).
+wd_current_path = "histograms/PIWDScalerMonitor/proton_current_counts"
+sma_current_path = "histograms/musip/current"
+current_paths = (wd_current_path, sma_current_path)
+current_sources = {wd_current_path: "WaveDREAM scaler proton current",
+                   sma_current_path: "SMA proton-current pulses"}
 
 histo_paths = [
-    current_path,
+    *current_paths,
     *miniTwin_histograms # all histograms the miniTwin is asking for
 ]
 
@@ -28,36 +40,56 @@ def load_json_config(config_file : Path) -> dict:
 def merge_sub_runs(input_files : list[str]):
     """
     Combine histograms from the same run that got split into subruns, and
-    normalise them by the run's current pulses (see normalise).
+    normalise them by the run's proton current (see normalise).
     """
     headers, histos = sum_sub_runs(input_files)
     normalise([histos], [input_files[0]])
     return headers, histos
 
 
-def current_count(histos : dict) -> float:
-    """Current pulses of one run's summed histograms; 0 without any."""
-    current = histos.get(current_path)
+def current_count(histos : dict, path : str = wd_current_path) -> float:
+    """Proton-current counts of one run's summed histograms under `path`; 0
+    without any."""
+    current = histos.get(path)
     return current.Integral() if current is not None else 0.0
 
 
-def normalise(runs : list[dict], names : list[str]) -> bool:
+def current_source(runs : list[dict]) -> str | None:
+    """The current histogram every run of a join has non-empty, the WaveDREAM
+    scaler counts before the SMA pulses; None when neither covers every run."""
+    for path in current_paths:
+        if all(current_count(h, path) > 0 for h in runs):
+            return path
+    return None
+
+
+def normalise(runs : list[dict], names : list[str]) -> str | None:
     """
-    Divide each run's histograms by its own number of current pulses -- all
-    of them or none: if any run has no current histogram, or an empty one,
-    every run is left as raw counts (factor 1), with one warning line, so
-    runs stay comparable with each other. Returns True when normalised.
+    Divide each run's histograms by its own proton-current count, from one
+    source for the whole join (current_source): the WaveDREAM scaler counts
+    when every run has them non-empty, else the SMA current pulses when every
+    run has those, else nothing. Without a source every run is left as raw
+    counts (factor 1), with one warning line, so the runs stay comparable with
+    each other. The two sources are never mixed. Returns the path of the
+    source used, or None.
     """
-    counts = [current_count(h) for h in runs]
-    missing = [name for name, count in zip(names, counts) if count <= 0]
-    if missing:
-        print(f"warning: {current_path} is missing or empty in {', '.join(missing)}; "
+    path = current_source(runs)
+    if path is None:
+        missing = []
+        for p in current_paths:
+            lacking = [name for name, h in zip(names, runs) if current_count(h, p) <= 0]
+            missing.append(f"{p} in {', '.join(lacking)}")
+        print(f"warning: no proton-current source covers every run of this join "
+              f"({'; '.join(missing)} missing or empty); "
               "histograms are summed but not normalised (factor 1)")
-        return False
+        return None
+    counts = [current_count(h, path) for h in runs]
+    print(f"normalised by the {current_sources[path]} ({path}): "
+          + ", ".join(f"{name} {count:.6g}" for name, count in zip(names, counts)))
     for histos, count in zip(runs, counts):
         for h in histos.values():
             h.Scale ( 1. / count)
-    return True
+    return path
 
 
 def sum_sub_runs(input_files : list[str]):
@@ -79,8 +111,8 @@ def sum_sub_runs(input_files : list[str]):
     histos = dict()
     for path in histo_paths:
         obj = first_file.Get(path)
-        if not obj and path == current_path:
-            continue    # no current histogram: not normalised, see below
+        if not obj and path in current_paths:
+            continue    # no current histogram from this source: see normalise
         if not obj:
             raise ValueError(f"File {input_files[0]} does not contain {path}")
         histos[path] = obj.Clone()
@@ -101,10 +133,16 @@ def sum_sub_runs(input_files : list[str]):
         next_file = ROOT.TFile.Open(next_file_path)
         if not next_file or next_file.IsZombie():
             raise OSError(f"Unable to read input file {next_file_path}")
-        for name, histo in histos.items():
+        for name, histo in list(histos.items()):
             next_hist = next_file.Get(name)
             if next_hist:
                 histo.Add(next_hist)
+            elif name in current_paths:
+                # a subrun without this current source: the run has no complete
+                # count from it, so it is not offered for normalisation
+                print(f"note: {name} not present in {next_file_path}; the run is not "
+                      "normalised by it")
+                del histos[name]
             else:
                 raise ValueError(f"Histogram {name} not present in file {next_file_path}.")
         for name, header in headers.items():
@@ -125,10 +163,14 @@ def combine_runs(runs : list[list[str]]):
     add the runs together. Returns (headers, histos).
     """
     summed = [sum_sub_runs(files) for files in runs]
-    if not normalise([h for _, h in summed], [files[0] for files in runs]):
-        # raw counts: the current histogram is not part of the result
-        for _, histos in summed:
-            histos.pop(current_path, None)
+    used = normalise([h for _, h in summed], [files[0] for files in runs])
+    # Only the source used stays in the result (normalised, one per run); the
+    # other, which not every run may have, and every current histogram of a
+    # join left as raw counts, are dropped.
+    for _, histos in summed:
+        for path in current_paths:
+            if path != used:
+                histos.pop(path, None)
 
     combined_headers = {}
     combined_histos = {}
