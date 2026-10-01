@@ -264,6 +264,23 @@ def test_a_non_bool_wide_dt_is_rejected(job_env):
         _run(target, text)
 
 
+def test_the_scint_window_reaches_the_track_reco(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    job = _run(target)
+    assert job["PSM_SCINT_WINDOW_NS"] == 5.0
+    assert job["all_reco"].thrScint == 5.0
+
+
+@pytest.mark.parametrize("value", ["0.0", "-1.0", "20.0", "25.0"])
+def test_a_scint_window_that_is_empty_or_reaches_the_delayed_window_is_rejected(job_env, value):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text().replace("PSM_SCINT_WINDOW_NS = 5.0", f"PSM_SCINT_WINDOW_NS = {value}")
+    with pytest.raises(SystemExit, match="PSM_SCINT_WINDOW_NS"):
+        _run(target, text)
+
+
 # -- file names in the run database --------------------------------------------
 
 def test_registered_file_name():
