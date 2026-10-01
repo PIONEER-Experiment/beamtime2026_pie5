@@ -210,7 +210,20 @@ def test_rendered_full_job_keeps_everything(job_env, capsys):
     assert job["PSM_TIMEWALK"] is True and job["all_reco"].Timewalk == 1
     assert "MaxWidePairsPerFrame" not in job["sma_monitor"].__dict__
     assert job["musip"].smaDiagnostics is True
+    assert job["musip"].correctFineOffsets is True
+    assert job["musip"].skipFirstBank is True      # run00790_00000 is subrun 0
     assert "[nearline] light      off" in capsys.readouterr().out
+
+
+def test_stale_first_frame_is_skipped_only_for_subrun_0(job_env):
+    tmp_path, _ = job_env
+    for name, expected in (("run00790_00000", True), ("run00790_00001", False),
+                           ("run00790", False)):
+        midas = tmp_path / f"{name}.mid.lz4"
+        midas.write_bytes(b"")
+        job = _run(render_job(midas, tmp_path / f"{name}.root", light=False))
+        assert job["musip"].skipFirstBank is expected, name
+        assert job["musip"].correctFineOffsets is True
 
 
 def test_rendered_light_job_switches_off_the_four(job_env, capsys):
@@ -225,6 +238,9 @@ def test_rendered_light_job_switches_off_the_four(job_env, capsys):
     assert job["PSM_SMA_WIDE_DT"] is False
     assert job["sma_monitor"].MaxWidePairsPerFrame == 0
     assert job["PSM_SMA_DIAGNOSTICS"] is False and job["musip"].smaDiagnostics is False
+    # the SMA fine-time correction and the stale-frame skip change the hits, so
+    # light mode leaves them on
+    assert job["musip"].correctFineOffsets is True and job["musip"].skipFirstBank is True
     # the correction itself is not part of light mode
     assert job["twc"].applyTimewalkCorrection is True
     out = capsys.readouterr().out
