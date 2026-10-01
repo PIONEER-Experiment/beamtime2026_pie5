@@ -278,7 +278,7 @@ stops the job at `initialize()`, as it does for `PIWDWaveformAnalysis`.
 | `PSM_SMA_NIM_PAIRING` | `True` | `PIPSMSMACalibration` pairs each counter's TOT word with its NIM copy (S1L..S5L, ids 2021, 2023-2026) into one hit, for every counter whose copy the run's `mutrig_channel_map` interval cables **and** the `sma_time_alignment` table has an offset for. A cabled copy without an offset is histogrammed only and its words stay out of `/Event/mutrig_cal`. The shipped table has no NIM offsets, so the output stays the time-ordered TOT hits until they are measured; harmless on runs without copies. `False` drops the NIM words and applies no offsets. See *SMA calibration*. Changes the hits, so `LIGHT` does not switch it off; not a bool is rejected by `check()` |
 | `PSM_SMA_PAIR_WINDOW_NS` | `20.0` | Largest aligned \|t_NIM − t_TOT\| of a pair (inclusive). Too narrow and walk or jitter splits real pairs into a TOT-only and a NIM-only hit; too wide and a NIM word pairs with a neighbouring particle's TOT word (about one RF period, 20 ns, apart). `check()` wants a number in (0, 1000] |
 | `PSM_SMA_TIME_SOURCE` | `"tot"` | Time of a paired hit: `"tot"` (the TOT word's leading edge, which walks with amplitude) or `"nim"` (the NIM copy's CFD time). `"nim"` can reorder hits. A NIM-only hit always has the NIM time. Anything else is rejected by `check()` |
-| `PSM_SMA_NIM_ONLY_TOT` | `1.0` | ToT (raw SMA units) a NIM-only hit is written with. It has to stay above `PSM_LAYER_THR` (0.2) for the hit to fire its layer; the real ToT is unknown (`/Event/sma_hits` keeps −1 and the `totSubstituted` flag). `check()` wants 0-255 |
+| `PSM_SMA_NIM_ONLY_TOT` | `1.0` | ToT (raw SMA units) a NIM-only hit is written with. It has to stay above `PSM_LAYER_THR` (0.2) for the hit to fire its layer; the real ToT is unknown (`/Event/sma_hits` keeps −1 and the `totSubstituted` flag). `check()` wants a number above `PSM_LAYER_THR` and at most 255 |
 | `PSM_SMA_OFFSET_OVERRIDE_NS` | `{}` | **Development and quick tests only.** `{detector id: ns}` replacing the `sma_time_alignment` value of that id for this job, each one logged as a warning; an id that is no counter's stops the job. Production constants go into the conditions table. `check()` wants a dict of int → number |
 | `PSM_QUAD_TIME_BIN_NS` | `8.0` | Hardware fact — MuPix counts in 8 ns. Change it only if the DAQ clock changes. There is no MuTrig counterpart: since the trigger encoding, `PITMidasMusip` reports that time in ns directly and `trigTimeBinWidth` is gone |
 
@@ -473,7 +473,12 @@ copy with its own id (S1L..S5L = 2021, 2023-2026), cabled per run in
 S1's TOT word) has an offset for the copy:
 - every counter hit is aligned to t − offset (a TOT id without a row: 0);
 - on S3 the late words (ToT ≥ 128) and the echoes at a word's trailing edge are
-  marked `echo` and kept out of the pairing (written as TOT-only hits);
+  marked `echo` and kept out of the pairing (written as TOT-only hits). They
+  stay separate hits, as they were before pairing existed: a particle whose only
+  S3 TOT word is a late word gets a NIM-only hit at the right time **and** keeps
+  the flagged late word, so it has two S3 hits. This is a TOT-channel fault that
+  is expected to be fixed in hardware, so no rule is tuned to merge or drop
+  those words; a reader that must not see them skips hits flagged `echo`;
 - TOT and NIM words are matched one to one within `PSM_SMA_PAIR_WINDOW_NS`,
   closest |dt| first;
 - a paired hit is the TOT word with the time `PSM_SMA_TIME_SOURCE` picks; a
@@ -492,11 +497,17 @@ False` drops the NIM words and applies no offsets.
 the TOT word's ToT and the NIM width (−1 where missing), the raw indices of both
 words in `/Event/mutrig`, the ToT written and a flag word: `hasTot`, `hasNim`,
 `nimExpected`, `incomplete` (one of two expected words missing), `timeFromNim`,
-`totSubstituted` (NIM-only), `multiCandidate` (a word had another candidate in
-the window), `inTotShadow` (NIM-only inside a TOT pulse of the counter: pile-up
-in its dead time), `nearFrameEdge` (within one window of the frame's first or
-last SMA hit) and `echo`. With the raw `/Event/mutrig` it rebuilds
-`/Event/mutrig_cal` exactly, so it is kept in every `PSM_SMA_CAL_NTUPLE` mode.
+`totSubstituted` (NIM-only), `multiCandidate` (the hit's TOT or NIM word had a
+candidate in the window other than its partner, whatever the hit's class: set on
+paired, TOT-only and NIM-only hits alike), `inTotShadow` (NIM-only inside a TOT
+pulse of the counter: pile-up in its dead time), `nearFrameEdge` (the window the
+partner is searched in, taken to the partner channel's raw time, reaches the
+frame's first or last SMA hit) and `echo`. With the raw `/Event/mutrig` it
+rebuilds `/Event/mutrig_cal` exactly. `PSM_SMA_HITS_NTUPLE` (default on) keeps it
+in the RNTuple; it costs about 14-20 % of the file on a beam subrun. With
+`PSM_SMA_CAL_NTUPLE = "calibrated"` the raw `/Event/mutrig` is dropped, so the
+sidecar's raw indices point at nothing and the rebuild no longer works (the job
+warns); its times, ToTs and flags stay valid.
 
 **Histograms** under `histograms/PIPSMSMACalibration/`, per counter whose copy is
 cabled, calibrated or not (table above). Two are for finding an offset:
@@ -504,8 +515,14 @@ cabled, calibrated or not (table above). Two are for finding an offset:
 within 2^19 ns of a sample of NIM words spread over each frame, up to 8192 pairs
 per counter and frame, 256 ns bins over the whole fine-field span). A NIM channel whose fine field carries an offset (the
 decoder folds any value mod 2^20 into [−2^19, 2^19)) peaks in `dt_wide` and not
-in `dt_raw`. The finalize line per counter gives the paired, TOT-only and
-NIM-only counts and fractions and the median aligned dt.
+in `dt_raw`. `dt_wide` is a fixed budget of pairs per frame, so it locates a peak
+but is no pair-fraction or purity estimate. `dt_vs_tot_<id>`, the walk curve, is
+filled from the pairs (t'_NIM − t'_TOT against the TOT word's ToT; echo and late
+words are not in it) once a counter is paired, and from every NIM word against
+its nearest TOT word while the counter is uncalibrated, which is what calibrating
+a new copy starts from. The finalize line per counter gives the paired, TOT-only
+and NIM-only counts, the paired fraction of the non-echo TOT words and of the
+NIM words, and the median dt of the same entries as `dt_vs_tot`.
 
 **Calibrating a new copy** (the manual path; no daemon involved): run the job by
 hand on one subrun (`python -m pioneer.nearline.process`), read the offset off
@@ -528,8 +545,8 @@ RNTuple. The raw-stream analyses in psm-analysis (`scint-efficiency`,
 `sma-raw-check`) rely on that order, which is why the time-ordered hits are a
 second collection rather than a replacement. `PSM_SMA_CAL_NTUPLE` (see
 *Output*) decides which of the two the RNTuple keeps; its default `"raw"` drops
-`/Event/mutrig_cal`, because the raw collection plus the always-kept
-`/Event/sma_hits` sidecar rebuild it hit for hit.
+`/Event/mutrig_cal`, because the raw collection plus the `/Event/sma_hits`
+sidecar (kept by `PSM_SMA_HITS_NTUPLE`) rebuild it hit for hit.
 
 ### SMA monitor
 
@@ -650,7 +667,8 @@ ones carry Sumw2) and add little to the file, being mostly empty.
 | `WRITE_NTUPLE` | `True` | Off is a pure monitoring pass; the histogram file is unaffected. See "Output size" |
 | `NTUPLE_RULES` | `[]` | Ordered `keep <glob>` / `drop <glob>` rules over TES paths, later rules winning. A path no rule matches is **kept**, so empty persists everything and a newly registered collection is never lost by omission |
 | `PSM_TWC_NTUPLE` | `"corrected"` | Which MuPix hit collections the RNTuple keeps: `"both"` (`_Event_muquad` and `_Event_muquad_twc`), `"corrected"` (appends `drop /Event/muquad` to the rules) or `"raw"` (appends `drop /Event/muquad_twc`). The rule goes last, so it wins over `NTUPLE_RULES`, and only with `PSM_DECODE` on (a rule matching nothing is warned about). The default keeps the hits the track reco read; the raw times follow from them and the run's `mupix_timewalk` constants, or from reprocessing the MIDAS file. `"both"` costs about 25 % more file on a busy beam subrun (see *Output size*). With the shipped empty constants the two are equal field for field (and in the same order when the raw frame is time-ordered); with constants the corrected one is time-ordered on the corrected times, so its order can differ. Any other value is rejected by `check()` |
-| `PSM_SMA_CAL_NTUPLE` | `"raw"` | Which SMA hit collections the RNTuple keeps: `"both"` (`_Event_mutrig` and `_Event_mutrig_cal`), `"calibrated"` (appends `drop /Event/mutrig`) or `"raw"` (appends `drop /Event/mutrig_cal`). Appended after the `PSM_TWC_NTUPLE` rule, so it too wins over `NTUPLE_RULES`, and only with `PSM_DECODE` on. After it, in every mode, comes `keep /Event/sma_hits`: the pairing sidecar is always written, since it records how each hit was formed and, with `_Event_mutrig`, rebuilds `_Event_mutrig_cal`. `"raw"` is the default for that reason; `"calibrated"` drops the readout-order collection (both words of every counter) the raw-stream analyses need. The TES always holds both. Any other value is rejected by `check()` |
+| `PSM_SMA_CAL_NTUPLE` | `"raw"` | Which SMA hit collections the RNTuple keeps: `"both"` (`_Event_mutrig` and `_Event_mutrig_cal`), `"calibrated"` (appends `drop /Event/mutrig`) or `"raw"` (appends `drop /Event/mutrig_cal`). Appended after the `PSM_TWC_NTUPLE` rule, so it too wins over `NTUPLE_RULES`, and only with `PSM_DECODE` on. The pairing sidecar `_Event_sma_hits` (`PSM_SMA_HITS_NTUPLE`), with `_Event_mutrig`, rebuilds `_Event_mutrig_cal`; `"raw"` is the default for that reason. `"calibrated"` drops the readout-order collection (both words of every counter) the raw-stream analyses need, and leaves the sidecar's raw indices pointing at nothing (the job prints a warning). The TES always holds both. Any other value is rejected by `check()` |
+| `PSM_SMA_HITS_NTUPLE` | `True` | Keeps the calibration layer's sidecar `_Event_sma_hits` (how each SMA hit was paired: both times, both widths, flags, raw word indices) in the RNTuple. It costs about 14-20 % of the file on a beam subrun, and until a NIM offset is in `sma_time_alignment` it carries nothing that `_Event_mutrig` and a time sort do not. `True` adds no rule, so `NTUPLE_RULES` still decide (a `"drop *"` job drops it too); `False` appends `drop /Event/sma_hits` last. The TES always has it. Not a bool is rejected by `check()` |
 
 ## Conditions
 
@@ -1618,8 +1636,8 @@ where an unreachable server fails the job (*Conditions DB down*).
 18. `PSM_PIXEL_MASK_TAG` neither `None` nor a non-empty string: it names a tag of `mupix_pixel_mask`.
 19. `PSM_TIMEWALK_CORRECTION_TAG` neither `None` nor a non-empty string: it names a tag of `mupix_timewalk`.
 20. `PSM_TWC_NTUPLE` not one of `"both"`, `"corrected"`, `"raw"`.
-21. `PSM_SMA_CAL_NTUPLE` not one of `"both"`, `"calibrated"`, `"raw"`; `PSM_SMA_PAIR_WINDOW_NS` not a number in (0, 1000]; `PSM_SMA_TIME_SOURCE` not `"tot"` or `"nim"`; `PSM_SMA_NIM_ONLY_TOT` not a number 0-255; `PSM_SMA_OFFSET_OVERRIDE_NS` not a dict of int → number; `PSM_SMA_NIM_NOMINAL_DELAY_NS` not a dict of int → number with |ns| below 2^19.
-22. `LIGHT`, `PSM_PIXEL_MASK`, `PSM_TIMEWALK`, `PSM_TIMEWALK_CORRECTION`, `PSM_SMA_WIDE_DT`, `PSM_SMA_FINE_OFFSETS`, `PSM_SMA_NIM_LAG`, `PSM_SMA_SKIP_STALE_FIRST_FRAME` or `PSM_SMA_NIM_PAIRING` not a bool (`NL_LIGHT` or a rendered `light` other than `1`/`0` ends up here): a string such as `"False"` is true in Python and would switch the setting on.
+21. `PSM_SMA_CAL_NTUPLE` not one of `"both"`, `"calibrated"`, `"raw"`; `PSM_SMA_PAIR_WINDOW_NS` not a number in (0, 1000]; `PSM_SMA_TIME_SOURCE` not `"tot"` or `"nim"`; `PSM_SMA_NIM_ONLY_TOT` not a number above `PSM_LAYER_THR` and at most 255; `PSM_SMA_OFFSET_OVERRIDE_NS` not a dict of int → number; `PSM_SMA_NIM_NOMINAL_DELAY_NS` not a dict of int → number with |ns| below 2^19.
+22. `LIGHT`, `PSM_PIXEL_MASK`, `PSM_TIMEWALK`, `PSM_TIMEWALK_CORRECTION`, `PSM_SMA_WIDE_DT`, `PSM_SMA_FINE_OFFSETS`, `PSM_SMA_NIM_LAG`, `PSM_SMA_SKIP_STALE_FIRST_FRAME`, `PSM_SMA_NIM_PAIRING` or `PSM_SMA_HITS_NTUPLE` not a bool (`NL_LIGHT` or a rendered `light` other than `1`/`0` ends up here): a string such as `"False"` is true in Python and would switch the setting on.
 23. `PSM_TIMEWALK` on and `PSM_TIMEWALK_DT_MIN`/`_MAX`/`_BINS` not an axis: max not above min, or bins not an integer 1-8192.
 24. `PSM_RF_CHANNEL` or `PSM_CURRENT_CHANNEL` neither `None`, `"off"` nor an integer 0-15, or the two the same integer: the SMA word's channel field is 4 bits, and the decoder takes the RF channel first, so the current pulses would become RF pulses.
 25. A `GEOCOND` base with an empty `PSM_GEOMETRY_FILES` (json mode): nothing supplies the table it names.
@@ -1755,7 +1773,9 @@ corrected copy is now time-ordered on the corrected times, so its pages no
 longer repeat the raw ones (+25 % file on that busy subrun).
 The SMA hits are written once by default, raw (`_Event_mutrig`):
 `PSM_SMA_CAL_NTUPLE = "both"` adds the time-ordered `_Event_mutrig_cal`, a
-second collection of the same hits and about the same size.
+second collection of the same hits and about the same size. The pairing sidecar
+`_Event_sma_hits` adds about 14-20 % of the file (`PSM_SMA_HITS_NTUPLE = False`
+leaves it out).
 `NTUPLE_RULES = ["drop *", "keep /Event/wd_hits", ...]` keeps a shrunken file,
 and selection happens once at `initialize()`, so the rules cost nothing per
 event. There is nothing to tune in the writer itself: it is fixed at ZSTD-1

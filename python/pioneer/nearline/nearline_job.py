@@ -703,13 +703,20 @@ PSM_TWC_NTUPLE = "corrected"
 # Which SMA hit collections the RNTuple keeps: "both" (/Event/mutrig and the
 # calibrated /Event/mutrig_cal), "calibrated" (drops /Event/mutrig) or "raw"
 # (drops /Event/mutrig_cal). Appended to NTUPLE_RULES after PSM_TWC_NTUPLE, so
-# it wins too. In every mode a last rule keeps /Event/sma_hits, the calibration
-# layer's sidecar: with the raw /Event/mutrig it rebuilds /Event/mutrig_cal hit
-# for hit (raw word, id, time, ToT), so "raw" loses nothing; and it is the only
-# record of how each hit was paired. "raw" by default: the raw-stream analyses
+# it wins too. With PSM_SMA_HITS_NTUPLE below the sidecar /Event/sma_hits, with
+# the raw /Event/mutrig, rebuilds /Event/mutrig_cal hit for hit (raw word, id,
+# time, ToT), so "raw" loses nothing. "raw" by default: the raw-stream analyses
 # need /Event/mutrig in its readout order, and it keeps both words of every
-# counter, so "calibrated" is for when nobody needs either.
+# counter, so "calibrated" is for when nobody needs either; the sidecar's raw
+# indices then point into the dropped /Event/mutrig (the job warns).
 PSM_SMA_CAL_NTUPLE = "raw"
+# Keep the calibration layer's sidecar /Event/sma_hits in the RNTuple: the only
+# record of how each hit was paired (both times, both widths, flags, raw word
+# indices). It costs about 14-20 % of the file on a beam subrun, and until a NIM
+# offset is in sma_time_alignment it holds nothing /Event/mutrig and a time sort
+# do not. True adds no rule, so NTUPLE_RULES still decide (a "drop *" drops it);
+# False appends "drop /Event/sma_hits" last. The TES always has it.
+PSM_SMA_HITS_NTUPLE = True
 # ===== END OF SETTINGS =====
 
 # The spellings of LIGHT in a rendered file and in NL_LIGHT, and the settings light
@@ -1084,7 +1091,8 @@ def check():
                         ("PSM_SMA_FINE_OFFSETS", PSM_SMA_FINE_OFFSETS),
                         ("PSM_SMA_NIM_LAG", PSM_SMA_NIM_LAG),
                         ("PSM_SMA_SKIP_STALE_FIRST_FRAME", PSM_SMA_SKIP_STALE_FIRST_FRAME),
-                        ("PSM_SMA_NIM_PAIRING", PSM_SMA_NIM_PAIRING)):
+                        ("PSM_SMA_NIM_PAIRING", PSM_SMA_NIM_PAIRING),
+                        ("PSM_SMA_HITS_NTUPLE", PSM_SMA_HITS_NTUPLE)):
         if not isinstance(value, bool):
             problems.append(f"{name} is {value!r}: it must be True or False (a string such as "
                             "'False' is true in Python and would switch it on).")
@@ -1110,9 +1118,12 @@ def check():
     if PSM_SMA_TIME_SOURCE not in ("tot", "nim"):
         problems.append(f"PSM_SMA_TIME_SOURCE is {PSM_SMA_TIME_SOURCE!r}: it must be 'tot' (the "
                         "TOT word's time) or 'nim' (the NIM copy's).")
-    if not (_number(PSM_SMA_NIM_ONLY_TOT) and 0 <= PSM_SMA_NIM_ONLY_TOT <= 255):
+    if not (_number(PSM_SMA_NIM_ONLY_TOT) and PSM_SMA_NIM_ONLY_TOT <= 255
+            and (not _number(PSM_LAYER_THR) or PSM_SMA_NIM_ONLY_TOT > PSM_LAYER_THR)):
         problems.append(f"PSM_SMA_NIM_ONLY_TOT is {PSM_SMA_NIM_ONLY_TOT!r}: it must be a ToT "
-                        "0-255 in raw SMA units (the value a NIM-only hit is written with).")
+                        f"above PSM_LAYER_THR ({PSM_LAYER_THR!r}) and at most 255 in raw SMA "
+                        "units (the value a NIM-only hit is written with; at or below the layer "
+                        "threshold the hit would fire no layer).")
     if not (isinstance(PSM_SMA_OFFSET_OVERRIDE_NS, dict) and all(
             isinstance(k, int) and not isinstance(k, bool) and _number(v)
             for k, v in PSM_SMA_OFFSET_OVERRIDE_NS.items())):
@@ -1628,9 +1639,14 @@ if WRITE_NTUPLE:
         _ntuple_rules.append("drop " + _TWC_NTUPLE_DROP[PSM_TWC_NTUPLE])
     if PSM_DECODE and _SMA_CAL_NTUPLE_DROP[PSM_SMA_CAL_NTUPLE]:
         _ntuple_rules.append("drop " + _SMA_CAL_NTUPLE_DROP[PSM_SMA_CAL_NTUPLE])
-    # Last, so no earlier rule can drop it: the pairing record (PSM_SMA_CAL_NTUPLE).
-    if PSM_DECODE:
-        _ntuple_rules.append("keep " + _TES_SMA_HITS)
+    # PSM_SMA_HITS_NTUPLE: kept by default (no rule, so NTUPLE_RULES decide), or
+    # dropped by a last rule.
+    if PSM_DECODE and not PSM_SMA_HITS_NTUPLE:
+        _ntuple_rules.append("drop " + _TES_SMA_HITS)
+    if PSM_DECODE and PSM_SMA_HITS_NTUPLE and PSM_SMA_CAL_NTUPLE == "calibrated":
+        print(f"[nearline] WARNING    PSM_SMA_CAL_NTUPLE = \"calibrated\" drops {_TES_MUTRIG}, "
+              f"so the raw TOT/NIM indices of {_TES_SMA_HITS} point into a collection this "
+              "file does not have (the sidecar's times, ToTs and flags are still valid).")
     if _ntuple_rules:
         output.SelectionRules = _ntuple_rules
     output.AuditExecute = output.AuditInitialize = output.AuditFinalize = True

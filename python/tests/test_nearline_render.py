@@ -480,21 +480,34 @@ def test_sma_nim_pairing_knobs_reach_the_calibration_layer(job_env):
 @pytest.mark.parametrize("mode, drops", [("raw", ["drop /Event/mutrig_cal"]),
                                          ("both", []),
                                          ("calibrated", ["drop /Event/mutrig"])])
-def test_sma_hits_is_kept_in_every_sma_cal_ntuple_mode(job_env, mode, drops):
+def test_sma_hits_is_kept_in_every_sma_cal_ntuple_mode(job_env, mode, drops, capsys):
     tmp_path, midas = job_env
     target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
     text = target.read_text().replace('PSM_SMA_CAL_NTUPLE = "raw"', f'PSM_SMA_CAL_NTUPLE = "{mode}"')
     rules = list(_run(target, text)["output"].SelectionRules)
-    # the default PSM_TWC_NTUPLE rule first, then the SMA mode's, then the keep rule last
-    assert rules == ["drop /Event/muquad"] + drops + ["keep /Event/sma_hits"]
+    # the default PSM_TWC_NTUPLE rule first, then the SMA mode's; nothing drops the sidecar
+    assert rules == ["drop /Event/muquad"] + drops
+    # "calibrated" drops what the sidecar's raw indices point into, and says so
+    warned = "raw TOT/NIM indices of /Event/sma_hits" in capsys.readouterr().out
+    assert warned == (mode == "calibrated")
 
 
-def test_sma_hits_keep_rule_wins_over_the_users_rules(job_env):
+def test_sma_hits_ntuple_false_drops_the_sidecar_last(job_env):
     tmp_path, midas = job_env
     target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
-    text = target.read_text().replace("NTUPLE_RULES = []", 'NTUPLE_RULES = ["drop /Event/*"]')
+    text = (target.read_text().replace("PSM_SMA_HITS_NTUPLE = True", "PSM_SMA_HITS_NTUPLE = False")
+            .replace("NTUPLE_RULES = []", 'NTUPLE_RULES = ["keep /Event/*"]'))
     rules = list(_run(target, text)["output"].SelectionRules)
-    assert rules[0] == "drop /Event/*" and rules[-1] == "keep /Event/sma_hits"
+    assert rules[0] == "keep /Event/*" and rules[-1] == "drop /Event/sma_hits"
+
+
+def test_users_rules_can_drop_the_sidecar(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text().replace("NTUPLE_RULES = []", 'NTUPLE_RULES = ["drop /Event/sma_hits"]')
+    rules = list(_run(target, text)["output"].SelectionRules)
+    assert rules[0] == "drop /Event/sma_hits"
+    assert not any(r.startswith("keep") and "sma_hits" in r for r in rules)
 
 
 @pytest.mark.parametrize("old, new, match", [
@@ -511,6 +524,10 @@ def test_sma_hits_keep_rule_wins_over_the_users_rules(job_env):
     ("PSM_SMA_NIM_ONLY_TOT = 1.0", "PSM_SMA_NIM_ONLY_TOT = -1.0", "PSM_SMA_NIM_ONLY_TOT"),
     ("PSM_SMA_NIM_ONLY_TOT = 1.0", "PSM_SMA_NIM_ONLY_TOT = 300", "PSM_SMA_NIM_ONLY_TOT"),
     ("PSM_SMA_NIM_ONLY_TOT = 1.0", "PSM_SMA_NIM_ONLY_TOT = '1'", "PSM_SMA_NIM_ONLY_TOT"),
+    # at or below PSM_LAYER_THR (0.2) a NIM-only hit would fire no layer
+    ("PSM_SMA_NIM_ONLY_TOT = 1.0", "PSM_SMA_NIM_ONLY_TOT = 0", "PSM_SMA_NIM_ONLY_TOT"),
+    ("PSM_SMA_NIM_ONLY_TOT = 1.0", "PSM_SMA_NIM_ONLY_TOT = 0.2", "PSM_SMA_NIM_ONLY_TOT"),
+    ("PSM_SMA_HITS_NTUPLE = True", "PSM_SMA_HITS_NTUPLE = 1", "PSM_SMA_HITS_NTUPLE"),
     ("PSM_SMA_OFFSET_OVERRIDE_NS = {}", "PSM_SMA_OFFSET_OVERRIDE_NS = {'2024': 5.0}",
      "PSM_SMA_OFFSET_OVERRIDE_NS"),
     ("PSM_SMA_OFFSET_OVERRIDE_NS = {}", "PSM_SMA_OFFSET_OVERRIDE_NS = {2024: '5'}",
