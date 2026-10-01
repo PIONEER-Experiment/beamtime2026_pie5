@@ -534,12 +534,13 @@ PSM_AGGREGATE_PROMPT_ONLY = 1
 # histograms, so a pair fills once; with the prompt gate on it removes only pairs
 # carried by two or more S1 tracklets.
 PSM_AGGREGATE_OWNERS_ONLY = 1
-# Expected t(L1) - t(S1) in ns for choosing that owner: the peak of the measured
-# t(MuPix) - t(S1) distribution (see the L-hit window above). It belongs to the
-# MuPix time collection the reco reads (/Event/muquad_twc): once the
-# mupix_timewalk table holds constants for the run, the corrected times line up
-# with S1 and this peak moves to about 0, so set this to the peak of that base.
-PSM_LPAIR_OWNER_OFFSET_NS = -52.0
+# Expected t(L1) - t(S1) in ns for choosing that owner, on the time base of the
+# MuPix collection the reco reads (/Event/muquad_twc). With the timewalk
+# correction (mupix_timewalk constants, every run from 467 on) the corrected
+# times line up with S1: the peak is -3..-1 ns on both planes (runs 528, 920),
+# so 0. A run without constants passes the raw times through, which peak
+# 30-60 ns earlier (rate dependent); set the measured peak for such a run.
+PSM_LPAIR_OWNER_OFFSET_NS = 0.0
 # L1 -> L2 lever arm in mm, used to turn (x2 - x1) into a slope.
 PSM_DISTANCE_L12 = 30.0
 # Delayed-coincidence window in ns for the pi -> mu tag, [MIN, MAX).

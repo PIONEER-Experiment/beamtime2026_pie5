@@ -277,14 +277,14 @@ def test_the_lpair_ownership_settings_reach_the_track_reco(job_env):
     target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
     job = _run(target)
     assert job["all_reco"].AggregateOwnersOnly == 1
-    assert job["all_reco"].lPairOwnerOffsetNs == -52.0
+    assert job["all_reco"].lPairOwnerOffsetNs == 0.0
 
 
 @pytest.mark.parametrize("value", ["float('nan')", "'x'", "None"])
 def test_an_owner_offset_that_is_not_a_finite_number_is_rejected(job_env, value):
     tmp_path, midas = job_env
     target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
-    text = target.read_text().replace("PSM_LPAIR_OWNER_OFFSET_NS = -52.0", f"PSM_LPAIR_OWNER_OFFSET_NS = {value}")
+    text = target.read_text().replace("PSM_LPAIR_OWNER_OFFSET_NS = 0.0", f"PSM_LPAIR_OWNER_OFFSET_NS = {value}")
     with pytest.raises(SystemExit, match="PSM_LPAIR_OWNER_OFFSET_NS"):
         _run(target, text)
 
