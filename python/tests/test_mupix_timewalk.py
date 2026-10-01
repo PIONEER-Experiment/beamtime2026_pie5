@@ -736,3 +736,36 @@ def test_fit_input_errors(tmp_path, capsys):
     other = _write(tmp_path, {10011: np.zeros((150, 32))}, np.arange(-150, 452, 4.0), name="o.root")
     assert main(["fit", str(path), str(other), "--out", str(tmp_path / "f.json")]) == 1
     assert "cannot be summed" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# --db
+
+@pytest.fixture
+def db(tmp_path):
+    path = tmp_path / "db.sqlite"
+    ex = cond_loader.make_executor(sqlite=str(path))
+    cond_loader.load_tables(ex, [("fixture", _container())])
+    ex.close()
+    return f"sqlite:{path}"
+
+
+def test_db_add_write_and_show(db, tmp_path, capsys):
+    """A one-chip interval through the database: written as the whole table, read
+    back with its one-element arrays intact, and shown."""
+    from pioneer.conddb import cond_export
+    fit = _fit(tmp_path, chips={"10011": _chip()})
+    assert main(["--db", db, "add", str(fit), "--run-start", "459", "--last-run", "459",
+                 "--split", "--comment", "c"]) == 0
+    assert "dry run" in capsys.readouterr().out
+    assert main(["--db", db, "add", str(fit), "--run-start", "459", "--last-run", "459",
+                 "--split", "--comment", "c", "--write"]) == 0
+    table = cond_export.export_table(db, "mupix_timewalk", list_keys=tw.ARRAYS + ("comment",))
+    assert sorted((r["run_start"], r["run_end"] or 1 << 30) for r in table["iov"]) == \
+        [(0, 459), (459, 460), (460, 1 << 30)]
+    _row, payload = tw.resolve(table, "mupix_timewalk", 459)
+    assert [c.vid for c in tw.timewalk_chips(payload)] == [10011]
+    capsys.readouterr()
+    assert main(["--db", db, "show", "--run", "459"]) == 0
+    assert "1 chip(s) with constants" in capsys.readouterr().out
+    assert main(["--db", db, "check"]) == 0

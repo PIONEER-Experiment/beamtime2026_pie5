@@ -15,14 +15,36 @@ study, or of a plain list, to that container:
     python -m pioneer.conddb.mupix_mask check
 
 ``add`` is a dry run by default: it prints what it would change (the
-intervals before and after, the pixels, and a unified diff of the file) and
+intervals before and after, the pixels, and a unified diff of the table) and
 writes nothing. ``--write`` applies it. ``check`` runs the decoder's rules
 over every run (see validate()).
 
-``--write`` edits the git-tracked container in reco_testbeam/conditions (the
-default location). The change must then be committed to reco_testbeam; on
-the DAQ machine that is the nearline daemon's checkout, and a dirty checkout
-there blocks the next pull.
+Where the table lives
+---------------------
+``--db [CONNINFO]`` works on the conditions database, which is where the
+constants are written first during the 2026 beamtime (the pinky PG18
+cluster); the default CONNINFO is ``service=pioneer-conditions-admin``, from
+~/.pg_service.conf with the password in ~/.pgpass:
+
+    python -m pioneer.conddb.mupix_mask --db add STUDY.json \\
+        --run-start 459 --last-run 459 --split --comment "..."          # dry run
+    python -m pioneer.conddb.mupix_mask --db add STUDY.json ... --write
+    python -m pioneer.conddb.mupix_mask --db show --run 459
+
+It reads the table's active intervals (and the chip map) with
+cond_export.export_table(), applies exactly the edit the JSON mode applies,
+and with ``--write`` loads the WHOLE resulting table through cond_loader in
+one transaction. A load replaces every active interval of each tag it names,
+so it has to carry the complete table, never the new interval alone; the
+intervals the edit deactivated are left out, since the load retires the
+database's own copies of them. The write is refused if the table changed
+between the read and the load. Afterwards the JSON snapshot is refreshed
+(snapshot_after_write()); the git containers are exports (pg2json.py).
+
+Without ``--db`` the tool edits a container file (``--conditions``, default
+the git-tracked reco_testbeam/conditions): the development path, and the way
+to try constants in a scratch copy. A change there must be committed to
+reco_testbeam, and the nearline job only reads it in json mode.
 
 Input
 -----
@@ -68,16 +90,11 @@ Refused
   many per overlapped row;
 * any change after which the table would fail the decoder (validate()).
 
-To the database
----------------
-The nearline reads the JSON container: it always loads
-bt2026_psm_readout_map.json, and a JSON table outranks the database (layers
-never merge). For the campaign database, load the changed table
-with the ordinary append-only loader; ``--table-out`` writes a container
-holding only this table, so the load touches nothing else:
+``--table-out`` writes a container holding only this table as it was
+written (in --db mode: as it was loaded), for another database:
 
     python -m pioneer.conddb.mupix_mask add ... --write --table-out /tmp/mask.json
-    python3 json2pg.py --docker testbeam-pgdb /tmp/mask.json
+    python3 json2pg.py "host=... dbname=..." /tmp/mask.json
 """
 from __future__ import annotations
 
@@ -85,13 +102,18 @@ import argparse
 import csv
 import difflib
 import getpass
+import importlib.util
 import io
 import json
 import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+from pioneer.conddb import cond_export, cond_loader
+from pioneer.conddb.cond_loader import FingerprintMoved, LoaderError
 
 TABLE = "mupix_pixel_mask"
 CHIP_MAP_TABLE = "mupix_chip_map"
@@ -104,6 +126,13 @@ SCHEMA_VERSION = 1
 # and PITMidasMusip drops those as out of range before the mask is consulted.
 SENSOR_COLS = 256
 SENSOR_ROWS = 250
+
+#: --db without a value: the writer's libpq service (~/.pg_service.conf).
+DB_DEFAULT = "service=pioneer-conditions-admin"
+#: the module the writers run after a database write, when it exists
+SNAPSHOT_MODULE = "pioneer.conddb.snapshot"
+#: the mask's parallel arrays: arrays even when they hold one pixel
+MASK_ARRAYS = ("vid", "col", "row", "reason")
 
 
 class MaskError(Exception):
@@ -141,6 +170,176 @@ def container_path(arg: str | None) -> Path:
     if not path.is_file():
         raise MaskError(f"no conditions container at {path}")
     return path
+
+
+@dataclass
+class Source:
+    """Where the tables were read from, and where a write goes back to: a
+    container file (``path``) or a database (``spec``, --db)."""
+    label: str
+    doc: dict
+    path: Path | None = None
+    spec: str | None = None
+    fingerprint: tuple | None = None
+
+    @property
+    def what(self) -> str:
+        return "database" if self.spec else "container"
+
+
+def open_source(args, table: str, list_keys=()) -> Source:
+    """The container of --conditions, or with --db the database's ``table``
+    and ``mupix_chip_map`` exported into container form (active intervals)."""
+    if getattr(args, "db", None):
+        try:
+            ex = cond_export.executor_for(args.db)
+            try:
+                # The fingerprint first: a change after it is caught by the
+                # load; one between an export and a later fingerprint would not.
+                fingerprint = cond_export.table_fingerprint(ex, table)
+                doc = {CHIP_MAP_TABLE: cond_export.export_table(ex, CHIP_MAP_TABLE),
+                       table: cond_export.export_table(ex, table, list_keys=list_keys)}
+            finally:
+                ex.close()
+        except LoaderError as exc:
+            raise MaskError(str(exc)) from None
+        return Source(ex.label, doc, spec=args.db, fingerprint=fingerprint)
+    path = container_path(args.conditions)
+    return Source(str(path), json.loads(path.read_text(encoding="utf-8")), path=path)
+
+
+def db_table(table: dict) -> dict:
+    """The table as --db loads it: its active intervals only. The rows an edit
+    deactivated are the database's current rows, which the load retires (and
+    pins) itself; loading them again would add a second, inactive copy."""
+    new = json.loads(json.dumps(table))
+    new["iov"] = [r for r in new["iov"] if r.get("is_active", True)]
+    keep = {str(r["row_id"]) for r in new["iov"]}
+    if "values_by_iov" in new:
+        new["values_by_iov"] = {k: v for k, v in new["values_by_iov"].items() if k in keep}
+    return new
+
+
+def write_db(src: Source, table: str, new_table: dict) -> None:
+    """Load the complete ``new_table`` into the database of ``src``, in one transaction.
+
+    Refused when the table's intervals changed since open_source() read them
+    (another writer, a condtool close/deactivate): the load would retire
+    intervals this edit never saw. The loader checks the fingerprint again
+    inside the load transaction, under its lock on the interval table, so a
+    writer that slips in between cannot be overwritten either.
+    """
+    try:
+        ex = cond_export.executor_for(src.spec)
+        try:
+            cond_loader.load_tables(ex, [(f"{table} (edited)", {table: new_table})],
+                                    expect={table: src.fingerprint})
+        finally:
+            ex.close()
+    except FingerprintMoved as exc:
+        raise MaskError(f"{exc}\nRerun the command: it reads the table again.") from None
+    except LoaderError as exc:
+        raise MaskError(f"the load was refused, nothing written: {exc}") from None
+
+
+def _snapshot_available() -> bool:
+    try:
+        return importlib.util.find_spec(SNAPSHOT_MODULE) is not None
+    except ImportError:
+        return False
+
+
+def snapshot_after_write(spec: str) -> None:
+    """Refresh the JSON snapshot after a database write. Never fatal: the
+    constants are in the database by now, and a missing snapshot only means
+    the fallback is older than it could be."""
+    if spec.startswith("sqlite:"):
+        print("snapshot: none for a SQLite database")
+        return
+    if not _snapshot_available():
+        print(f"reminder: no {SNAPSHOT_MODULE} in this checkout, so no snapshot was "
+              f"taken. Export one by hand: python3 pg2json.py '{spec}' --out-dir DIR --check")
+        return
+    root = str(Path(__file__).resolve().parents[2])
+    env = dict(os.environ)
+    env["PYTHONPATH"] = root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    try:
+        proc = subprocess.run([sys.executable, "-m", SNAPSHOT_MODULE, "--conninfo", spec],
+                              env=env)
+        code = proc.returncode
+    except OSError as exc:
+        code = str(exc)
+    if code:
+        print(f"WARNING: the snapshot failed ({code}); the constants are in the database. "
+              f"Run python -m {SNAPSHOT_MODULE} by hand.")
+
+
+def db_argv(argv: list[str]) -> list[str]:
+    """``--db`` followed by something that is not a database spec (a
+    subcommand, an option, a file) means ``--db DB_DEFAULT``. argparse's
+    nargs='?' alone would swallow the subcommand name."""
+    out: list[str] = []
+    for i, word in enumerate(argv):
+        out.append(word)
+        if word == "--db" and (i + 1 == len(argv) or not cond_export.is_db_spec(argv[i + 1])):
+            out.append(DB_DEFAULT)
+    return out
+
+
+def add_db_argument(ap) -> None:
+    """--conditions / --db, shared by mupix_mask and mupix_timewalk."""
+    where = ap.add_mutually_exclusive_group()
+    where.add_argument("--conditions", metavar="PATH",
+                       help=f"conditions directory or container (default: $NL_CONDITIONS_DIR, "
+                            f"else $PIONEERSYS/reco_testbeam/conditions; a directory means its "
+                            f"{CONTAINER})")
+    where.add_argument("--db", metavar="CONNINFO",
+                       help=f"work on the conditions database instead: a libpq conninfo "
+                            f"(default with no value: {DB_DEFAULT}; the password comes from "
+                            f"~/.pgpass), or sqlite:PATH")
+
+
+def show_diff(src: Source, table: str, before_doc: dict, after_doc: dict, args) -> str:
+    """The unified diff add prints; returns the text a --write stores (JSON mode:
+    the whole container; --db mode: the table as it will be loaded)."""
+    if src.spec:
+        before = dump({table: before_doc[table]})
+        after = dump({table: db_table(after_doc[table])})
+        names = (f"{src.label} {table} (now)", f"{src.label} {table} (after the load)")
+    else:
+        before, after = dump(before_doc), dump(after_doc)
+        names = (str(src.path), str(src.path))
+    if not args.no_diff:
+        print()
+        if src.spec:
+            print("(row ids are the export's, 1..N; the load gives every interval a fresh "
+                  "database row id)")
+        sys.stdout.writelines(difflib.unified_diff(
+            before.splitlines(keepends=True), after.splitlines(keepends=True),
+            fromfile=names[0], tofile=names[1], n=2))
+    return after
+
+
+def commit_write(src: Source, table: str, new_table: dict, after: str, table_out) -> None:
+    """--write: the file, or the database plus its snapshot; then --table-out."""
+    if src.spec:
+        loaded = db_table(new_table)
+        write_db(src, table, loaded)
+        print(f"written: {table} loaded into {src.label}")
+        snapshot_after_write(src.spec)
+    else:
+        loaded = new_table
+        src.path.write_text(after, encoding="utf-8")
+        print(f"written: {src.path}")
+        print()
+        print("NOTE: this changed a JSON container, NOT the conditions database. The "
+              "nearline job reads the DATABASE, so this edit does not reach production "
+              "jobs. Use --db to write the constants where the job reads them; a JSON "
+              "container is read only by a job run with --conditions json:DIR.")
+    if table_out:
+        out = Path(table_out)
+        out.write_text(dump({table: loaded}), encoding="utf-8")
+        print(f"written: {out} (this table alone, for json2pg.py / json2sqlite.py)")
 
 
 def _end(run_end) -> float:
@@ -777,10 +976,10 @@ def dump(doc: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def cmd_add(args) -> int:
-    path = container_path(args.conditions)
-    doc = json.loads(path.read_text())
+    src = open_source(args, TABLE, MASK_ARRAYS)
+    doc = src.doc
     if TABLE not in doc:
-        raise MaskError(f"{path} has no table {TABLE}")
+        raise MaskError(f"{src.label} has no table {TABLE}")
     entries, kind, study_run, source = read_input(Path(args.input), args.chip_ids)
     map_run = args.map_run if args.map_run is not None else study_run
     pixels = to_pixels(entries, kind, doc, map_run)
@@ -803,8 +1002,7 @@ def cmd_add(args) -> int:
     if problems:
         raise MaskError("the table after the change would fail the decoder:\n  "
                         + "\n  ".join(problems))
-    before, after = dump(doc), dump(new_doc)
-    print(f"container  {path}")
+    print(f"{src.what:<10} {src.label}")
     print(f"table      {TABLE}, tag '{tag}'")
     print(f"input      {source} ({kind} chip ids{f', converted at run {map_run}' if kind == 'raw' else ''})")
     print()
@@ -817,31 +1015,21 @@ def cmd_add(args) -> int:
     print()
     print(f"pixels of the new interval ({len(pixels)}):")
     print(pixel_table(pixels))
-    if not args.no_diff:
-        print()
-        sys.stdout.writelines(difflib.unified_diff(
-            before.splitlines(keepends=True), after.splitlines(keepends=True),
-            fromfile=str(path), tofile=str(path), n=2))
+    after = show_diff(src, TABLE, doc, new_doc, args)
     print()
     if not args.write:
         print("dry run: nothing written. Add --write to apply.")
         return 0
-    path.write_text(after)
-    print(f"written: {path}")
-    if args.table_out:
-        out = Path(args.table_out)
-        out.write_text(dump({TABLE: new_table}))
-        print(f"written: {out} (this table alone, for json2pg.py / json2sqlite.py)")
+    commit_write(src, TABLE, new_table, after, args.table_out)
     return 0
 
 
 def cmd_show(args) -> int:
-    path = container_path(args.conditions)
-    doc = json.loads(path.read_text())
-    if TABLE not in doc:
-        raise MaskError(f"{path} has no table {TABLE}")
-    table = doc[TABLE]
-    print(f"container  {path}")
+    src = open_source(args, TABLE, MASK_ARRAYS)
+    if TABLE not in src.doc:
+        raise MaskError(f"{src.label} has no table {TABLE}")
+    table = src.doc[TABLE]
+    print(f"{src.what:<10} {src.label}")
     print(describe(table))
     if args.run is None:
         return 0
@@ -856,9 +1044,9 @@ def cmd_show(args) -> int:
 
 
 def cmd_check(args) -> int:
-    path = container_path(args.conditions)
-    problems = validate(json.loads(path.read_text()))
-    print(f"container  {path}")
+    src = open_source(args, TABLE, MASK_ARRAYS)
+    problems = validate(src.doc)
+    print(f"{src.what:<10} {src.label}")
     if problems:
         print(f"{len(problems)} problem(s); the decoder would fail on them:")
         for p in problems:
@@ -874,9 +1062,7 @@ def main(argv: list[str] | None = None) -> int:
                                  description=__doc__.splitlines()[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter,
                                  epilog="See the module docstring (pydoc pioneer.conddb.mupix_mask).")
-    ap.add_argument("--conditions", metavar="PATH",
-                    help=f"conditions directory or container (default: $NL_CONDITIONS_DIR, else "
-                         f"$PIONEERSYS/reco_testbeam/conditions; a directory means its {CONTAINER})")
+    add_db_argument(ap)
     subs = ap.add_subparsers(dest="command", required=True)
 
     p = subs.add_parser("add", help="add an interval with the pixels of a study or a list")
@@ -915,7 +1101,7 @@ def main(argv: list[str] | None = None) -> int:
     subs.add_parser("check", help="the decoder's rules over every run: no gap or overlap in "
                                   "the default tag, every mask valid against the chip map")
 
-    args = ap.parse_args(argv)
+    args = ap.parse_args(db_argv(sys.argv[1:] if argv is None else list(argv)))
     try:
         return {"add": cmd_add, "show": cmd_show, "check": cmd_check}[args.command](args)
     except MaskError as exc:
