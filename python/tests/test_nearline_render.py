@@ -272,6 +272,32 @@ def test_the_scint_window_reaches_the_track_reco(job_env):
     assert job["all_reco"].thrScint == 5.0
 
 
+def test_the_lpair_ownership_settings_reach_the_track_reco(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    job = _run(target)
+    assert job["all_reco"].AggregateOwnersOnly == 1
+    assert job["all_reco"].lPairOwnerOffsetNs == 0.0
+
+
+@pytest.mark.parametrize("value", ["float('nan')", "'x'", "None"])
+def test_an_owner_offset_that_is_not_a_finite_number_is_rejected(job_env, value):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text().replace("PSM_LPAIR_OWNER_OFFSET_NS = 0.0", f"PSM_LPAIR_OWNER_OFFSET_NS = {value}")
+    with pytest.raises(SystemExit, match="PSM_LPAIR_OWNER_OFFSET_NS"):
+        _run(target, text)
+
+
+@pytest.mark.parametrize("value", ["2", "-1", "'yes'"])
+def test_an_owners_only_value_other_than_0_or_1_is_rejected(job_env, value):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text().replace("PSM_AGGREGATE_OWNERS_ONLY = 1", f"PSM_AGGREGATE_OWNERS_ONLY = {value}")
+    with pytest.raises(SystemExit, match="PSM_AGGREGATE_OWNERS_ONLY"):
+        _run(target, text)
+
+
 @pytest.mark.parametrize("value", ["0.0", "-1.0", "20.0", "25.0"])
 def test_a_scint_window_that_is_empty_or_reaches_the_delayed_window_is_rejected(job_env, value):
     tmp_path, midas = job_env
