@@ -305,6 +305,10 @@ WD_SCALER_FILL_STALE = False
 # map for every run this job processes, for a file whose interval is wrong or
 # not yet written. "off" switches the role off whatever the map says (no
 # /Event/rf, resp. no musip/current; the map's channel is dropped and counted).
+# The proton current left the SMA when the NIM copies were cabled (the
+# WaveDREAM scaler counts it), and raw channel 7 has carried a counter since
+# then (S3L, later S3 TOT): the old PSM_CURRENT_CHANNEL = 7 would consume every
+# one of its words as a current pulse before the map is read.
 PSM_RF_CHANNEL = None
 PSM_CURRENT_CHANNEL = None
 # MuPix pixel pitch in mm; a wrong pitch scales every position and every slope.
