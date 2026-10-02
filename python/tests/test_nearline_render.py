@@ -346,7 +346,7 @@ def test_the_stop_tag_rules_reach_the_reco(job_env):
     assert job["all_reco"].IgnoredNeverSeed == 1
     tag = job["tag_reco"]
     assert (tag.WindowMin, tag.WindowMax, tag.DtBins) == (18.0, 115.0, 97)
-    assert (tag.DelayedTotMin, tag.DelayedTotMax, tag.DelayedStopPlateOnly) == (1.0, 30.0, 1)
+    assert (tag.DelayedTotMin, tag.DelayedTotMax, tag.DelayedStopPlateOnly) == (10.0, 30.0, 1)
     assert tag.TaggedStopLayers == [2, 3, 4]
     assert (tag.FarWindowMin, tag.FarWindowMax) == (-1000.0, -200.0)
     assert (tag.PairWindowMin, tag.PairWindowMax) == (-1000.0, 500.0)
@@ -371,8 +371,10 @@ def test_the_optional_stop_tag_rules_can_be_switched_off_or_on(job_env):
 
 
 @pytest.mark.parametrize("old, new", [
-    ("PSM_DELAYED_TOT_MAX = 30.0", "PSM_DELAYED_TOT_MAX = 1.0"),
-    ("PSM_DELAYED_TOT_MAX = 30.0", "PSM_DELAYED_TOT_MAX = 0.5"),
+    ("PSM_DELAYED_TOT_MAX = 30.0", "PSM_DELAYED_TOT_MAX = 10.0"),
+    ("PSM_DELAYED_TOT_MAX = 30.0", "PSM_DELAYED_TOT_MAX = 5.0"),
+    ("PSM_DELAYED_TOT_MIN = 10.0", "PSM_DELAYED_TOT_MIN = -1.0"),
+    ("PSM_DELAYED_TOT_MIN = 10.0", "PSM_DELAYED_TOT_MIN = float('nan')"),
     ("PSM_PROMPT_RF_WINDOW_NS = None", "PSM_PROMPT_RF_WINDOW_NS = (98.5, 95.0)"),
     ("PSM_TAGGED_STOP_LAYERS = (2, 3, 4)", "PSM_TAGGED_STOP_LAYERS = (3, 6)"),
     ("PSM_TAGGED_STOP_LAYERS = (2, 3, 4)", "PSM_TAGGED_STOP_LAYERS = ('S3',)"),
