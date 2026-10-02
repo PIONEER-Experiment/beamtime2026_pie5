@@ -522,6 +522,14 @@ PSM_L_WINDOW_AFTER_NS = 160.0
 # far below PSM_DELAYED_WINDOW_NS[0], so a delayed pulse is never absorbed into
 # its prompt cluster. Revisit once the SMA channels carry time offsets.
 PSM_SCINT_WINDOW_NS = 5.0
+# Ignored channels (the channel map's ignore list: the parked degrader, the logic
+# and NIM copies) never seed a tracklet (IgnoredNeverSeed). They were never summed,
+# but in the unseeded mode each one still seeded: alone it made a tracklet with
+# every ToT sum 0 (about one tracklet in thirteen on pion-stop data), and just
+# before a particle it opened that particle's window. The 0-ToT tracklets then
+# counted as delayed matches of the tag. 1: the tracklets are those of a clustering
+# with the ignored hits removed first. S1-S5 are never ignored.
+PSM_DROP_IGNORED_SEEDS = 1
 # The L hits of each plane inside that window are clustered: two hits at most
 # this far apart in mm (global x/y, single linkage) are one cluster, and exactly
 # one cluster per plane makes the L pair, at the mean of the cluster's pixel
@@ -568,8 +576,54 @@ PSM_AGGREGATE_OWNERS_ONLY = 1
 PSM_LPAIR_OWNER_OFFSET_NS = 0.0
 # L1 -> L2 lever arm in mm, used to turn (x2 - x1) into a slope.
 PSM_DISTANCE_L12 = 30.0
-# Delayed-coincidence window in ns for the pi -> mu tag, [MIN, MAX).
-PSM_DELAYED_WINDOW_NS = (20.0, 70.0)
+# Delayed-coincidence window in ns for the pi -> mu tag, [MIN, MAX). 18 ns is where
+# the SMA dead time after the prompt hit ends (lower adds echo pulses of the prompt);
+# 115 ns stops below the S2/S3 words that follow a hit by ~135 ns. Only safe with
+# the delayed-candidate rules below: without PSM_DELAYED_TOT_MIN the 0-ToT pseudo
+# clusters at +43 / +83 ns fill the wider window.
+PSM_DELAYED_WINDOW_NS = (18.0, 115.0)
+# Bins of the dt and sb histograms over that window: one per ns.
+PSM_DELAYED_DT_BINS = 97
+# Delayed candidates. The delayed summed ToT (s1tot + ... + s5tot of the candidate
+# cluster, exp_tagged delayedTot) must lie in [PSM_DELAYED_TOT_MIN,
+# PSM_DELAYED_TOT_MAX): the lower edge removes the 0-ToT clusters, the upper edge the
+# long-ToT S3 words that are not decays. None as the maximum: no upper edge.
+PSM_DELAYED_TOT_MIN = 1.0
+PSM_DELAYED_TOT_MAX = 30.0
+# 1: a delayed candidate must hit the prompt's stop plate and no other plate (its
+# layer pattern above PSM_LAYER_THR is the stop plate's bit alone); a prompt with no
+# layer above threshold then has no candidate. The muon of a pi -> mu decay stops
+# within ~1 mm, so it lights only the plate the pion stopped in.
+PSM_DELAYED_STOP_PLATE_ONLY = 1
+# Prompt selection by the S1 RF phase (the prompt tracklet's s1rfphase), ns,
+# [MIN, MAX); a prompt without a valid phase then fails. The pion peak moves with
+# the momentum and the tune, so it has to be measured per setting before it goes
+# in here (e.g. (95.0, 98.5) at 165 MeV/c). None: off, every prompt.
+PSM_PROMPT_RF_WINDOW_NS = None
+# Stop layers (1..5 = S1..S5, 0 = no layer above threshold) whose prompts count
+# as tagged: the n_tagged counter, the tagged phase-space maps (xy, xxp, yyp and the
+# _w twins) and the dt, sb, far and dt_all histograms. The exp_tagged rows keep every
+# stop layer. S2 tags stay inefficient and impure until the S2 chain-offset decoder
+# fix and the SMA time offsets table exist (without them about 8 % efficiency at
+# 33 % purity, against about 27 % / 80 % for S4). An empty tuple: every layer.
+PSM_TAGGED_STOP_LAYERS = (2, 3, 4)
+# Far accidental window in ns, [MIN, MAX) before the prompt: the candidates in it
+# are counted per prompt (exp_tagged nFar) and histogrammed ("far", every
+# candidate). Scaled by the signal width over this width it is the accidental
+# expectation of the signal window. The mirrored sideband (-MAX, -MIN] of the
+# window under-counts the accidentals: the dead time after a hit and the blind
+# S2 channel deplete the region just before the prompt. Must lie below
+# -PSM_DELAYED_WINDOW_NS[1]. None: off.
+PSM_FAR_WINDOW_NS = (-1000.0, -200.0)
+# Every-pair dt histograms "dt_all" (tagged stop layers) and "dt_all_stop" (by stop
+# layer, every layer) over this window in ns, 1 ns bins: every candidate of every
+# S5-vetoed prompt under the same rules, not only the earliest. The pion lifetime
+# fit and the flat accidental level come from these. None: off.
+PSM_PAIR_WINDOW_NS = (-1000.0, 500.0)
+# 1: fill "stop_phase", stop layer x S1 RF phase (1 ns bins over 0-131, bin 131 =
+# no valid phase) of every prompt with a prompt-channel hit, through-going ones
+# included, so the pion window and the RF sidebands can be chosen offline.
+PSM_STOP_PHASE_HIST = 1
 # Require the PROMPT half of a coincidence to have a prompt-channel hit of its own.
 # Off, any tracklet in the window can play the prompt role -- including, in the
 # unseeded mode, a delayed pulse that formed its own tracklet -- and the tag then
@@ -1155,6 +1209,27 @@ def check():
                         f"PSM_DELAYED_WINDOW_NS[0] ({PSM_DELAYED_WINDOW_NS[0]}): a wider S-S "
                         "clustering window absorbs the delayed pulse into its prompt cluster, "
                         "and the delayed-coincidence tag can no longer find it.")
+    if PSM_RECO and PSM_DELAYED_TOT_MAX is not None and not (
+            float(PSM_DELAYED_TOT_MAX) > float(PSM_DELAYED_TOT_MIN)):
+        problems.append(f"PSM_DELAYED_TOT_MAX ({PSM_DELAYED_TOT_MAX}) must be larger than "
+                        f"PSM_DELAYED_TOT_MIN ({PSM_DELAYED_TOT_MIN}), or None for no upper edge: "
+                        "the delayed ToT band [MIN, MAX) would take no candidate.")
+    if PSM_RECO and PSM_PROMPT_RF_WINDOW_NS is not None and not (
+            float(PSM_PROMPT_RF_WINDOW_NS[0]) < float(PSM_PROMPT_RF_WINDOW_NS[1])):
+        problems.append(f"PSM_PROMPT_RF_WINDOW_NS {PSM_PROMPT_RF_WINDOW_NS} is empty; give [MIN, MAX) "
+                        "with MIN < MAX, or None for every prompt.")
+    if PSM_RECO and not all(isinstance(x, int) and 0 <= x <= 5 for x in PSM_TAGGED_STOP_LAYERS):
+        problems.append(f"PSM_TAGGED_STOP_LAYERS {PSM_TAGGED_STOP_LAYERS!r} must be stop layers 0..5 "
+                        "(1..5 = S1..S5), or () for every layer.")
+    if PSM_RECO and PSM_FAR_WINDOW_NS is not None and not (
+            float(PSM_FAR_WINDOW_NS[0]) < float(PSM_FAR_WINDOW_NS[1]) <= -float(PSM_DELAYED_WINDOW_NS[1])):
+        problems.append(f"PSM_FAR_WINDOW_NS {PSM_FAR_WINDOW_NS} must be [MIN, MAX) with MIN < MAX <= "
+                        f"-PSM_DELAYED_WINDOW_NS[1] ({-float(PSM_DELAYED_WINDOW_NS[1])}): an accidental "
+                        "window that reaches the mirrored sideband or the signal counts decays.")
+    if PSM_RECO and PSM_PAIR_WINDOW_NS is not None and not (
+            float(PSM_PAIR_WINDOW_NS[0]) < float(PSM_PAIR_WINDOW_NS[1])):
+        problems.append(f"PSM_PAIR_WINDOW_NS {PSM_PAIR_WINDOW_NS} is empty; give [MIN, MAX) with "
+                        "MIN < MAX, or None.")
     if PSM_RECO and PSM_DROP_CROSSTALK_GHOSTS and not (PSM_DECODE and PSM_GEOMETRY_BASE):
         problems.append("PSM_DROP_CROSSTALK_GHOSTS is on but there is no PIGeometrySvc "
                         "(PSM_DECODE, PSM_GEOMETRY_BASE): the ghost rule recovers each hit's "
@@ -1450,6 +1525,7 @@ if PSM_RECO:
         seedOnL=int(PSM_SEED_ON_L), thrLPair=float(PSM_LPAIR_WINDOW_NS),
         thrMupix=float(PSM_L_WINDOW_BEFORE_NS), thrMupixUpper=float(PSM_L_WINDOW_AFTER_NS),
         thrScint=float(PSM_SCINT_WINDOW_NS),
+        IgnoredNeverSeed=int(PSM_DROP_IGNORED_SEEDS),
         aggregate=int(PSM_AGGREGATE),
         AggregatePromptOnly=int(PSM_AGGREGATE_PROMPT_ONLY),
         AggregateOwnersOnly=int(PSM_AGGREGATE_OWNERS_ONLY),
@@ -1498,7 +1574,23 @@ if PSM_RECO:
         RequireLPair=int(PSM_REQUIRE_L_HITS), DistanceL12=float(PSM_DISTANCE_L12),
         PhaseSpaceBins=int(PSM_PHASE_SPACE_BINS),
         PhaseSpacePosRange=float(PSM_PHASE_SPACE_POS_RANGE_MM),
-        PhaseSpaceSlopeRange=float(PSM_PHASE_SPACE_SLOPE_RANGE_MRAD))
+        PhaseSpaceSlopeRange=float(PSM_PHASE_SPACE_SLOPE_RANGE_MRAD),
+        DtBins=int(PSM_DELAYED_DT_BINS),
+        DelayedTotMin=float(PSM_DELAYED_TOT_MIN),
+        DelayedStopPlateOnly=int(PSM_DELAYED_STOP_PLATE_ONLY),
+        TaggedStopLayers=[int(x) for x in PSM_TAGGED_STOP_LAYERS],
+        StopPhaseHist=int(PSM_STOP_PHASE_HIST))
+    if PSM_DELAYED_TOT_MAX is not None:
+        tag_reco.DelayedTotMax = float(PSM_DELAYED_TOT_MAX)
+    if PSM_PROMPT_RF_WINDOW_NS is not None:
+        tag_reco.PromptPhaseMin = float(PSM_PROMPT_RF_WINDOW_NS[0])
+        tag_reco.PromptPhaseMax = float(PSM_PROMPT_RF_WINDOW_NS[1])
+    if PSM_FAR_WINDOW_NS is not None:
+        tag_reco.FarWindowMin = float(PSM_FAR_WINDOW_NS[0])
+        tag_reco.FarWindowMax = float(PSM_FAR_WINDOW_NS[1])
+    if PSM_PAIR_WINDOW_NS is not None:
+        tag_reco.PairWindowMin = float(PSM_PAIR_WINDOW_NS[0])
+        tag_reco.PairWindowMax = float(PSM_PAIR_WINDOW_NS[1])
     algorithms.append(Gaudi__Sequencer(
         "PSMRecoSeq", RequireObjects=[_TES_MUTRIG_CAL],
         Members=[all_reco, PIPSMPatternReco(input=all_reco.output), weight_reco, tag_reco]))

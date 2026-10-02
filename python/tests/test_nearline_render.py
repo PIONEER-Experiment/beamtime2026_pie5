@@ -339,6 +339,56 @@ def test_an_owners_only_value_other_than_0_or_1_is_rejected(job_env, value):
         _run(target, text)
 
 
+def test_the_stop_tag_rules_reach_the_reco(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    job = _run(target)
+    assert job["all_reco"].IgnoredNeverSeed == 1
+    tag = job["tag_reco"]
+    assert (tag.WindowMin, tag.WindowMax, tag.DtBins) == (18.0, 115.0, 97)
+    assert (tag.DelayedTotMin, tag.DelayedTotMax, tag.DelayedStopPlateOnly) == (1.0, 30.0, 1)
+    assert tag.TaggedStopLayers == [2, 3, 4]
+    assert (tag.FarWindowMin, tag.FarWindowMax) == (-1000.0, -200.0)
+    assert (tag.PairWindowMin, tag.PairWindowMax) == (-1000.0, 500.0)
+    assert tag.StopPhaseHist == 1
+    # the prompt RF window is machinery only: off in the job
+    assert job["PSM_PROMPT_RF_WINDOW_NS"] is None
+    assert "PromptPhaseMin" not in tag.__dict__ and "PromptPhaseMax" not in tag.__dict__
+
+
+def test_the_optional_stop_tag_rules_can_be_switched_off_or_on(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = (target.read_text()
+            .replace("PSM_DELAYED_TOT_MAX = 30.0", "PSM_DELAYED_TOT_MAX = None")
+            .replace("PSM_FAR_WINDOW_NS = (-1000.0, -200.0)", "PSM_FAR_WINDOW_NS = None")
+            .replace("PSM_PAIR_WINDOW_NS = (-1000.0, 500.0)", "PSM_PAIR_WINDOW_NS = None")
+            .replace("PSM_PROMPT_RF_WINDOW_NS = None", "PSM_PROMPT_RF_WINDOW_NS = (95.0, 98.5)"))
+    tag = _run(target, text)["tag_reco"]
+    for prop in ("DelayedTotMax", "FarWindowMin", "FarWindowMax", "PairWindowMin", "PairWindowMax"):
+        assert prop not in tag.__dict__
+    assert (tag.PromptPhaseMin, tag.PromptPhaseMax) == (95.0, 98.5)
+
+
+@pytest.mark.parametrize("old, new", [
+    ("PSM_DELAYED_TOT_MAX = 30.0", "PSM_DELAYED_TOT_MAX = 1.0"),
+    ("PSM_DELAYED_TOT_MAX = 30.0", "PSM_DELAYED_TOT_MAX = 0.5"),
+    ("PSM_PROMPT_RF_WINDOW_NS = None", "PSM_PROMPT_RF_WINDOW_NS = (98.5, 95.0)"),
+    ("PSM_TAGGED_STOP_LAYERS = (2, 3, 4)", "PSM_TAGGED_STOP_LAYERS = (3, 6)"),
+    ("PSM_TAGGED_STOP_LAYERS = (2, 3, 4)", "PSM_TAGGED_STOP_LAYERS = ('S3',)"),
+    ("PSM_FAR_WINDOW_NS = (-1000.0, -200.0)", "PSM_FAR_WINDOW_NS = (-1000.0, -100.0)"),
+    ("PSM_FAR_WINDOW_NS = (-1000.0, -200.0)", "PSM_FAR_WINDOW_NS = (-200.0, -1000.0)"),
+    ("PSM_PAIR_WINDOW_NS = (-1000.0, 500.0)", "PSM_PAIR_WINDOW_NS = (500.0, 500.0)"),
+])
+def test_an_inconsistent_stop_tag_rule_is_rejected(job_env, old, new):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text()
+    assert old in text
+    with pytest.raises(SystemExit, match=new.split(" = ")[0]):
+        _run(target, text.replace(old, new))
+
+
 @pytest.mark.parametrize("value", ["0.0", "-1.0", "20.0", "25.0"])
 def test_a_scint_window_that_is_empty_or_reaches_the_delayed_window_is_rejected(job_env, value):
     tmp_path, midas = job_env
