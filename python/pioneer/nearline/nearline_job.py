@@ -584,14 +584,6 @@ PSM_L_WINDOW_AFTER_NS = 160.0
 # far below PSM_DELAYED_WINDOW_NS[0], so a delayed pulse is never absorbed into
 # its prompt cluster. Revisit once the SMA channels carry time offsets.
 PSM_SCINT_WINDOW_NS = 5.0
-# Ignored channels (the channel map's ignore list: the parked degrader, the logic
-# and NIM copies) never seed a tracklet (IgnoredNeverSeed). They were never summed,
-# but in the unseeded mode each one still seeded: alone it made a tracklet with
-# every ToT sum 0 (about one tracklet in thirteen on pion-stop data), and just
-# before a particle it opened that particle's window. The 0-ToT tracklets then
-# counted as delayed matches of the tag. 1: the tracklets are those of a clustering
-# with the ignored hits removed first. S1-S5 are never ignored.
-PSM_DROP_IGNORED_SEEDS = 1
 # The L hits of each plane inside that window are clustered: two hits at most
 # this far apart in mm (global x/y, single linkage) are one cluster, and exactly
 # one cluster per plane makes the L pair, at the mean of the cluster's pixel
@@ -1694,7 +1686,6 @@ if PSM_RECO:
         seedOnL=int(PSM_SEED_ON_L), thrLPair=float(PSM_LPAIR_WINDOW_NS),
         thrMupix=float(PSM_L_WINDOW_BEFORE_NS), thrMupixUpper=float(PSM_L_WINDOW_AFTER_NS),
         thrScint=float(PSM_SCINT_WINDOW_NS),
-        IgnoredNeverSeed=int(PSM_DROP_IGNORED_SEEDS),
         aggregate=int(PSM_AGGREGATE),
         AggregatePromptOnly=int(PSM_AGGREGATE_PROMPT_ONLY),
         AggregateOwnersOnly=int(PSM_AGGREGATE_OWNERS_ONLY),

@@ -619,7 +619,6 @@ stay empty.
 | `PSM_SEED_ON_L` | `0` | Source runs only: seed tracklets on L1 tracker hits and pair each with the nearest L2 hit inside `PSM_LPAIR_WINDOW_NS`. A source on the tracker makes L1/L2 coincidences with no scintillator involved, and both scintillator-seeded modes attach L hits only to a scintillator cluster, so they reconstruct nothing from such a run. On in beam running it throws away the scintillator seed that defines a particle |
 | `PSM_LPAIR_WINDOW_NS` | `40.0` | L1 to L2 half-window in ns for that mode. The two-plane correlation from a source is much broader than the tracker time resolution, so this is generous on purpose; inert while `PSM_SEED_ON_L` is `0` |
 | `PSM_L_WINDOW_BEFORE_NS` / `PSM_L_WINDOW_AFTER_NS` | `100.0` / `160.0` | A scintillator cluster at `t` takes its L1/L2 hits from `[t - before, t + after)` (`thrMupix` / `thrMupixUpper`). Measured with the SMA and MuPix times on one base, t(MuPix) − t(S1) has a sharp edge at −90 ns, peaks at −52 ns and has a timewalk tail to about +150 ns, so the window opens just before the edge and closes past the tail. Too narrow and prompt tracklets lose their L pair; too wide and more of them see a second hit on one plane and are flagged ambiguous. The S-S clustering window is separate (`PSM_SCINT_WINDOW_NS`). An empty window is rejected by `check()` |
-| `PSM_DROP_IGNORED_SEEDS` | `1` | Ignored channels (the channel map's ignore list: the parked degrader, the logic and NIM copies; never S1-S5) never seed a tracklet (`IgnoredNeverSeed`). They were never summed, but each one seeded in the unseeded mode: alone it made a tracklet with every ToT sum 0 (about one in thirteen tracklets on pion-stop data, and these counted as delayed matches), and just before a particle it opened that particle's window. On, the tracklets are those of a clustering with the ignored hits removed first. The pairs a 0-ToT tracklet owned (~0.07 % of tracklets) go to another tracklet of the pair |
 | `PSM_SCINT_WINDOW_NS` | `5.0` | The S-S clustering window in ns (`thrScint`): in the unseeded mode a cluster takes the scintillator hits in `[t_seed, t_seed + window)`. One particle's S1-S5 hits must end up in one cluster. The SMA counters are not time-aligned yet (S3 and S5 come out about 2 ns before S1, S2 and S4, and SMA times are whole ns), so the algorithm's default of 2 ns splits most particles into two or three clusters. Each cluster takes the same L1/L2 pair (about half of all L pairs become copies), and the cluster holding S1 lacks the layers that went to the other one, so its stop layer and S5 veto are wrong. At 5 ns about 95 % of beam particles reach S5 instead of about 16 %, and the copies drop from ~54 % to ~15 % of L pairs (what is left comes from late hits 5-25 ns after the particle). The S1-gated phase-space histograms and the MuPix monitor do not change. `check()` rejects a window that is not positive or that reaches `PSM_DELAYED_WINDOW_NS[0]`, where it would absorb the delayed pulse into its prompt cluster. Revisit once the SMA channels carry time offsets |
 | `PSM_L_CLUSTER_DIST_MM` | `0.12` | The L hits of each plane inside the L window are clustered by distance (`lClusterDistMm`): two hits at most this far apart in mm, global x/y, are linked (single linkage, 1e-6 mm slack, no time condition beyond the window), and exactly one cluster per plane makes the L pair, placed at the mean of the cluster's pixel centres; more than one cluster on a plane flags the tracklet `lAmbiguous`. 0.12 takes the eight touching pixels at the 0.08 mm pitch (edge 0.08, corner 0.113 mm), also across a chip boundary, and nothing further. `0` switches the clustering off: then a second hit of a plane, even the neighbouring pixel of the same particle, makes the tracklet ambiguous, which is how the reco worked before. A plane with more than 64 hits in the window (the algorithm's `lClusterMaxHits`) is ambiguous without being clustered, which bounds the pairwise work |
 | `PSM_DROP_CROSSTALK_GHOSTS` | `False` | Before the one-cluster-per-plane test, drop MuPix crosstalk ghosts (`dropCrosstalkGhosts`): a cluster whose largest ToT is at most 3 and that has a pixel of higher ToT of another cluster of the window on the same chip, at most one column and 40-43, 81-85 or 122-127 rows away. Most of the ambiguity left after the clustering is this. Needs the `PIGeometrySvc` of `PSM_DECODE`, from which each hit's column and row are recovered; `check()` refuses it without. Off until decided |
@@ -818,6 +817,15 @@ pushd /software/root/install && source bin/thisroot.sh && popd
 source /simulation/docker/setenv.sh
 export PYTHONPATH=/workdir/beamtime2026_pie5/python:$PYTHONPATH
 ```
+
+The job expects `main` built optimised. `setup.sh` passes no build type, and
+`main`'s `CMakeLists.txt` then sets `CMAKE_BUILD_TYPE` to `RelWithDebInfo`
+(`-O2 -g -DNDEBUG`; it also replaces an empty value already in the cache). An
+explicit `-DCMAKE_BUILD_TYPE=...` in `CMAKE_FLAGS` still wins, which is how
+pinky and piana build (`software/versions.env` `MAIN_CMAKE_FLAGS`). A `main`
+older than this default compiles an empty build type without optimisation:
+the same output for about 2.3x the CPU per job. Check a build tree with
+`grep CMAKE_BUILD_TYPE: build/CMakeCache.txt`.
 
 ### Processing a file
 
@@ -1099,7 +1107,8 @@ updating a machine, pull and rebuild reco_testbeam (the library and its
 `conditions/`, which must carry `mupix_pixel_mask` and `mupix_timewalk`)
 **before** pulling beamtime2026_pie5. Build `main` as `RelWithDebInfo`: the
 command is in `software/README.md` (*Rebuild main on pinky*); `setup.sh` alone
-sets no build type and compiles without optimisation.
+sets no build type, which `main`'s `CMakeLists.txt` turns into `RelWithDebInfo`
+(an older `main` compiles it without optimisation, see *Running it*).
 
 The database default needs three things on the host **before** the job file
 that has it is pulled: a build with the PostgreSQL layer (libpq found when

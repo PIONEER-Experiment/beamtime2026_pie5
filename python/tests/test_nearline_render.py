@@ -343,7 +343,6 @@ def test_the_stop_tag_rules_reach_the_reco(job_env):
     tmp_path, midas = job_env
     target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
     job = _run(target)
-    assert job["all_reco"].IgnoredNeverSeed == 1
     tag = job["tag_reco"]
     assert (tag.WindowMin, tag.WindowMax, tag.DtBins) == (18.0, 115.0, 97)
     assert (tag.DelayedTotMin, tag.DelayedTotMax, tag.DelayedStopPlateOnly) == (10.0, 30.0, 1)
