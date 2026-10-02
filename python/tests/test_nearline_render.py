@@ -439,6 +439,8 @@ def test_the_lag_ids_can_take_a_tot_id(job_env):
      "PSM_SMA_NIM_NOMINAL_DELAY_NS"),
     ("PSM_SMA_LAG_VIDS = [2021", "PSM_SMA_LAG_VIDS = [2001, 2021", "2001 \\(the S1 reference\\)"),
     ("PSM_SMA_LAG_VIDS = [2021", "PSM_SMA_LAG_VIDS = [2014, 2021", "2014 \\(the RF role marker\\)"),
+    ("PSM_SMA_LAG_VIDS = [2021", "PSM_SMA_LAG_VIDS = [2002, 2021", "2002 \\(the parked id"),
+    ("PSM_SMA_LAG_VIDS = [2021", "PSM_SMA_LAG_VIDS = [2015, 2021", "2015 \\(the proton-current role marker\\)"),
     ("PSM_SMA_LAG_VIDS = [2021", "PSM_SMA_LAG_VIDS = [2021, 2021", "PSM_SMA_LAG_VIDS"),
     ("PSM_SMA_LAG_VIDS = [2021", "PSM_SMA_LAG_VIDS = ['2004', 2021", "PSM_SMA_LAG_VIDS"),
     ("PSM_SMA_LAG_VIDS = [2021, 2023, 2024, 2025, 2026]", "PSM_SMA_LAG_VIDS = 2024", "PSM_SMA_LAG_VIDS"),

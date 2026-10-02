@@ -112,11 +112,14 @@ The shape, using row 7 as the model. `iov` entry:
 ```
 
 becomes two entries (row 7 closed, row 8 new; use your own run number and say in the
-comment what each channel is, and whether the lower boundary is confirmed):
+comment what each channel is, and whether the lower boundary is confirmed). Row numbers here
+are the `row_id` of the git file only: the database numbers its rows itself (the git row 7 is
+a different id there), so a comment names another interval by its runs, `[a, b)`, never by
+its row:
 
 ```json
 { "row_id": 7, "tag": "bt2026-sma-run164", "run_start": 1015, "run_end": N_new, "is_active": true,
-  "created_by": "jjlab", "comment": "... closed at N_new by row 8." },
+  "created_by": "jjlab", "comment": "... Closed at N_new by the interval [N_new, open)." },
 { "row_id": 8, "tag": "bt2026-sma-run164", "run_start": N_new, "run_end": null, "is_active": true,
   "created_by": "<your login>", "comment": "From run N_new: <the layout of step 1 in words>. See elog <entry>." }
 ```

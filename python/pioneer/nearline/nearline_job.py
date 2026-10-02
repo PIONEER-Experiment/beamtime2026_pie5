@@ -1148,6 +1148,7 @@ def check():
                         "must be a dict {NIM copy id (int): nominal delay from S1 in ns (number, "
                         "|ns| < 2^19)}.")
     _lag_role_ids = {2001: "the S1 reference", 2003: "the voted S2", 2006: "the halved S5",
+                     2002: "the parked id, on several channels at once",
                      2014: "the RF role marker", 2015: "the proton-current role marker"}
     if not (isinstance(PSM_SMA_LAG_VIDS, (list, tuple))
             and all(isinstance(v, int) and not isinstance(v, bool) for v in PSM_SMA_LAG_VIDS)
