@@ -299,7 +299,6 @@ class interface:
                     WITH new_job AS (
                         INSERT INTO state.postproc_job (midas_run_id, client, job_type, status)
                         VALUES (%s, %s, %s, 'PENDING')
-                        ON CONFLICT DO NOTHING
                         RETURNING id
                     )
                     INSERT INTO state.postproc_depends (pp_job_id, depends_on)
@@ -425,6 +424,9 @@ class interface:
             all_files = self.find_files(run_ids = [run_id], extensions = ['mid.lz4'])
             for f in all_files:
                 self.schedule_postproc_job_on_file(f['id'], 'farline', 'farline', [remote_job_id])
+
+            # farline backup SSD->HDD
+            self.schedule_postproc_job(run_id, 'backup', 'farline', [remote_job_id])
 
         return True
 

@@ -263,7 +263,10 @@ class NearlineDaemon:
             if job_type == "backup":
                 job_cfg['destination_path'] = str(self.backup_path)
             elif job_type == "remote":
-                job_cfg['destination_path'] = str(self.remote_path)
+                if (job_cfg.get('producer', None) == "nearline"):
+                    job_cfg['destination_path'] = str(f"{self.remote_path}/run{job_cfg['midas_run_number']:05d}")
+                else:
+                    job_cfg['destination_path'] = str(f"{self.remote_path}")
             elif job_type == "cleanup":
                 job_cfg['destination_path'] = None
 
