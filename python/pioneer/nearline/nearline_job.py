@@ -293,10 +293,15 @@ WD_SCALER_FILL_STALE = False
 # MuTrig RAW readout channels (chipid*32+channel, read before the map lookup)
 # carrying the RF and the beam current. These follow the SMA board's cabling,
 # which the open interval of mutrig_channel_map in bt2026_psm_readout_map.json
-# documents: RF gated by S1 on 6, proton current on 7. None drops /Event/rf
-# resp. histograms/musip/current.
+# documents: RF gated by S1 on 6. None drops /Event/rf resp.
+# histograms/musip/current. The proton current left the SMA (the WaveDREAM
+# scaler counts it), and raw channel 7 carries S3 TOT since the recabling with
+# NIM copies (see the open mutrig_channel_map interval). So the current channel
+# is off: 7 here would consume every S3 TOT word as a current pulse before the
+# map is read. Without musip/current, combine_files joins with factor 1 (and
+# says so) until the scaler-based normaliser is deployed.
 PSM_RF_CHANNEL = 6
-PSM_CURRENT_CHANNEL = 7
+PSM_CURRENT_CHANNEL = None
 # MuPix pixel pitch in mm; a wrong pitch scales every position and every slope.
 PSM_QUAD_PIXEL_PITCH = 0.08
 # MuPix timestamp bin width in ns. There is no MuTrig counterpart any more: the
