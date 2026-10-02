@@ -426,6 +426,9 @@ class interface:
             for f in all_files:
                 self.schedule_postproc_job_on_file(f['id'], 'farline', 'farline', [remote_job_id])
 
+            # farline backup SSD->HDD
+            self.schedule_postproc_job(run_id, 'backup', 'farline', [remote_job_id])
+
         return True
 
     def add_new_configuration(self, table : str, values : dict, comment : str = "Mystery Configuration") -> int | None:
