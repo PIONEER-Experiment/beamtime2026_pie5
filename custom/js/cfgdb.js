@@ -284,7 +284,7 @@ function configTableHtml(configuration_tables) {
    if (!configuration_tables) return '<div class="rundb-note">waiting for the first answer&hellip;</div>';
 
    // Render target positions
-   const target_header = "<tr><th>config id</th><th>comment</th><th>select</th><th>seq_id</th><th>xpos</th><th>ypos</th></tr>"
+   const target_header = "<tr><th>config id</th><th>select</th><th>seq_id</th><th>comment</th><th>xpos</th><th>ypos</th></tr>"
    const target_body = configuration_tables.target_positions.map(function(row) {
       const do_not_use_cell = row.do_not_use
             ? " --- " : '<input type="checkbox" class="config-ckbx-target" value="' + row.config_type + ":" + row.config_id + '">';
@@ -302,7 +302,7 @@ function configTableHtml(configuration_tables) {
    });
 
    // Render target positions
-   const degrader_header = '<tr><th>config id</th><th>comment</th><th>select</th><th>seq_id</th><th>xpos</th></tr>'
+   const degrader_header = '<tr><th>config id</th><th>select</th><th>seq_id</th><th>comment</th><th>xpos</th></tr>'
    const degrader_body = configuration_tables.degrader_positions.map(function(row) {
       const do_not_use_cell = row.do_not_use
             ? " --- " : '<input type="checkbox" class="config-ckbx-degrader"  value="' + row.config_type + ":" + row.config_id + '">';
