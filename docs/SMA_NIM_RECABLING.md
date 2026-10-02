@@ -38,22 +38,24 @@ go on.
 ## 1. Record the new layout
 
 Read it off the cables, not from memory. For every SMA input that carries a signal write
-one line: raw channel, what it is, detector id. Example (the layout of the current
-development runs, raw-map row 6):
+one line: raw channel, what it is, detector id. Example (the layout with a NIM copy of
+every counter, raw-map row 7, open-ended from run 1015):
 
 | raw channel | signal | id |
 |---|---|---|
 | 1 | S1 TOT | 2001 |
 | 2 | S2 TOT | 2003 |
-| 3 | S3 TOT | 2004 |
+| 3 | S1 NIM copy (S1L) | 2021 |
 | 4 | S4 TOT | 2005 |
 | 5 | S5 TOT | 2006 |
 | 6 | RF gated by S1 | 2014 (RF marker) |
-| 7 | S3 NIM copy (S3L) | 2024 |
+| 7 | S3 TOT | 2004 |
 | 8 | WaveDREAM trigger copy | 2011 |
-| 9 | pi-stop in S2/S3/S4 logic | 2012 |
-| 10 | S4 NIM copy (S4L) | 2025 |
-| 0, 11-15 | nothing (parked) | 2002 |
+| 9 | S2 NIM copy (S2L) | 2023 |
+| 10 | S3 NIM copy (S3L) | 2024 |
+| 11 | S4 NIM copy (S4L) | 2025 |
+| 12 | S5 NIM copy (S5L) | 2026 |
+| 0, 13-15 | nothing (parked) | 2002 |
 
 Rules:
 
@@ -85,63 +87,66 @@ rate effects and gives the S1 reference. Either is fine for step 4.
 You are done when the raw file `run0NNNN_00000.mid.lz4` exists in the inbox
 (`scratch/online/` on the laptop, `/home/pioneer/inbox/` on pinky and piana).
 
-## 3. Add raw-map row 7 at that run
+## 3. Add a raw-map row at that run
 
 In the working copy edit `scratch/sma-nim-pairing/recable/conditions/bt2026_psm_readout_map.json`,
 table `mutrig_channel_map`. Two edits:
 
-1. Close the last interval (row 6, currently open) at `N_new`. `run_end` is exclusive, so
-   run `N_new` itself belongs to the new row. In `iov`, row 6 changes
+1. Close the last interval (row 7, currently open) at `N_new`. `run_end` is exclusive, so
+   run `N_new` itself belongs to the new row. In `iov`, row 7 changes
    `"run_end": null` to `"run_end": N_new`.
 2. Add a new interval to `iov` and a payload with the same row id to `values_by_iov`.
 
-The shape, using row 6 as the model. `iov` entry:
+The shape, using row 7 as the model. `iov` entry:
 
 ```json
 {
-  "row_id": 6,
+  "row_id": 7,
   "tag": "bt2026-sma-run164",
-  "run_start": 882,
+  "run_start": 1015,
   "run_end": null,
   "is_active": true,
   "created_by": "jjlab",
-  "comment": "Open-ended from run 882: ... 7 = S3L (2024) ... 10 = S4L (2025) ..."
+  "comment": "Open-ended from run 1015: ... 3 = S1L (2021) ... 7 = S3 TOT (2004) ... 9-12 = S2L-S5L ..."
 }
 ```
 
-becomes two entries (row 6 closed, row 7 new; use your own run number and say in the
+becomes two entries (row 7 closed, row 8 new; use your own run number and say in the
 comment what each channel is, and whether the lower boundary is confirmed):
 
 ```json
-{ "row_id": 6, "tag": "bt2026-sma-run164", "run_start": 882, "run_end": N_new, "is_active": true,
-  "created_by": "jjlab", "comment": "... closed at N_new by row 7." },
-{ "row_id": 7, "tag": "bt2026-sma-run164", "run_start": N_new, "run_end": null, "is_active": true,
+{ "row_id": 7, "tag": "bt2026-sma-run164", "run_start": 1015, "run_end": N_new, "is_active": true,
+  "created_by": "jjlab", "comment": "... closed at N_new by row 8." },
+{ "row_id": 8, "tag": "bt2026-sma-run164", "run_start": N_new, "run_end": null, "is_active": true,
   "created_by": "<your login>", "comment": "From run N_new: <the layout of step 1 in words>. See elog <entry>." }
 ```
 
-and `values_by_iov["6"]` (below) gets a sibling `values_by_iov["7"]` with one entry per
+and `values_by_iov["7"]` (below) gets a sibling `values_by_iov["8"]` with one entry per
 raw channel 0-15:
 
 ```json
-"6": [
+"7": [
   {"channel_id": 0,  "vid": 2002}, {"channel_id": 1,  "vid": 2001},
-  {"channel_id": 2,  "vid": 2003}, {"channel_id": 3,  "vid": 2004},
+  {"channel_id": 2,  "vid": 2003}, {"channel_id": 3,  "vid": 2021},
   {"channel_id": 4,  "vid": 2005}, {"channel_id": 5,  "vid": 2006},
-  {"channel_id": 6,  "vid": 2014}, {"channel_id": 7,  "vid": 2024},
-  {"channel_id": 8,  "vid": 2011}, {"channel_id": 9,  "vid": 2012},
-  {"channel_id": 10, "vid": 2025}, {"channel_id": 11, "vid": 2002},
-  {"channel_id": 12, "vid": 2002}, {"channel_id": 13, "vid": 2002},
+  {"channel_id": 6,  "vid": 2014}, {"channel_id": 7,  "vid": 2004},
+  {"channel_id": 8,  "vid": 2011}, {"channel_id": 9,  "vid": 2023},
+  {"channel_id": 10, "vid": 2024}, {"channel_id": 11, "vid": 2025},
+  {"channel_id": 12, "vid": 2026}, {"channel_id": 13, "vid": 2002},
   {"channel_id": 14, "vid": 2002}, {"channel_id": 15, "vid": 2002}
 ]
 ```
 
-Start from a copy of the row 6 list and change only what moved. Check:
+The row numbers here are the JSON file's; the database numbers its rows itself. If the
+cabling you recorded in step 1 is exactly row 7's, there is nothing to add: go to step 4.
+Start from a copy of the row 7 list and change only
+what moved. Check:
 
 * Exactly one raw channel per marker (2014, 2015); none is fine, it means the role is absent.
 * No NIM id (2021, 2023-2026) twice.
 * The ids you used exist in `bt2026_psm_geometry.json` (2021 and 2023-2026 do; a new
   pseudo-id would need a geometry row first).
-* Row ids are unique and `run_start` of 7 equals `run_end` of 6.
+* Row ids are unique and `run_start` of 8 equals `run_end` of 7.
 
 Quick syntax and overlap check:
 
@@ -149,7 +154,7 @@ Quick syntax and overlap check:
 python3 -c "import json;d=json.load(open('scratch/sma-nim-pairing/recable/conditions/bt2026_psm_readout_map.json'))['mutrig_channel_map'];print([(r['row_id'],r['run_start'],r['run_end']) for r in d['iov']])"
 ```
 
-Row 7 must appear, row 6 must end where 7 starts.
+Row 8 must appear, row 7 must end where 8 starts.
 
 ## 4. Run the nearline job by hand on one subrun
 
@@ -192,7 +197,7 @@ Fast, no conditions needed. Give the layout of step 1 as `channel=id` pairs:
 cd psm-analysis-josh-2026/sma-nim-pairing
 systemd-run --user --scope -p MemoryMax=4G -q ~/miniconda3/envs/pion314/bin/python -m smanim calibrate \
     ../../scratch/online/run0NNNN_00000.mid.lz4 \
-    --channels 1=2001,2=2003,3=2004,4=2005,5=2006,6=2014,7=2024,10=2025 \
+    --channels 1=2001,2=2003,3=2021,4=2005,5=2006,6=2014,7=2004,9=2023,10=2024,11=2025,12=2026 \
     --counters S3,S4 \
     --out ../../scratch/sma-nim-pairing/recable/calib-raw
 ```
@@ -275,8 +280,11 @@ the working copy of `bt2026_psm_readout_map.json`, table `sma_time_alignment`:
   {"channel_id": 2004, "t_offset_ns": 0.0},
   {"channel_id": 2005, "t_offset_ns": 0.0},
   {"channel_id": 2006, "t_offset_ns": 0.0},
+  {"channel_id": 2021, "t_offset_ns": <measured, ns>},
+  {"channel_id": 2023, "t_offset_ns": <measured, ns>},
   {"channel_id": 2024, "t_offset_ns": <measured, ns>},
-  {"channel_id": 2025, "t_offset_ns": <measured, ns>}
+  {"channel_id": 2025, "t_offset_ns": <measured, ns>},
+  {"channel_id": 2026, "t_offset_ns": <measured, ns>}
 ]
 ```
 
@@ -317,8 +325,9 @@ python3 condtool.py --conninfo $C resolve sma_time_alignment --run <N_new>
 ```
 
 A load that was prepared from an older export is refused (stale fingerprint); export
-again and redo the edit. The `resolve` lines must name row 7 and row 2 for run `N_new` and
-the previous rows for `N_old`.
+again and redo the edit. The `resolve` lines must show the new intervals (`run_start`
+`N_new`) for run `N_new` and the previous ones for `N_old`; the database's row ids are
+its own and differ from the JSON file's.
 
 Also copy the two edits into the git copy
 (`main/reco_testbeam/conditions/bt2026_psm_readout_map.json`) so the JSON and the

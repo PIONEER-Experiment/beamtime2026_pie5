@@ -1088,7 +1088,9 @@ the import of `pi_psmalg_expConf`), and the layer reads `mupix_timewalk`, which 
 `conditions/` does not carry (the job then stops at `initialize()`). When
 updating a machine, pull and rebuild reco_testbeam (the library and its
 `conditions/`, which must carry `mupix_pixel_mask` and `mupix_timewalk`)
-**before** pulling beamtime2026_pie5.
+**before** pulling beamtime2026_pie5. Build `main` as `RelWithDebInfo`: the
+command is in `software/README.md` (*Rebuild main on pinky*); `setup.sh` alone
+sets no build type and compiles without optimisation.
 
 The database default needs three things on the host **before** the job file
 that has it is pulled: a build with the PostgreSQL layer (libpq found when

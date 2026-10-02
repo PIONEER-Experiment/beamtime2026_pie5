@@ -148,6 +148,37 @@ only if that fails is the old tree put back; while the step runs, the stack is
 incomplete. `rpms` and `root` build a new tree next to the old one and swap it
 in at the end.
 
+### Rebuild main on pinky
+
+Pinky builds `main` in place, in `~/bt2026/reco/repo`, with the environment of
+its `~/.bashrc` (the same as `software/env.sh`) and the flags of
+`MAIN_CMAKE_FLAGS`. A from-scratch rebuild (`-r`), as after a change of the
+flags:
+
+```bash
+cd ~/bt2026/reco/repo
+CMAKE_FLAGS="-DBUILD_MC=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo" ./setup.sh -r -b -e -o -t
+ctest --test-dir build --output-on-failure
+```
+
+Without `-r` it rebuilds what changed, as after a pull of `main` and its
+submodules. `verify` on piana compares main's CMake cache and its compile and
+link flags with pinky's (`reference/cmake_la_main.txt`,
+`cmake_extra_main.txt`, `makeflags_main.txt`), so after a rebuild on pinky that
+changes them (new flags, or new sources in a submodule) recapture the three
+files there, read only:
+
+```bash
+cd ~/bt2026/beamtime2026_pie5
+for w in cmake-la cmake-extra makeflags; do
+    python3 software/parity.py --host pinky $w ~/bt2026/reco/repo/build > /tmp/${w//-/_}_main.txt
+done
+```
+
+copy them into `software/reference/`, rebuild piana's main, run `verify`, and
+review the remaining `*_main.txt.diff` before replacing the accepted ones in
+`reference-accepted/`.
+
 ### What verify checks
 
 `verify` prints a table and writes it to `verify/verify.txt`:
@@ -165,7 +196,7 @@ in at the end.
 * every library of Gaudi, MIDAS and main finds all its dependencies (`ldd`);
 * `ctest` in main's build. A failing test is a `WARN` row, not a failure: the
   tests are main's, not a parity criterion, and pinky has never run them
-  (its `build/Testing/` is empty). `psm_reco` fails in this unoptimised build:
+  (its `build/Testing/` is empty). `psm_reco` fails in an unoptimised build:
   `test_cluster_ghosts` (`reco_testbeam/tests/test_psm_reco.cpp:1662-1677`)
   reads `lp.c1.lead`, a pointer into a hit vector that the test's lambda has
   already destroyed. It passes in an optimised build by luck. A bug in the
@@ -195,9 +226,10 @@ sha256 manifest of every file.
 
 **GSL, CLHEP, MIDAS, Gaudi, main** are built from the same tarballs and
 commits, with the same CMake options as pinky's `CMakeCache.txt`, the same
-`/usr/bin/gcc` 16.2.1 and cmake 4.3.0. As on pinky, Gaudi and main are built
-with an empty `CMAKE_BUILD_TYPE` (no `-O`), and only Gaudi writes a
-`compile_commands.json` (MIDAS switches its own on).
+`/usr/bin/gcc` 16.2.1 and cmake 4.3.0. As on pinky, Gaudi is built with an
+empty `CMAKE_BUILD_TYPE` (no `-O`) and main with `RelWithDebInfo` (`-O2 -g
+-DNDEBUG`, `MAIN_CMAKE_FLAGS`), and only Gaudi writes a `compile_commands.json`
+(MIDAS switches its own on).
 
 **Fedora packages.** The builds use 109 of pinky's RPMs (what their CMake
 caches, compiler dependency files and link lines resolve under `/usr`, and what
