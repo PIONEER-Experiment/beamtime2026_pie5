@@ -354,6 +354,14 @@ PSM_SMA_NIM_LAG = True
 # 0. Empty: S4L's ch 10 copy is a logic output with several delays to S4 and stays
 # uncalibrated, and S3L sits within a few ns of S1.
 PSM_SMA_NIM_NOMINAL_DELAY_NS = {}
+# The detector ids the lag above is measured and removed for (the decoder's
+# fineOffsetLagVids): the NIM copies S1L..S5L. An id the run's map does not cable
+# is inactive. A TOT id may be added if its channel turns out to carry the same
+# per-frame fault, e.g. 2004 (S3 TOT, on the channel the S3L copy used before
+# every counter got a NIM copy). Not the S1 reference (2001), the voted S2 (2003),
+# the halved S5 (2006) or a role marker (2014, 2015). Changes the hits, so not a
+# light switch.
+PSM_SMA_LAG_VIDS = [2021, 2023, 2024, 2025, 2026]
 # Frame 0 of subrun 0 holds a stale replay of the previous run. With this on, the
 # decoder drops the first H000 bank of the job when the input file is subrun 0
 # (the second number in the file name, run00790_00000); other subruns and a name
@@ -1139,6 +1147,17 @@ def check():
         problems.append(f"PSM_SMA_NIM_NOMINAL_DELAY_NS is {PSM_SMA_NIM_NOMINAL_DELAY_NS!r}: it "
                         "must be a dict {NIM copy id (int): nominal delay from S1 in ns (number, "
                         "|ns| < 2^19)}.")
+    _lag_role_ids = {2001: "the S1 reference", 2003: "the voted S2", 2006: "the halved S5",
+                     2014: "the RF role marker", 2015: "the proton-current role marker"}
+    if not (isinstance(PSM_SMA_LAG_VIDS, (list, tuple))
+            and all(isinstance(v, int) and not isinstance(v, bool) for v in PSM_SMA_LAG_VIDS)
+            and len(set(PSM_SMA_LAG_VIDS)) == len(PSM_SMA_LAG_VIDS)):
+        problems.append(f"PSM_SMA_LAG_VIDS is {PSM_SMA_LAG_VIDS!r}: it must be a list of distinct "
+                        "detector ids (int), normally the NIM copies [2021, 2023, 2024, 2025, 2026].")
+    elif any(v in _lag_role_ids for v in PSM_SMA_LAG_VIDS):
+        taken = ", ".join(f"{v} ({_lag_role_ids[v]})" for v in PSM_SMA_LAG_VIDS if v in _lag_role_ids)
+        problems.append(f"PSM_SMA_LAG_VIDS lists {taken}: that id has its own role in the fine-time "
+                        "correction and cannot also be a lag id.")
     def _sma_channel_ok(value):
         return (value is None or value == "off"
                 or (isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 15))
@@ -1319,9 +1338,9 @@ if PSM_DECODE:
     musip.correctFineOffsets = bool(PSM_SMA_FINE_OFFSETS)
     # The correction's roles are the decoder's defaults, by detector id through
     # the run's raw map: S1 the reference, S2 voted, S5 halved, the RF role
-    # snapped, every cabled NIM copy a lag channel. Only the lag is a job knob.
-    if not PSM_SMA_NIM_LAG:
-        musip.fineOffsetLagVids = []
+    # snapped, the lag ids (PSM_SMA_LAG_VIDS, the NIM copies) lag channels. Only
+    # the lag is a job knob.
+    musip.fineOffsetLagVids = [int(v) for v in PSM_SMA_LAG_VIDS] if PSM_SMA_NIM_LAG else []
     if PSM_SMA_NIM_NOMINAL_DELAY_NS:
         musip.fineOffsetLagNominalNs = {int(k): float(v)
                                         for k, v in PSM_SMA_NIM_NOMINAL_DELAY_NS.items()}
@@ -1705,6 +1724,7 @@ print(f"[nearline] sma pair   PSM_SMA_NIM_PAIRING={PSM_SMA_NIM_PAIRING}"
       f" PSM_SMA_OFFSET_OVERRIDE_NS={PSM_SMA_OFFSET_OVERRIDE_NS or 'none'}")
 print(f"[nearline] sma fine   PSM_SMA_FINE_OFFSETS={PSM_SMA_FINE_OFFSETS}"
       f" PSM_SMA_NIM_LAG={PSM_SMA_NIM_LAG}"
+      f" PSM_SMA_LAG_VIDS={list(PSM_SMA_LAG_VIDS)}"
       f" PSM_SMA_NIM_NOMINAL_DELAY_NS={PSM_SMA_NIM_NOMINAL_DELAY_NS or 'none'}"
       f" PSM_SMA_SKIP_STALE_FIRST_FRAME={PSM_SMA_SKIP_STALE_FIRST_FRAME} subrun={_SUBRUN}")
 print(f"[nearline] EvtMax     {EVT_MAX}")

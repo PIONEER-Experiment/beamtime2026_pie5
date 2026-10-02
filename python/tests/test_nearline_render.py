@@ -397,8 +397,10 @@ def test_the_nim_lag_is_on_with_the_decoders_roles_by_default(job_env):
     job = _run(target)
     assert job["PSM_SMA_NIM_LAG"] is True and job["PSM_SMA_NIM_NOMINAL_DELAY_NS"] == {}
     musip = job["musip"].__dict__
-    # the roles by detector id are the decoder's defaults; no raw-channel lists
-    for prop in ("fineOffsetLagVids", "fineOffsetLagNominalNs", "fineOffsetReferenceVid",
+    # the lag ids are the NIM copies, set explicitly from PSM_SMA_LAG_VIDS
+    assert musip["fineOffsetLagVids"] == [2021, 2023, 2024, 2025, 2026]
+    # the other roles by detector id are the decoder's defaults; no raw-channel lists
+    for prop in ("fineOffsetLagNominalNs", "fineOffsetReferenceVid",
                  "fineOffsetVoteVids", "fineOffsetHalvedVids", "fineOffsetVoteChannels",
                  "fineOffsetHalvedChannels", "fineOffsetLagChannels", "fineOffsetReferenceChannel"):
         assert prop not in musip, prop
@@ -408,6 +410,18 @@ def test_the_nim_lag_is_on_with_the_decoders_roles_by_default(job_env):
     assert musip.fineOffsetLagVids == []
     assert musip.fineOffsetLagNominalNs == {2025: 42.0}
     assert isinstance(musip.fineOffsetLagNominalNs[2025], float)
+
+
+def test_the_lag_ids_can_take_a_tot_id(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text().replace("PSM_SMA_LAG_VIDS = [2021, 2023, 2024, 2025, 2026]",
+                                      "PSM_SMA_LAG_VIDS = [2021, 2023, 2024, 2025, 2026, 2004]")
+    job = _run(target, text)
+    assert job["musip"].fineOffsetLagVids == [2021, 2023, 2024, 2025, 2026, 2004]
+    # the lag switch still wins
+    text = text.replace("PSM_SMA_NIM_LAG = True", "PSM_SMA_NIM_LAG = False")
+    assert _run(target, text)["musip"].fineOffsetLagVids == []
 
 
 @pytest.mark.parametrize("old, new, match", [
@@ -423,6 +437,11 @@ def test_the_nim_lag_is_on_with_the_decoders_roles_by_default(job_env):
      "PSM_SMA_NIM_NOMINAL_DELAY_NS"),
     ("PSM_SMA_NIM_NOMINAL_DELAY_NS = {}", "PSM_SMA_NIM_NOMINAL_DELAY_NS = [(2025, 42)]",
      "PSM_SMA_NIM_NOMINAL_DELAY_NS"),
+    ("PSM_SMA_LAG_VIDS = [2021", "PSM_SMA_LAG_VIDS = [2001, 2021", "2001 \\(the S1 reference\\)"),
+    ("PSM_SMA_LAG_VIDS = [2021", "PSM_SMA_LAG_VIDS = [2014, 2021", "2014 \\(the RF role marker\\)"),
+    ("PSM_SMA_LAG_VIDS = [2021", "PSM_SMA_LAG_VIDS = [2021, 2021", "PSM_SMA_LAG_VIDS"),
+    ("PSM_SMA_LAG_VIDS = [2021", "PSM_SMA_LAG_VIDS = ['2004', 2021", "PSM_SMA_LAG_VIDS"),
+    ("PSM_SMA_LAG_VIDS = [2021, 2023, 2024, 2025, 2026]", "PSM_SMA_LAG_VIDS = 2024", "PSM_SMA_LAG_VIDS"),
 ])
 def test_a_bad_nim_lag_knob_is_rejected(job_env, old, new, match):
     tmp_path, midas = job_env
