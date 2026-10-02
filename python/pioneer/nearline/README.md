@@ -1304,10 +1304,13 @@ grep -c sma_time_alignment ~/bt2026/conddb-snapshots/latest/bt2026_psm_readout_m
 A snapshot taken before the conditions load that put the SMA role markers (RF,
 proton current) into the raw-channel map is not valid input for this job. The
 same load added the `sma_time_alignment` table, so a snapshot without it (the
-`grep` above prints 0) is too old. With such a snapshot the job still runs,
-but it writes no `/Event/rf` and no proton current on any run, and the decoder
-logs a WARNING that "the conditions do not know the RF role marker". Use a
-newer snapshot, or wait for the database.
+`grep` above prints 0) is too old. With such a snapshot the decoder logs a
+WARNING that "the conditions do not know the RF role marker", and the job stops
+at `initialize()` with "Pairs entry 2001 -> 2021: id 2021 has no geometry
+volume" (the old geometry has no NIM-copy ids). Do not try to get past that
+with job settings: the old raw-channel map has no RF or proton-current role, so
+a job that did run on it would write no `/Event/rf` and no proton current on
+any run. Use a newer snapshot, or wait for the database.
 
 Then, in the environment the daemon runs in (same `PATH`, `PYTHONPATH` and
 `NL_CONDITIONS_DIR`). `NL_CONDITIONS_DIR` is whatever the daemon was started
