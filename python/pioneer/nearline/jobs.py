@@ -75,7 +75,9 @@ class BaseJob:
         self.logpath.mkdir(parents = True, exist_ok= True)
 
         cmd = self.build_command()
-        if 'midas_run_number' in self.config.keys():
+        if self.infile:
+            log_name = self.logpath / f"run{self.infile['filebase']:05d}_{self.config['job_type']}.log"
+        elif 'midas_run_number' in self.config.keys():
             log_name = self.logpath / f"run{self.config['midas_run_number']:05d}_{self.config['job_type']}.log"
         elif self.config.get("job_type", "") == "merge":
             log_name = self.logpath / f"seq{self.config['id']:05d}_{self.config['job_type']}.log"
