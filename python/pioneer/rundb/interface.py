@@ -299,6 +299,7 @@ class interface:
                     WITH new_job AS (
                         INSERT INTO state.postproc_job (midas_run_id, client, job_type, status)
                         VALUES (%s, %s, %s, 'PENDING')
+                        ON CONFLICT DO NOTHING
                         RETURNING id
                     )
                     INSERT INTO state.postproc_depends (pp_job_id, depends_on)
