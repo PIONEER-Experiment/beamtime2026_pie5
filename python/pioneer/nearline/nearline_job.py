@@ -582,7 +582,8 @@ PSM_DISTANCE_L12 = 30.0
 # the delayed-candidate rules below: without PSM_DELAYED_TOT_MIN the 0-ToT pseudo
 # clusters at +43 / +83 ns fill the wider window.
 PSM_DELAYED_WINDOW_NS = (18.0, 115.0)
-# Bins of the dt and sb histograms over that window: one per ns.
+# Bins of the dt and sb histograms over that window: one per ns, so it must equal
+# the window width in ns (check() enforces it; change both together).
 PSM_DELAYED_DT_BINS = 97
 # Delayed candidates. The delayed summed ToT (s1tot + ... + s5tot of the candidate
 # cluster, exp_tagged delayedTot) must lie in [PSM_DELAYED_TOT_MIN,
@@ -615,8 +616,12 @@ PSM_PROMPT_RF_WINDOW_NS = None
 PSM_TAGGED_STOP_LAYERS = (2, 3, 4)
 # Far accidental window in ns, [MIN, MAX) before the prompt: the candidates in it
 # are counted per prompt (exp_tagged nFar) and histogrammed ("far", every
-# candidate). Scaled by the signal width over this width it is the accidental
-# expectation of the signal window. The mirrored sideband (-MAX, -MIN] of the
+# candidate, the tagged stop layers pooled). Scaled by the signal width over this
+# width it estimates the UNCORRELATED accidentals of the signal window only: the
+# decay positron of the prompt's own muon adds a correlated, slowly falling term
+# of about the same size at 18-115 ns, so a far-subtracted count is not
+# background-free. Subtract per stop layer (dt_all_stop): a layer blind after its
+# own hit (S2 for now) fills the far window but not the signal. The mirrored sideband (-MAX, -MIN] of the
 # window under-counts the accidentals: the dead time after a hit and the blind
 # S2 channel deplete the region just before the prompt. Must lie below
 # -PSM_DELAYED_WINDOW_NS[1]. None: off.
@@ -1223,6 +1228,10 @@ def check():
         problems.append(f"PSM_DELAYED_TOT_MAX ({PSM_DELAYED_TOT_MAX}) must be larger than "
                         f"PSM_DELAYED_TOT_MIN ({PSM_DELAYED_TOT_MIN}), or None for no upper edge: "
                         "the delayed ToT band [MIN, MAX) would take no candidate.")
+    _dt_width = float(PSM_DELAYED_WINDOW_NS[1]) - float(PSM_DELAYED_WINDOW_NS[0])
+    if PSM_RECO and not (isinstance(PSM_DELAYED_DT_BINS, int) and PSM_DELAYED_DT_BINS == _dt_width):
+        problems.append(f"PSM_DELAYED_DT_BINS ({PSM_DELAYED_DT_BINS!r}) must be the width of "
+                        f"PSM_DELAYED_WINDOW_NS in ns ({_dt_width:g}): dt and sb have one bin per ns.")
     if PSM_RECO and PSM_PROMPT_RF_WINDOW_NS is not None and not (
             float(PSM_PROMPT_RF_WINDOW_NS[0]) < float(PSM_PROMPT_RF_WINDOW_NS[1])):
         problems.append(f"PSM_PROMPT_RF_WINDOW_NS {PSM_PROMPT_RF_WINDOW_NS} is empty; give [MIN, MAX) "

@@ -381,7 +381,10 @@ def test_the_optional_stop_tag_rules_can_be_switched_off_or_on(job_env):
     ("PSM_FAR_WINDOW_NS = (-1000.0, -200.0)", "PSM_FAR_WINDOW_NS = (-1000.0, -100.0)"),
     ("PSM_FAR_WINDOW_NS = (-1000.0, -200.0)", "PSM_FAR_WINDOW_NS = (-200.0, -1000.0)"),
     ("PSM_PAIR_WINDOW_NS = (-1000.0, 500.0)", "PSM_PAIR_WINDOW_NS = (500.0, 500.0)"),
+    ("PSM_DELAYED_DT_BINS = 97", "PSM_DELAYED_DT_BINS = 25"),
+    ("PSM_DELAYED_DT_BINS = 97", "PSM_DELAYED_DT_BINS = 97.0"),
 ])
+
 def test_an_inconsistent_stop_tag_rule_is_rejected(job_env, old, new):
     tmp_path, midas = job_env
     target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
@@ -389,6 +392,18 @@ def test_an_inconsistent_stop_tag_rule_is_rejected(job_env, old, new):
     assert old in text
     with pytest.raises(SystemExit, match=new.split(" = ")[0]):
         _run(target, text.replace(old, new))
+
+
+def test_the_dt_bins_follow_the_delayed_window(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = (target.read_text().replace("PSM_DELAYED_WINDOW_NS = (18.0, 115.0)", "PSM_DELAYED_WINDOW_NS = (20.0, 70.0)")
+            .replace("PSM_DELAYED_DT_BINS = 97", "PSM_DELAYED_DT_BINS = 50"))
+    tag = _run(target, text)["tag_reco"]
+    assert (tag.WindowMin, tag.WindowMax, tag.DtBins) == (20.0, 70.0, 50)
+    with pytest.raises(SystemExit, match="PSM_DELAYED_DT_BINS"):
+        _run(target, target.read_text().replace("PSM_DELAYED_WINDOW_NS = (18.0, 115.0)",
+                                                "PSM_DELAYED_WINDOW_NS = (20.0, 70.0)"))
 
 
 @pytest.mark.parametrize("value", ["0.0", "-1.0", "20.0", "25.0"])
