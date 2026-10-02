@@ -284,15 +284,17 @@ function configTableHtml(configuration_tables) {
    if (!configuration_tables) return '<div class="rundb-note">waiting for the first answer&hellip;</div>';
 
    // Render target positions
-   const target_header = "<tr><th>config id</th><th>comment</th><th>select</th><th>seq_id</th><th>xpos</th><th>ypos</th></tr>"
+   const target_header = "<tr><th>config id</th><th>select</th><th>seq_id</th><th>comment</th><th>xpos</th><th>ypos</th></tr>"
    const target_body = configuration_tables.target_positions.map(function(row) {
       const do_not_use_cell = row.do_not_use
             ? " --- " : '<input type="checkbox" class="config-ckbx-target" value="' + row.config_type + ":" + row.config_id + '">';
-      return "<tr id=cfg_row" + row.config_id + ">" +
+      return "<tr id=cfg_row" + row.config_id + "' data-values='" +
+                  JSON.stringify(row.values || {}).replace(/'/g, "&#39;") +
+                  "'>" +
               "<td>" + row.config_id + "</td>" +
-              "<td>" + (row.comment ? row.comment : " --- ") + "</td>" +
               "<td>" + do_not_use_cell + "</td>" +
               "<td>" + (row.values ? row.values.seq_id : "---") + "</td>" +
+              "<td>" + (row.comment ? row.comment : " --- ") + "</td>" +
               "<td>" + (row.values ? row.values.xpos : "---") + "</td>" +
               "<td>" + (row.values ? row.values.ypos : "---") + "</td>" +
               "</tr>"
@@ -300,15 +302,17 @@ function configTableHtml(configuration_tables) {
    });
 
    // Render target positions
-   const degrader_header = '<tr><th>config id</th><th>comment</th><th>select</th><th>seq_id</th><th>xpos</th></tr>'
+   const degrader_header = '<tr><th>config id</th><th>select</th><th>seq_id</th><th>comment</th><th>xpos</th></tr>'
    const degrader_body = configuration_tables.degrader_positions.map(function(row) {
       const do_not_use_cell = row.do_not_use
             ? " --- " : '<input type="checkbox" class="config-ckbx-degrader"  value="' + row.config_type + ":" + row.config_id + '">';
-       return "<tr id=cfg_row" + row.config_id + ">" +
+       return "<tr id=cfg_row" + row.config_id +  "' data-values='" +
+                  JSON.stringify(row.values || {}).replace(/'/g, "&#39;") +
+                  "'>" +
               "<td>" + row.config_id + "</td>" +
-              "<td>" + (row.comment ? row.comment : " --- ") + "</td>" +
               "<td>" + do_not_use_cell + "</td>" +
               "<td>" + (row.values ? row.values.seq_id : "---") + "</td>" +
+              "<td>" + (row.comment ? row.comment : " --- ") + "</td>" +
               "<td>" + (row.values ? row.values.xpos : "---") + "</td>" +
               "</tr>"
 
@@ -318,7 +322,9 @@ function configTableHtml(configuration_tables) {
    const beamline_body   = configuration_tables.beamline_settings.map(function(row) {
       const do_not_use_cell = row.do_not_use
             ? " --- " : '<input type="checkbox" class="config-ckbx-beam"  value="' + row.config_type + ":" + row.config_id + '">';
-       return "<tr id=cfg_row" + row.config_id + ">" +
+       return "<tr id=cfg_row" + row.config_id + "' data-values='" +
+                  JSON.stringify(row.values || {}).replace(/'/g, "&#39;") +
+                  "'>" +
               "<td>" + row.config_id + "</td>" +
               "<td>" + do_not_use_cell + "</td>" +
               "<td>" + (row.values ? row.values.seq_id : " ---" ) + "</td>" +
@@ -567,6 +573,39 @@ async function renderConfigurations() {
          });
       }
 
+   });
+   document.addEventListener("click", function(e) {
+      if (e.target.matches("input[type=checkbox]")) return;
+      const row = e.target.closest("tr[data-values]");
+      if (!row) return;
+
+      const values = JSON.parse(row.dataset.values);
+      const entries = Object.entries(values);
+
+      let html = '<table  class="mtable rundb-table">';
+
+      for (let i = 0; i < entries.length; i += 4) {
+         html += "<tr>";
+
+         for (let j = 0; j < 4; j++) {
+            if (i + j < entries.length) {
+               const [key, value] = entries[i + j];
+
+               const padding = j > 0 ? "padding: 4px 8px 4px 30px" : "padding: 4px 8px";
+
+               html += "<td style='" + padding + "'><b>" + key + "</b></td>";
+               html += "<td style='padding: 4px 8px'>" + value + "</td>";
+            } else {
+               html += "<td></td><td></td>";
+            }
+         }
+
+         html += "</tr>";
+      }
+
+      html += "</table>";
+
+      dlgAlert(html);
    });
    await pollOdb() // Poll ODB again to check against RPC loaded configurations.
 }

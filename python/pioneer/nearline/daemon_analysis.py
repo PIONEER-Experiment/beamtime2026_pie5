@@ -11,20 +11,8 @@ import pathlib
 
 # define some default parameters
 kMidasClientName = "AnaDaemon"
-kMidasHostName   = os.environ.get('MIDAS_SERVER_HOST', 'localhost')
-kMidasExptName   = os.environ.get('MIDAS_EXPT_NAME'  , None)
-if kMidasExptName is None:
-    # Try the expttab file
-    exptab = os.environ.get('MIDAS_EXPTAB', None)
-    if exptab is not None:
-        exptab_path = pathlib.Path(exptab)
-        if exptab_path.exists():
-            with exptab_path.open("r") as f:
-                lines = f.readlines()
-            n_lines = len(lines)
-            if n_lines == 1:
-                # there is exactly one unique line, which now shall provide a default value.
-                kMidasExptName = lines[0].split()[0]
+kMidasHostName   = "pinky.psi.ch"
+kMidasExptName   = "bt2026"
 
 
 kDefaultNumJobs  = 3
@@ -142,7 +130,7 @@ class FarlineDaemon:
             # Step 2.2: Dispatch new jobs should there be open slots.
             numOpen = aQueue.getOpenSlots()
             if (numOpen > 0):
-                newConfigs = self.db_interface.find_pending_postproc_jobs(job_type = aQueue.job_types, max_jobs = numOpen)
+                newConfigs = self.db_interface.find_pending_postproc_jobs(job_type = aQueue.job_types, max_jobs = numOpen, client="farline")
                 for aConfig in newConfigs:
                     self.dispatch_job(aQueue, aConfig)
 
