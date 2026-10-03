@@ -316,7 +316,7 @@ def loop_with_service(proposals, odb=None, db=None):
 def test_schedule_keeps_the_sequence_id():
     import pioneer.nearline.run as nl_run
     db = FakeDb()
-    mrs = nl_run.midas_run_sequence(db, num_ev=1e6)
+    mrs = nl_run.midas_run_sequence(db, author="test", description="d", quality="iter", num_ev=1e6)
     mrs.set_config_id("target_position", 1)
     mrs.schedule()
     assert mrs.seq_id in db.sequences
