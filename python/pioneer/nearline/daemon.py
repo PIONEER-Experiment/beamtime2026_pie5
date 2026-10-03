@@ -189,6 +189,7 @@ class NearlineDaemon:
 
         self.queues['nearline'].maxJobs = self.client.odb_get("/Nearline/Config/Num parallel jobs")
         self.midas_logger_path     = pathlib.Path(self.client.odb_get("/Logger/Data dir"))
+        self.odb_dump_file         = self.logger_odb_dump_file()
         self.backup_path           = pathlib.Path(self.client.odb_get("/Nearline/Config/Backup path"))
         self.nearline_output_path  = pathlib.Path(self.client.odb_get("/Nearline/Config/Output path"))
         self.remote_path           = self.client.odb_get("/Nearline/Config/Remote path")
@@ -249,6 +250,15 @@ class NearlineDaemon:
             pass
             # todo: get slack hook and set it up
 
+    def logger_odb_dump_file(self):
+        """/Logger/ODB Dump File (run%05d.json) while mlogger writes one, else ""."""
+        try:
+            if not self.client.odb_get("/Logger/ODB Dump"):
+                return ""
+            return str(self.client.odb_get("/Logger/ODB Dump File"))
+        except Exception:
+            return ""
+
     def dispatch_job(self, queue : NearlineQueue, job_cfg):
         job_type = job_cfg['job_type']
         if job_type == "nearline":
@@ -259,6 +269,13 @@ class NearlineDaemon:
                 job_cfg['source_path'] = self.nearline_output_path / f"run{job_cfg['midas_run_number']:05d}"
             else:
                 job_cfg['source_path'] = self.midas_logger_path
+
+            if job_type in ("backup", "remote") and job_cfg.get('producer', None) != "nearline":
+                # raw data travels with the run's ODB dump (see RsyncJob)
+                dump = nl_jobs.odb_dump_path(self.midas_logger_path, self.odb_dump_file,
+                                             job_cfg['midas_run_number'])
+                if dump is not None:
+                    job_cfg['odb_dump_path'] = str(dump)
 
             if job_type == "backup":
                 job_cfg['destination_path'] = str(self.backup_path)
@@ -317,6 +334,7 @@ class NearlineDaemon:
 
                 # Paths where things shall be going to
                 self.midas_logger_path    = pathlib.Path(self.client.odb_get("/Logger/Data dir"))
+                self.odb_dump_file        = self.logger_odb_dump_file()
                 self.backup_path          = pathlib.Path(self.client.odb_get("/Nearline/Config/Backup path"))
                 self.nearline_output_path = pathlib.Path(self.client.odb_get("/Nearline/Config/Output path"))
                 self.remote_path          = self.client.odb_get("/Nearline/Config/Remote path")
