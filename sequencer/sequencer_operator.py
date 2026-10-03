@@ -3,6 +3,7 @@ import midas
 
 from pioneer.rundb.interface import interface
 from pioneer.sequencer.config_loader import load_config
+from pioneer.sequencer.mupix_recovery import recover as recover_mupix_pll
 
 db_interface = interface(user = "bot", password = "bot")
 
@@ -46,6 +47,8 @@ def execute_run(seq : SequenceClient):
 
 def define_params(seq : SequenceClient):
     seq.register_param("waitBeforeRun", "Wait for operator OK before each run", False)
+    seq.register_param("mupixRecovery", "Check MuPix chips before each run, reset the PLL of bad ones", True)
+    seq.register_param("mupixMaxRetries", "PLL reset rounds before asking the operator (max 3)", 3)
 
 def sequence(seq: SequenceClient):
     while True:
@@ -54,6 +57,21 @@ def sequence(seq: SequenceClient):
         if not loaded:
             seq.wait_seconds(5)
             continue
+        if seq.get_param("mupixRecovery"):
+            # Resets only chips that fail the check; alarms if any is still bad, there is
+            # no verdict (PCLS stale/unreadable) or it was aborted. The run goes ahead after OK.
+            try:
+                result = recover_mupix_pll(seq, seq.get_param("mupixMaxRetries"))
+                text = None if result.ok else result.operator_message()
+            except Exception as e:
+                # Matched by name: the sequencer runs as `python -m midas.sequencer`, so the
+                # Stop it raises is __main__.StopSequencerException, not the importable class.
+                if type(e).__name__ == "StopSequencerException":
+                    raise
+                seq.msg(f"MuPix PLL recovery: failed: {e!r}", is_error = True)
+                text = f"MuPix PLL recovery failed ({e}). Check the chips by hand, then press OK to continue."
+            if text:
+                wait_for_operator(seq, text)
         if seq.get_param("waitBeforeRun"):
             run_id = seq.odb_get("/Nearline/Info/Run DB PK")
             wait_for_operator(seq, f"Run DB config {run_id} loaded. Press OK to start the run.")
