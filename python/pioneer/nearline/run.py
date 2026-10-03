@@ -66,6 +66,7 @@ class midas_run_sequence:
                 this_run = midas_run(self.iface,
                                     author = ", ".join([a for a in sorted(self.authors)]),
                                     description = descr,
+                                    quality = self.quality,
                                     cfg = dict(zip(key_list, it)),
                                     num_ev = self.num_ev
                                 )
@@ -132,16 +133,16 @@ class midas_run:
             configs = [c['id'] for c in self.this_configuration.values()],
             author = self.author,
             note = self.description,
-            run_quality = self.quality
+            quality = self.quality
             )
 
 
-def five_point_sequence(iface : db_interface, author, descr, quality, num_ev = 1e6):
-    mrs = midas_run_sequence(iface, author, descr, quality, num_ev)
+def five_point_sequence(iface : db_interface, author, description, quality, num_ev = 1e6):
+    mrs = midas_run_sequence(iface, author, description, quality, num_ev)
     mrs.set_config_seq("target_position", 2) # Default 5 point sequence is marked with sequence number 2 in the runDB
     return mrs
 
-def degrader_scan(iface : db_interface, author, descr, quality, num_ev = 1e6):
-    mrs = midas_run_sequence(iface, author, descr, quality, num_ev)
+def degrader_scan(iface : db_interface, author, description, quality, num_ev = 1e6):
+    mrs = midas_run_sequence(iface, author, description, quality, num_ev)
     mrs.set_config_seq("degrader_position", 1) # Default degrader scan is marked with sequence number 1 in the runDB
     return mrs

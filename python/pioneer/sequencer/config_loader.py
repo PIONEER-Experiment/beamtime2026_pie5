@@ -125,7 +125,7 @@ config_dispatch = {
 }
 
 config_odb_paths = {
-    "job_id"            : "/Runinfo/Run DB PK",
+    "job_id"            : "/Nearline/Info/Run DB PK",
     "num_ev"            : "/Runinfo/Req number events",
     "degrader_position" : "/Equipment/Degrader",
     "target_position"   : "/Equipment/XYTable",

@@ -16,9 +16,10 @@ def schedule_configuration(config):
     num_ev = config.get("events", 10000)
     author = config.get("operator", "RPC Callback")
     desc   = config.get("description", "RPC Callback")
-    mrs_target = midas_run_sequence(iface, num_ev = num_ev, author = author, description= "XY")
-    mrs_degrad = midas_run_sequence(iface, num_ev = num_ev, author = author, description= "Degrader")
-    mrs_beam = midas_run_sequence(iface, num_ev = num_ev, author = author, description = desc + "\nSequence: Beam")
+    quality = config.get("quality", "")
+    mrs_target = midas_run_sequence(iface, num_ev = num_ev, author = author, description= "XY", quality = quality)
+    mrs_degrad = midas_run_sequence(iface, num_ev = num_ev, author = author, description= "Degrader", quality = quality)
+    mrs_beam = midas_run_sequence(iface, num_ev = num_ev, author = author, description = desc + "\nSequence: Beam", quality = quality)
 
     for row in config['config']:
         table, id = row.split(":")

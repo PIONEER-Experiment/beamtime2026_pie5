@@ -618,7 +618,7 @@ def _schedule(write_dsn: str, configs: list, events: int) -> list:
 
             iface = interface(user=user, password=password)
             # Reads the five target positions, so it belongs inside the patch.
-            sequence = five_point_sequence(iface)
+            sequence = five_point_sequence(iface, author="RunDBView action", description="Position", quality="")
             for entry in configs:
                 sequence.set_config_id(entry["config_type"], entry["config_id"])
             sequence.num_ev = events

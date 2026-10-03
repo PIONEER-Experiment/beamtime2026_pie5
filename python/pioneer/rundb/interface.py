@@ -721,7 +721,7 @@ class interface:
 
 
     def update_postproc_status(self, job_id : int, new_status : str) -> bool:
-        return self.update_status("state.postproc_job", job_id, new_status)
+        return self.update_status("postproc_job", job_id, new_status)
 
     def find_pending_postproc_jobs(self, job_type : str | list[str], client : str, max_jobs : int = 1) -> list:
         """

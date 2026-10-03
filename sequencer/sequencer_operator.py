@@ -26,12 +26,11 @@ def load_config_to_odb(seq : SequenceClient):
 
 def execute_run(seq : SequenceClient):
     seq.start_run()
-    run_id = seq.odb_get("/Runinfo/Run DB PK")
-    run_nr = seq.odb_get("/Runinfo/Run number")
     requested_events = seq.odb_get("/Runinfo/Req number events")
-    # call start of midas run here as fail save.
-    # The nearline daemon should have registered during transition
-    db_interface.start_of_midas_run(run_id, run_nr)
+    # The nearline daemon marks the run RUNNING (start_of_run_callback) and DONE
+    # (end_of_run_callback) during the transitions, keyed on
+    # /Nearline/Info/Run DB PK. A second start_of_midas_run here would raise,
+    # since the run is no longer PENDING/CLAIMED.
 
     # This is where the actual run happens.
     # The wait_seconds needs to be replaced by a more reasonable
@@ -43,9 +42,6 @@ def execute_run(seq : SequenceClient):
             seq.stop_run()
         else:
             seq.wait_seconds(1)
-    # Again, fail save as the nearline daemon should have
-    # picked up everything during transition.
-    db_interface.end_of_midas_run(run_id)
     return True
 
 def define_params(seq : SequenceClient):
@@ -59,7 +55,7 @@ def sequence(seq: SequenceClient):
             seq.wait_seconds(5)
             continue
         if seq.get_param("waitBeforeRun"):
-            run_id = seq.odb_get("/Runinfo/Run DB PK")
+            run_id = seq.odb_get("/Nearline/Info/Run DB PK")
             wait_for_operator(seq, f"Run DB config {run_id} loaded. Press OK to start the run.")
         wait_for_operator(seq, "Please check the PLL Lock is ok and click ok")
         run_successful = execute_run(seq)
