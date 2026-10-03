@@ -55,6 +55,7 @@ class FakeSeq:
             "/Runinfo/Req number events": 10,
         }
         self.writes, self.msgs, self.configs = [], [], []
+        self.timeline = []                  # writes and ("wait", s), polling waits left out
         self.broken = set(broken)
         self.fix_after = dict(fix_after or {})     # chip -> pulses it needs; absent = never recovers
         self.pulses, self.pll_high = Counter(), set()
@@ -81,6 +82,7 @@ class FakeSeq:
     def odb_set(self, path, value, create_if_needed=True, resize_arrays=True):
         assert create_if_needed is False and resize_arrays is False
         self.writes.append((path, value))
+        self.timeline.append((path, value))
         m = re.match(r"(.*)\[(\d+)\]$", path)
         if m:
             arr = self.odb[m.group(1)]
@@ -100,6 +102,8 @@ class FakeSeq:
 
     def wait_seconds(self, s):
         self.t += s
+        if s != mr.POLL_S:
+            self.timeline.append(("wait", s))
         if self.wait_hook:
             self.wait_hook(self, s)
 
@@ -150,11 +154,25 @@ def make_seq(monkeypatch):
     return make
 
 
-def recipe(chips, saved):
+def recipe(chips, saved, waits=False):
+    """The ODB writes of one reset round, with the settle waits in place if `waits`."""
     mask = sum(1 << c for c in chips)
-    return ([(ASIC0, mask)] + [(en(c), 1) for c in chips] + [(CFG, True)]
-            + [(en(c), 0) for c in chips] + [(CFG, True)]
-            + [(en(c), 0) for c in chips] + [(ASIC0, saved)])
+    e, c = ([("wait", mr.ENPLL_SETTLE_S)], [("wait", mr.CONFIG_SETTLE_S)]) if waits else ([], [])
+    return ([(ASIC0, mask)] + [(en(x), 1) for x in chips] + e + [(CFG, True)] + c
+            + [(en(x), 0) for x in chips] + e + [(CFG, True)] + c
+            + [(en(x), 0) for x in chips] + [(ASIC0, saved)])
+
+
+def at_settle_wait(k, action):
+    """A wait_hook calling action(seq) during the k-th settle wait of reset_pll (1-4)."""
+    n = {"waits": 0}
+
+    def hook(seq, s):
+        if s != mr.POLL_S:
+            n["waits"] += 1
+            if n["waits"] == k:
+                action(seq)
+    return hook
 
 
 def assert_restored(seq, saved=0x28):
@@ -293,6 +311,9 @@ def test_reset_write_order_and_restore(make_seq):
     seq = make_seq(broken={2, 6}, fix_after={2: 1, 6: 1})
     mr.reset_pll(seq, [6, 2])
     assert seq.writes == recipe([2, 6], 0x28)
+    # EnPLL 1 -> 1 s -> configure -> 1 s -> EnPLL 0 -> 1 s -> configure -> 1 s -> restore
+    assert seq.timeline == recipe([2, 6], 0x28, waits=True)
+    assert seq.timeline[2:4] == [(en(6), 1), ("wait", 1)]
     # the frontend configured chips 2 and 6 with EnPLL 1, then 0
     en_on = tuple(1 if c in (2, 6) else 0 for c in range(8))
     assert seq.configs == [(0x44, en_on), (0x44, (0,) * 8)]
@@ -315,10 +336,9 @@ def test_restore_after_config_timeout(make_seq, hang):
 
 
 def test_restore_after_exception_in_wait(make_seq):
-    def boom(seq, s):
-        if s == mr.PLL_PULSE_S:
-            raise RuntimeError("sequence aborted")
-    seq = make_seq(broken={2}, wait_hook=boom)
+    def boom(seq):
+        raise RuntimeError("sequence aborted")
+    seq = make_seq(broken={2}, wait_hook=at_settle_wait(2, boom))   # the wait after configure 1
     with pytest.raises(RuntimeError, match="sequence aborted"):
         mr.reset_pll(seq, [2])
     assert_restored(seq)
@@ -375,17 +395,23 @@ def _run_with_stop_tracer(seq, state):
     return caught
 
 
-def test_restore_after_sequencer_stop_during_pulse(make_seq):
+@pytest.mark.parametrize("k,warn", [
+    (1, False),     # after EnPLL = 1, before the first configure: nothing reached the chip
+    (2, True),      # after the first configure: the chip holds EnPLL = 1
+    (3, True),      # after EnPLL = 0, before the second configure: still EnPLL = 1 on the chip
+    (4, False),     # after the second configure: EnPLL = 0 is on the chip
+])
+def test_restore_after_sequencer_stop_in_settle_wait(make_seq, k, warn):
     state = {"stop": False}
-
-    def press_stop(seq, s):
-        if s == mr.PLL_PULSE_S:
-            state["stop"] = True
-
-    seq = make_seq(broken={2}, wait_hook=press_stop)
-    assert _run_with_stop_tracer(seq, state)
+    seq = make_seq(broken={2}, wait_hook=at_settle_wait(k, lambda s: state.update(stop=True)))
+    # after the last wait the stop only fires at the caller's next Python call
+    assert _run_with_stop_tracer(seq, state) == (k < 4)
     assert_restored(seq)
     assert seq.writes[-2:] == [(en(2), 0), (ASIC0, 0x28)]
+    assert (CFG, False) not in seq.writes           # no command of ours was pending
+    assert seq.odb[CFG] is False
+    assert len(seq.configs) == {1: 0, 2: 1, 3: 1, 4: 2}[k]
+    assert any("may still hold EnPLL = 1" in m for m in seq.msgs) == warn
 
 
 def test_restore_finishes_when_stop_pressed_during_restore(make_seq):

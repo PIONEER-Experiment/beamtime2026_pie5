@@ -18,8 +18,8 @@ means the FEB itself is not readable, and an unchanged PCLS means it is not upda
 there is no verdict and nothing is written.
 
 Reset (the Quads web page's "Reset PLL?" + Configure, for the bad chips only):
-ASICMask[0] = bad chips, EnPLL[c] = 1, MupixConfig, wait PLL_PULSE_S, EnPLL[c] = 0,
-MupixConfig. ASICMask[0] and EnPLL are put back afterwards on every path (success, timeout,
+ASICMask[0] = bad chips, EnPLL[c] = 1, wait ENPLL_SETTLE_S, MupixConfig, wait CONFIG_SETTLE_S,
+EnPLL[c] = 0, wait ENPLL_SETTLE_S, MupixConfig, wait CONFIG_SETTLE_S. ASICMask[0] and EnPLL are put back afterwards on every path (success, timeout,
 error, sequence stopped), and a MupixConfig of ours still pending is cancelled. Nothing is
 written unless the run is stopped.
 
@@ -49,7 +49,8 @@ COUNTER_RESET = 2**31              # an 8b10b delta above this (mod 2**32) is a 
 ERR_RATE_LIMIT = 1e7               # 8b10b errors/s per link; healthy < 1e3, noisy-but-fine ~1e5, broken ~1e8
 CHECK_INTERVAL_S = 3
 CONFIG_TIMEOUT_S = 15              # MupixConfig is only handled between the (slow) periodic events
-PLL_PULSE_S = 1
+ENPLL_SETTLE_S = 1                 # lets the frontend pick up the EnPLL writes before the configure
+CONFIG_SETTLE_S = 1                # chip settles after a configure; the Quads page's ResetPLL waits 1 s after the first
 MAX_RETRIES_CAP = 3
 POLL_S = 0.3
 STATE_STOPPED = 1                  # midas.STATE_STOPPED, without importing midas
@@ -315,24 +316,31 @@ def reset_pll(seq, chips, result=None, allow_running=False):
     for c in chips:
         mask |= 1 << c
     _log(seq, f"starting ODB writes for chip(s) {_chip_list(chips)}: ASICMask[0] "
-              f"0x{saved_mask:02x} -> 0x{mask:02x}, EnPLL pulse {PLL_PULSE_S} s", result)
+              f"0x{saved_mask:02x} -> 0x{mask:02x}, EnPLL 1 then 0, waits {ENPLL_SETTLE_S} s after "
+              f"EnPLL and {CONFIG_SETTLE_S} s after each MupixConfig", result)
 
     timeout_msg = f"MupixConfig still true after {CONFIG_TIMEOUT_S} s, the Quads frontend did not answer"
-    sent, finished = 0, False
+    attempted = sent = answered = 0     # MupixConfig writes started / done / answered by the frontend
     try:
         _guarded_set(seq, f"{ASIC_MASK_PATH}[{MUPIX_FEB}]", mask)
         for c in chips:
             _guarded_set(seq, f"{ENPLL_PATH}[{idx[c]}]", 1)
-        sent += 1
+        seq.wait_seconds(ENPLL_SETTLE_S)
+        attempted += 1
         _guarded_set(seq, MUPIX_CONFIG_PATH, True)
+        sent += 1
         _wait_config_done(seq, timeout_msg)
-        seq.wait_seconds(PLL_PULSE_S)
+        answered += 1
+        seq.wait_seconds(CONFIG_SETTLE_S)          # the PLL pulse: EnPLL = 1 is now on the chip
         for c in chips:
             _guarded_set(seq, f"{ENPLL_PATH}[{idx[c]}]", 0)
-        sent += 1
+        seq.wait_seconds(ENPLL_SETTLE_S)
+        attempted += 1
         _guarded_set(seq, MUPIX_CONFIG_PATH, True)
+        sent += 1
         _wait_config_done(seq, timeout_msg)
-        finished = True
+        answered += 1
+        seq.wait_seconds(CONFIG_SETTLE_S)
     finally:
         # The MIDAS sequencer stops a script by raising StopSequencerException from its trace
         # function on the next Python call once Stop is pressed. The thread's trace function
@@ -342,7 +350,7 @@ def reset_pll(seq, chips, result=None, allow_running=False):
         sys.settrace(None)
         try:
             failed = []
-            if sent and not finished:
+            if attempted > answered:
                 # Ours, not answered yet: the frontend would run it late with whatever
                 # ASICMask/EnPLL are then in the ODB. Cancel it before restoring the mask.
                 try:
@@ -363,7 +371,7 @@ def reset_pll(seq, chips, result=None, allow_running=False):
             else:
                 _log(seq, f"restored ASICMask[0] = 0x{saved_mask:02x}, EnPLL = 0 for chip(s) "
                           f"{_chip_list(chips)}", result)
-            if sent and not finished:
+            if sent and answered < 2:          # EnPLL = 0 never reached the chip
                 _log(seq, f"interrupted after a MupixConfig was sent: chip(s) {_chip_list(chips)} "
                           "may still hold EnPLL = 1 on the chip until the next MupixConfig "
                           "(EnPLL is 0 in the ODB)", result, is_error=True)

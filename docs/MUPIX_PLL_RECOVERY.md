@@ -15,9 +15,20 @@ the 8 MuPix chips (FEB 0, chips 0-7, LVDS links 0-23):
    shows about 1e8/s; a healthy one shows under 1e3/s. A link that is noisy but
    READY (around 1e5/s) is not bad. A counter that went down (reset) gives no
    rate and is only noted in the log.
-3. For the bad chips only, it does what the Quads page's **Reset PLL?** box does:
-   ASICMask = those chips, EnPLL = 1, MupixConfig, wait 1 s, EnPLL = 0,
-   MupixConfig. Then it checks again.
+3. For the bad chips only, it does what the Quads page's **Reset PLL?** box does,
+   with a pause after each step:
+
+   | Step | Then wait |
+   |---|---|
+   | ASICMask[0] = the bad chips, EnPLL = 1 for each | 1 s |
+   | MupixConfig, until the frontend sets it back to false | 1 s (the PLL pulse) |
+   | EnPLL = 0 for each | 1 s |
+   | MupixConfig, until the frontend sets it back to false | 1 s |
+   | ASICMask[0] and EnPLL put back | 3 s for the links to settle, then the 3 s check again |
+
+   One round takes about 10 s plus the time the frontend needs for the two
+   MupixConfig commands (up to 15 s each before it gives up). The first check
+   adds 3 s once.
 4. It tries up to 3 times (`mupixMaxRetries`), each time only on the chips
    that are still bad.
 
