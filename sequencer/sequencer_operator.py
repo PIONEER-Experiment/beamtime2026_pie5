@@ -6,6 +6,17 @@ from pioneer.sequencer.config_loader import load_config
 
 db_interface = interface(user = "bot", password = "bot")
 
+def wait_for_operator(seq : SequenceClient, text, name = "Seq operator"):
+    # Warning class: yellow banner on every MIDAS page plus the alarm sound,
+    # and no execute command (the Alarm class posts to Slack every 120 s).
+    seq.trigger_internal_alarm(name, text, default_alarm_class = "Warning")
+    try:
+        # Blocks until the operator presses OK on the Sequencer page
+        # (or the sequence is stopped).
+        seq.sequencer_msg(text, wait = True)
+    finally:
+        seq.reset_alarm(name)
+
 def load_config_to_odb(seq : SequenceClient):
     aConfig = db_interface.find_next_run_config()
     if aConfig is None:
@@ -34,7 +45,7 @@ def execute_run(seq : SequenceClient):
     return True
 
 def define_params(seq : SequenceClient):
-    pass
+    seq.register_param("waitBeforeRun", "Wait for operator OK before each run", False)
 
 def sequence(seq: SequenceClient):
     while True:
@@ -43,6 +54,10 @@ def sequence(seq: SequenceClient):
         if not loaded:
             seq.wait_seconds(5)
             continue
+        if seq.get_param("waitBeforeRun"):
+            run_id = seq.odb_get("/Nearline/Info/Run DB PK")
+            wait_for_operator(seq, f"Run DB config {run_id} loaded. Press OK to start the run.")
+        wait_for_operator(seq, "Please check the PLL Lock is ok and click ok")
         run_successful = execute_run(seq)
         if not run_successful:
             break

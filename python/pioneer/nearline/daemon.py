@@ -386,11 +386,11 @@ class NearlineDaemon:
         is_valid = self.db_interface.validate_run_number(run_id = run_db_pk, run_number = run_number)
         if not is_valid:
             client.trigger_internal_alarm("RunDB Corrupted", "ODB run number and rundb primary key don't match the rundatabase entry")
-            self.db_interface.update_status("state.midas_run", run_db_pk, "ERROR") # That id is bugged
+            self.db_interface.update_status("midas_run", run_db_pk, "ERROR") # That id is bugged
             run_id = self.db_interface.get_run_id(run_number)
             #If this id exists, it is likely bugged too.
             if run_id: # None or 0 are both annotating an illegal run id
-                self.db_interface.update_status("state.midas_run", run_id, "ERROR") # That id is bugged
+                self.db_interface.update_status("midas_run", run_id, "ERROR") # That id is bugged
             # create a new run id, better safe than sorry
 
             auth      = client.odb_get("/Nearline/Info/Operator")

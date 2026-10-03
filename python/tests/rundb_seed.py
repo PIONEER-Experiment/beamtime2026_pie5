@@ -150,13 +150,13 @@ def _build(iface: interface, conn: psycopg.Connection) -> dict:
         started = now - timedelta(hours=len(FINISHED_DURATIONS) - index, minutes=10)
         stopped = started + timedelta(seconds=duration)
 
-        run_id = iface.register_run("PENDING")
-        iface.start_of_midas_run(run_id, run_number)
+        run_id = iface.register_run("PENDING", author="seed", note="finished run", quality="")
+        iface.start_of_midas_run(run_id, run_number, start_time=started)
         _log_boundary(conn, run_number, "BOR", started)
 
         file_id = iface.open_file("logger_0", run_id, f"run{run_number:05d}.mid.lz4")
         _log_boundary(conn, run_number, "EOR", stopped)
-        iface.end_of_midas_run(run_id)
+        iface.end_of_midas_run(run_id, recorded_events=0, stop_time=stopped)
 
         # The middle run is the one that went wrong: its file never closed
         # cleanly and its backup job failed.
@@ -177,11 +177,11 @@ def _build(iface: interface, conn: psycopg.Connection) -> dict:
 
     # --- a run that is still going ------------------------------------------
     running_number = FIRST_RUN_NUMBER + len(FINISHED_DURATIONS)
-    running_id = iface.register_run("PENDING")
-    iface.start_of_midas_run(running_id, running_number)
+    running_id = iface.register_run("PENDING", author="seed", note="running run", quality="")
+    iface.start_of_midas_run(running_id, running_number, start_time=now - timedelta(minutes=4))
     _log_boundary(conn, running_number, "BOR", now - timedelta(minutes=4))
     running_file = iface.open_file("logger_0", running_id, f"run{running_number:05d}.mid.lz4")
-    iface.schedule_postproc_job(running_id, "nearline")
+    iface.schedule_postproc_job(running_id, "nearline", "nearline")
     out["running_run_id"] = running_id
     out["running_run_number"] = running_number
     out["file_ids"].append(running_file)
@@ -190,10 +190,18 @@ def _build(iface: interface, conn: psycopg.Connection) -> dict:
     with conn.cursor() as cur:
         cur.execute("SELECT id FROM config.degrader_position ORDER BY id LIMIT 1")
         degrader_id = cur.fetchone()[0]
-        cur.execute("SELECT id FROM config.pim1_epics ORDER BY id LIMIT 1")
-        pim1_id = cur.fetchone()[0]
+        # db_config.sql seeds no pim1 setting any more, so make one: every
+        # setpoint column at zero.
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'config' AND table_name = 'pim1_epics' "
+            "AND column_name NOT IN ('id', 'seq_id')"
+        )
+        pim1_columns = [row[0] for row in cur.fetchall()]
+    conn.commit()
+    pim1_id = iface.add_new_configuration("pim1_epics", {c: 0 for c in pim1_columns})
 
-    sequence = five_point_sequence(iface)
+    sequence = five_point_sequence(iface, author="seed", description="Position", quality="")
     sequence.num_ev = 2_000_000
     sequence.add_config_id("degrader_position", degrader_id)
     sequence.add_config_id("pim1_epics", pim1_id)
@@ -220,7 +228,8 @@ def _build(iface: interface, conn: psycopg.Connection) -> dict:
     half_target_id = iface.add_new_configuration("target_position", {"xpos": 5.0})
 
     holding_id = iface.schedule_new_run(
-        500_000, [target_id, unknown_config_id, half_target_id])
+        500_000, [target_id, unknown_config_id, half_target_id],
+        author="seed", note="holding run")
     iface.update_status("midas_run", holding_id, "HOLDING")
     out["holding_run_id"] = holding_id
     out["unknown_config_id"] = unknown_config_id
