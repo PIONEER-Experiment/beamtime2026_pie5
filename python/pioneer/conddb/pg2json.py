@@ -63,7 +63,7 @@ CONTAINERS: dict[str, tuple[str, ...]] = {
     "bt2026_psm_geometry.json": ("psm_geometry",),
     "bt2026_psm_readout_map.json": ("mupix_chip_map", "mutrig_channel_map",
                                     "sma_coarse_shift", "mupix_pixel_mask",
-                                    "mupix_timewalk"),
+                                    "mupix_timewalk", "sma_time_alignment"),
     "bt2026_wavedream_calibration.json": ("wd_rf", "wd_time_alignment",
                                           "wd_energy_calibration", "wd_channel_map"),
     "bt2026_wavedream_timebase.json": ("wd_timebase",),

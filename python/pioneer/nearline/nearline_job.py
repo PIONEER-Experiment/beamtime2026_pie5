@@ -11,10 +11,13 @@ agreement, registered in midas_files/wavedream-scalar-readout/docs/REGISTRY.md.
     |                           PITMidasMusip      -> /Event/muquad, mutrig, rf
     |
     +-- PSMSMACalSeq ---------- gated on /Event/mutrig; runs whenever PSM_DECODE
-    |     PIPSMSMACalibration  -> /Event/mutrig_cal, the decoder's SMA hits in
-    |                             time order (/Event/mutrig is readout order);
-    |                             the place for later SMA time calibrations;
-    |                             every SMA reader below reads it
+    |     PIPSMSMACalibration  -> /Event/mutrig_cal, the decoder's SMA hits
+    |                             aligned, each counter's TOT word and NIM
+    |                             copy paired into one hit, in time order
+    |                             (/Event/mutrig is readout order); every SMA
+    |                             reader below reads it. /Event/sma_hits, the
+    |                             sidecar index-parallel to it: both times,
+    |                             both widths, raw indices, pairing flags
     |
     +-- PSMTimewalkSeq -------- gated on /Event/muquad; runs whenever PSM_DECODE
     |     PIPSMMuPixTimewalkCorrection -> /Event/muquad_twc, each pixel time
@@ -32,7 +35,9 @@ agreement, registered in midas_files/wavedream-scalar-readout/docs/REGISTRY.md.
     |
     +-- WDScalerSeq ----------- gated on /Event/wd_scalers
     |     PIWDScalerMonitor    -> histograms only: rate, threshold and FPGA
-    |                             temperature per board from the scaler events
+    |                             temperature per board from the scaler events,
+    |                             and the proton-current counts the merge
+    |                             step normalises by
     |
     +-- PSMMuPixSeq ----------- gated on /Event/muquad, reads /Event/muquad_twc
     |     PIPSMMuPixMonitor    -> histograms only: a hit map per MuPix chip and
@@ -45,15 +50,16 @@ agreement, registered in midas_files/wavedream-scalar-readout/docs/REGISTRY.md.
     +-- PSMSMASeq ------------- gated on /Event/mutrig_cal
     |     PIPSMSMAMonitor      -> histograms only: rate, ToT and fine time per
     |                             counter, with no pixel hits or tracklets;
-    |                             with PSM_RF_CHANNEL set also reads /Event/rf
-    |                             (optional per frame) for the S1-gated RF
-    |                             phase and RF phase vs ToT per counter
+    |                             also reads /Event/rf (optional per frame;
+    |                             absent on a run with no RF channel) for the
+    |                             S1-gated RF phase and RF phase vs ToT per
+    |                             counter
     |
     +-- PSMRecoSeq ------------ gated on /Event/mutrig_cal, which is also the
     |                             S hits; L hits /Event/muquad_twc
     |     PIPSMSimpleTrackReco   -> /Event/exp_all_tracks   (+ histograms);
-    |                             with PSM_RF_CHANNEL set also reads /Event/rf
-    |                             for each tracklet's S1 RF phase
+    |                             with PSM_DECODE also reads /Event/rf for
+    |                             each tracklet's S1 RF phase
     |     PIPSMPatternReco       -> /Event/exp_pattern
     |     PIPSMComputeWeight     -> /Event/exp_track_weights
     |     PIPSMDelayedCoincidence-> /Event/exp_tagged       (+ histograms)
@@ -291,12 +297,20 @@ WD_SCALER_TIME_MAX_S = 7200.0
 WD_SCALER_FILL_STALE = False
 # --- PSM decode ------------------------------------------------------------
 # MuTrig RAW readout channels (chipid*32+channel, read before the map lookup)
-# carrying the RF and the beam current. These follow the SMA board's cabling,
-# which the open interval of mutrig_channel_map in bt2026_psm_readout_map.json
-# documents: RF gated by S1 on 6, proton current on 7. None drops /Event/rf
-# resp. histograms/musip/current.
-PSM_RF_CHANNEL = 6
-PSM_CURRENT_CHANNEL = 7
+# carrying the RF gated by S1 and the proton current. None (the default) leaves
+# the decoder to take each from the run's interval of mutrig_channel_map in
+# bt2026_psm_readout_map.json, which marks them with the role ids 2014 (rf) and
+# 2015 (proton_current); a run whose interval marks no RF has no /Event/rf, one
+# that marks no current no histograms/musip/current. An integer overrides the
+# map for every run this job processes, for a file whose interval is wrong or
+# not yet written. "off" switches the role off whatever the map says (no
+# /Event/rf, resp. no musip/current; the map's channel is dropped and counted).
+# The proton current left the SMA when the NIM copies were cabled (the
+# WaveDREAM scaler counts it), and raw channel 7 has carried a counter since
+# then (S3L, later S3 TOT): the old PSM_CURRENT_CHANNEL = 7 would consume every
+# one of its words as a current pulse before the map is read.
+PSM_RF_CHANNEL = None
+PSM_CURRENT_CHANNEL = None
 # MuPix pixel pitch in mm; a wrong pitch scales every position and every slope.
 PSM_QUAD_PIXEL_PITCH = 0.08
 # MuPix timestamp bin width in ns. There is no MuTrig counterpart any more: the
@@ -326,6 +340,28 @@ PSM_SMA_DIAGNOSTICS = True
 # Off restores the times the decoder gave before the correction existed. It
 # changes the hits, so light mode does not switch it off.
 PSM_SMA_FINE_OFFSETS = True
+# Part of the fine-time correction above: the low-threshold NIM copies (S1L..S5L,
+# ids 2021, 2023-2026, wherever the run's mutrig_channel_map cables them) can carry
+# an arbitrary per-frame fine-time lag against S1. The decoder measures it per frame
+# from the copy's words that share a coarse field with an S1 word and removes it
+# down to the copy's nominal delay below, but only when it lies further than 50 ns
+# from it (a real cable delay survives); a frame without S1 (a source run) is never
+# corrected by a guess. Recorded per frame in /Event/sma_time_state (m_lagNs).
+# False leaves the copies' times as the words have them. Changes the hits, so not a
+# light switch.
+PSM_SMA_NIM_LAG = True
+# {NIM copy id: nominal delay from S1 in ns} for the lag above; an id not listed is
+# 0. Empty: S4L's ch 10 copy is a logic output with several delays to S4 and stays
+# uncalibrated, and S3L sits within a few ns of S1.
+PSM_SMA_NIM_NOMINAL_DELAY_NS = {}
+# The detector ids the lag above is measured and removed for (the decoder's
+# fineOffsetLagVids): the NIM copies S1L..S5L. An id the run's map does not cable
+# is inactive. A TOT id may be added if its channel turns out to carry the same
+# per-frame fault, e.g. 2004 (S3 TOT, on the channel the S3L copy used before
+# every counter got a NIM copy). Not the S1 reference (2001), the voted S2 (2003),
+# the halved S5 (2006) or a role marker (2014, 2015). Changes the hits, so not a
+# light switch.
+PSM_SMA_LAG_VIDS = [2021, 2023, 2024, 2025, 2026]
 # Frame 0 of subrun 0 holds a stale replay of the previous run. With this on, the
 # decoder drops the first H000 bank of the job when the input file is subrun 0
 # (the second number in the file name, run00790_00000); other subruns and a name
@@ -340,6 +376,32 @@ PSM_SMA_SKIP_STALE_FIRST_FRAME = True
 PSM_PIXEL_MASK = True
 # Tag of mupix_pixel_mask to read; None reads the table's default tag.
 PSM_PIXEL_MASK_TAG = None
+# --- SMA calibration layer: TOT + NIM pairing -------------------------------
+# PIPSMSMACalibration (/Event/mutrig -> /Event/mutrig_cal and /Event/sma_hits) pairs
+# each counter's TOT word with its low-threshold NIM copy (S1L..S5L, ids 2021,
+# 2023-2026) into one hit. A counter is paired when the run's mutrig_channel_map
+# interval cables its NIM copy AND the sma_time_alignment table
+# (bt2026_psm_readout_map.json) has an offset for that copy; a cabled copy without an
+# offset is histogrammed only (histograms/PIPSMSMACalibration/) and its words stay out
+# of /Event/mutrig_cal. The shipped table has no NIM offsets, so until they are
+# measured the output is the TOT hits in time order, as before. NIM ids never reach
+# /Event/mutrig_cal: a NIM-only hit carries its counter's TOT id. False drops the NIM
+# words and applies no offsets at all. Changes the hits, so not a light switch.
+PSM_SMA_NIM_PAIRING = True
+# Largest |t_NIM - t_TOT| of a pair, aligned times, ns (inclusive).
+PSM_SMA_PAIR_WINDOW_NS = 20.0
+# Time of a paired hit: "tot" (the TOT word's leading edge) or "nim" (the NIM copy's
+# CFD time, free of the TOT walk). A NIM-only hit always has the NIM time.
+PSM_SMA_TIME_SOURCE = "tot"
+# ToT (raw SMA units) given to a NIM-only hit, one with no TOT word: above
+# PSM_LAYER_THR, so it fires its layer like any other hit.
+PSM_SMA_NIM_ONLY_TOT = 1.0
+# DEVELOPMENT AND QUICK TESTS ONLY: {detector id: offset in ns} replacing the
+# sma_time_alignment value of that id for this job, e.g. {2024: -153522.0} to try a
+# NIM copy whose offset is not yet in the table. Each one is logged as a warning.
+# Leave it empty in production: constants belong in the conditions table, where the
+# rendered job and every reprocessing find them.
+PSM_SMA_OFFSET_OVERRIDE_NS = {}
 # --- PSM geometry ----------------------------------------------------------
 # Base layer PIGeometrySvc builds the GeoHeader from, as "GEOCOND:<table>".
 PSM_GEOMETRY_BASE = "GEOCOND:psm_geometry"
@@ -568,8 +630,65 @@ PSM_AGGREGATE_OWNERS_ONLY = 1
 PSM_LPAIR_OWNER_OFFSET_NS = 0.0
 # L1 -> L2 lever arm in mm, used to turn (x2 - x1) into a slope.
 PSM_DISTANCE_L12 = 30.0
-# Delayed-coincidence window in ns for the pi -> mu tag, [MIN, MAX).
-PSM_DELAYED_WINDOW_NS = (20.0, 70.0)
+# Delayed-coincidence window in ns for the pi -> mu tag, [MIN, MAX). 18 ns is where
+# the SMA dead time after the prompt hit ends (lower adds echo pulses of the prompt);
+# 115 ns stops below the S2/S3 words that follow a hit by ~135 ns. Only safe with
+# the delayed-candidate rules below: without PSM_DELAYED_TOT_MIN the 0-ToT pseudo
+# clusters at +43 / +83 ns fill the wider window.
+PSM_DELAYED_WINDOW_NS = (18.0, 115.0)
+# Bins of the dt and sb histograms over that window: one per ns, so it must equal
+# the window width in ns (check() enforces it; change both together).
+PSM_DELAYED_DT_BINS = 97
+# Delayed candidates. The delayed summed ToT (s1tot + ... + s5tot of the candidate
+# cluster, exp_tagged delayedTot) must lie in [PSM_DELAYED_TOT_MIN,
+# PSM_DELAYED_TOT_MAX). The lower edge removes the 0-ToT clusters and the low-ToT
+# pulses whose dt spectrum is no 26 ns exponential (ToT 6-9 carry no real decays:
+# removing them loses no WD-confirmed tag); the upper edge removes the long-ToT S3
+# words that are not decays. [10, 30) is the band of the tuned tag. None as the
+# maximum: no upper edge.
+PSM_DELAYED_TOT_MIN = 10.0
+PSM_DELAYED_TOT_MAX = 30.0
+# 1: a delayed candidate must hit the prompt's stop plate and no other plate (its
+# layer pattern above PSM_LAYER_THR is the stop plate's bit alone); a prompt with no
+# layer above threshold then has no candidate. The muon of a pi -> mu decay stops
+# within ~1 mm, so it lights only the plate the pion stopped in.
+PSM_DELAYED_STOP_PLATE_ONLY = 1
+# Prompt selection by the S1 RF phase (the prompt tracklet's s1rfphase), ns,
+# [MIN, MAX); a prompt without a valid phase then fails. The pion peak moves with
+# the momentum and the tune, so it has to be measured per setting before it goes
+# in here (e.g. (95.0, 98.5) at 165 MeV/c). None: off, every prompt.
+PSM_PROMPT_RF_WINDOW_NS = None
+# Stop layers (1..5 = S1..S5, 0 = no layer above threshold) whose prompts count
+# as tagged: the n_tagged counter, the tagged phase-space maps (xy, xxp, yyp and the
+# _w twins) and the dt, sb, far and dt_all histograms. The exp_tagged rows keep every
+# stop layer. S2 is included, but it gives almost no tags until the S2 chain-offset
+# decoder fix exists (the decoder misplaces the S2 words of a busy channel, so the
+# decay pulse is not seen: efficiency ~0 %). With the fix alone about 8 % at 33 %
+# strict purity; with the fix and the SMA time offsets table about 24 % / 71 %,
+# like S4 (27 % / 81 %). Until then S2 adds far-window accidentals but no signal:
+# subtract accidentals per stop layer. An empty tuple: every layer.
+PSM_TAGGED_STOP_LAYERS = (2, 3, 4)
+# Far accidental window in ns, [MIN, MAX) before the prompt: the candidates in it
+# are counted per prompt (exp_tagged nFar) and histogrammed ("far", every
+# candidate, the tagged stop layers pooled). Scaled by the signal width over this
+# width it estimates the UNCORRELATED accidentals of the signal window only: the
+# decay positron of the prompt's own muon adds a correlated, slowly falling term
+# of about the same size at 18-115 ns, so a far-subtracted count is not
+# background-free. Subtract per stop layer (dt_all_stop): a layer blind after its
+# own hit (S2 for now) fills the far window but not the signal. The mirrored sideband (-MAX, -MIN] of the
+# window under-counts the accidentals: the dead time after a hit and the blind
+# S2 channel deplete the region just before the prompt. Must lie below
+# -PSM_DELAYED_WINDOW_NS[1]. None: off.
+PSM_FAR_WINDOW_NS = (-1000.0, -200.0)
+# Every-pair dt histograms "dt_all" (tagged stop layers) and "dt_all_stop" (by stop
+# layer, every layer) over this window in ns, 1 ns bins: every candidate of every
+# S5-vetoed prompt under the same rules, not only the earliest. The pion lifetime
+# fit and the flat accidental level come from these. None: off.
+PSM_PAIR_WINDOW_NS = (-1000.0, 500.0)
+# 1: fill "stop_phase", stop layer x S1 RF phase (1 ns bins over 0-131, bin 131 =
+# no valid phase) of every prompt with a prompt-channel hit, through-going ones
+# included, so the pion window and the RF sidebands can be chosen offline.
+PSM_STOP_PHASE_HIST = 1
 # Require the PROMPT half of a coincidence to have a prompt-channel hit of its own.
 # Off, any tracklet in the window can play the prompt role -- including, in the
 # unseeded mode, a delayed pulse that formed its own tracklet -- and the tag then
@@ -653,11 +772,20 @@ PSM_TWC_NTUPLE = "corrected"
 # Which SMA hit collections the RNTuple keeps: "both" (/Event/mutrig and the
 # calibrated /Event/mutrig_cal), "calibrated" (drops /Event/mutrig) or "raw"
 # (drops /Event/mutrig_cal). Appended to NTUPLE_RULES after PSM_TWC_NTUPLE, so
-# it wins too. "raw" by default: while the calibration layer only puts the hits
-# in time order, /Event/mutrig_cal holds nothing /Event/mutrig does not, and the
-# raw-stream analyses need /Event/mutrig in its readout order, so "calibrated"
-# is for when the layer carries real constants and nobody needs that order.
+# it wins too. With PSM_SMA_HITS_NTUPLE below the sidecar /Event/sma_hits, with
+# the raw /Event/mutrig, rebuilds /Event/mutrig_cal hit for hit (raw word, id,
+# time, ToT), so "raw" loses nothing. "raw" by default: the raw-stream analyses
+# need /Event/mutrig in its readout order, and it keeps both words of every
+# counter, so "calibrated" is for when nobody needs either; the sidecar's raw
+# indices then point into the dropped /Event/mutrig (the job warns).
 PSM_SMA_CAL_NTUPLE = "raw"
+# Keep the calibration layer's sidecar /Event/sma_hits in the RNTuple: the only
+# record of how each hit was paired (both times, both widths, flags, raw word
+# indices). It costs about 14-20 % of the file on a beam subrun, and until a NIM
+# offset is in sma_time_alignment it holds nothing /Event/mutrig and a time sort
+# do not. True adds no rule, so NTUPLE_RULES still decide (a "drop *" drops it);
+# False appends "drop /Event/sma_hits" last. The TES always has it.
+PSM_SMA_HITS_NTUPLE = True
 # ===== END OF SETTINGS =====
 
 # The spellings of LIGHT in a rendered file and in NL_LIGHT, and the settings light
@@ -761,6 +889,7 @@ _TES_RF = "/Event/rf"
 _TES_SMA_TIME_STATE = "/Event/sma_time_state"
 _TES_MUQUAD_TWC = "/Event/muquad_twc"
 _TES_MUTRIG_CAL = "/Event/mutrig_cal"
+_TES_SMA_HITS = "/Event/sma_hits"
 # PSM_TWC_NTUPLE -> the collection it drops from the RNTuple (None: nothing).
 _TWC_NTUPLE_DROP = {"both": None, "corrected": _TES_MUQUAD, "raw": _TES_MUQUAD_TWC}
 # PSM_SMA_CAL_NTUPLE -> the collection it drops from the RNTuple (None: nothing).
@@ -1029,7 +1158,10 @@ def check():
                         ("PSM_TIMEWALK_CORRECTION", PSM_TIMEWALK_CORRECTION),
                         ("PSM_SMA_WIDE_DT", PSM_SMA_WIDE_DT),
                         ("PSM_SMA_FINE_OFFSETS", PSM_SMA_FINE_OFFSETS),
-                        ("PSM_SMA_SKIP_STALE_FIRST_FRAME", PSM_SMA_SKIP_STALE_FIRST_FRAME)):
+                        ("PSM_SMA_NIM_LAG", PSM_SMA_NIM_LAG),
+                        ("PSM_SMA_SKIP_STALE_FIRST_FRAME", PSM_SMA_SKIP_STALE_FIRST_FRAME),
+                        ("PSM_SMA_NIM_PAIRING", PSM_SMA_NIM_PAIRING),
+                        ("PSM_SMA_HITS_NTUPLE", PSM_SMA_HITS_NTUPLE)):
         if not isinstance(value, bool):
             problems.append(f"{name} is {value!r}: it must be True or False (a string such as "
                             "'False' is true in Python and would switch it on).")
@@ -1045,19 +1177,63 @@ def check():
                         "axis [min, max) in bins: max must be above min and bins an integer "
                         "1-8192, or the correction layer stops at initialize and the monitor "
                         "and the reco book no timewalk histograms.")
-    if PSM_RF_CHANNEL is not None:
-        try:
-            rf_ok = (int(PSM_RF_CHANNEL) == PSM_RF_CHANNEL and 0 <= int(PSM_RF_CHANNEL) <= 15
-                     and (PSM_CURRENT_CHANNEL is None
-                          or int(PSM_RF_CHANNEL) != int(PSM_CURRENT_CHANNEL)))
-        except (TypeError, ValueError):
-            rf_ok = False
-        if not rf_ok:
-            problems.append(f"PSM_RF_CHANNEL is {PSM_RF_CHANNEL!r}: it must be an integer SMA "
-                            "raw channel (0-15, the word's 4-bit channel field) and not "
-                            f"PSM_CURRENT_CHANNEL ({PSM_CURRENT_CHANNEL!r}), or /Event/rf holds "
-                            "no RF or the wrong pulses and the SMA monitor's RF phase is "
-                            "meaningless.")
+    def _number(value):
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value))
+    if not (_number(PSM_SMA_PAIR_WINDOW_NS) and 0 < PSM_SMA_PAIR_WINDOW_NS <= 1000):
+        problems.append(f"PSM_SMA_PAIR_WINDOW_NS is {PSM_SMA_PAIR_WINDOW_NS!r}: it must be a "
+                        "number of ns above 0 and at most 1000 (the largest aligned "
+                        "|t_NIM - t_TOT| of a pair; the RF period is about 20 ns).")
+    if PSM_SMA_TIME_SOURCE not in ("tot", "nim"):
+        problems.append(f"PSM_SMA_TIME_SOURCE is {PSM_SMA_TIME_SOURCE!r}: it must be 'tot' (the "
+                        "TOT word's time) or 'nim' (the NIM copy's).")
+    if not (_number(PSM_SMA_NIM_ONLY_TOT) and PSM_SMA_NIM_ONLY_TOT <= 255
+            and (not _number(PSM_LAYER_THR) or PSM_SMA_NIM_ONLY_TOT > PSM_LAYER_THR)):
+        problems.append(f"PSM_SMA_NIM_ONLY_TOT is {PSM_SMA_NIM_ONLY_TOT!r}: it must be a ToT "
+                        f"above PSM_LAYER_THR ({PSM_LAYER_THR!r}) and at most 255 in raw SMA "
+                        "units (the value a NIM-only hit is written with; at or below the layer "
+                        "threshold the hit would fire no layer).")
+    if not (isinstance(PSM_SMA_OFFSET_OVERRIDE_NS, dict) and all(
+            isinstance(k, int) and not isinstance(k, bool) and _number(v)
+            for k, v in PSM_SMA_OFFSET_OVERRIDE_NS.items())):
+        problems.append(f"PSM_SMA_OFFSET_OVERRIDE_NS is {PSM_SMA_OFFSET_OVERRIDE_NS!r}: it must "
+                        "be a dict {detector id (int): offset in ns (number)}, normally empty.")
+    if not (isinstance(PSM_SMA_NIM_NOMINAL_DELAY_NS, dict) and all(
+            isinstance(k, int) and not isinstance(k, bool) and _number(v) and abs(v) < 2**19
+            for k, v in PSM_SMA_NIM_NOMINAL_DELAY_NS.items())):
+        problems.append(f"PSM_SMA_NIM_NOMINAL_DELAY_NS is {PSM_SMA_NIM_NOMINAL_DELAY_NS!r}: it "
+                        "must be a dict {NIM copy id (int): nominal delay from S1 in ns (number, "
+                        "|ns| < 2^19)}.")
+    _lag_role_ids = {2001: "the S1 reference", 2003: "the voted S2", 2006: "the halved S5",
+                     2002: "the parked id, on several channels at once",
+                     2014: "the RF role marker", 2015: "the proton-current role marker"}
+    if not (isinstance(PSM_SMA_LAG_VIDS, (list, tuple))
+            and all(isinstance(v, int) and not isinstance(v, bool) for v in PSM_SMA_LAG_VIDS)
+            and len(set(PSM_SMA_LAG_VIDS)) == len(PSM_SMA_LAG_VIDS)):
+        problems.append(f"PSM_SMA_LAG_VIDS is {PSM_SMA_LAG_VIDS!r}: it must be a list of distinct "
+                        "detector ids (int), normally the NIM copies [2021, 2023, 2024, 2025, 2026].")
+    elif any(v in _lag_role_ids for v in PSM_SMA_LAG_VIDS):
+        taken = ", ".join(f"{v} ({_lag_role_ids[v]})" for v in PSM_SMA_LAG_VIDS if v in _lag_role_ids)
+        problems.append(f"PSM_SMA_LAG_VIDS lists {taken}: that id has its own role in the fine-time "
+                        "correction and cannot also be a lag id.")
+    def _sma_channel_ok(value):
+        return (value is None or value == "off"
+                or (isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 15))
+    if not _sma_channel_ok(PSM_RF_CHANNEL):
+        problems.append(f"PSM_RF_CHANNEL is {PSM_RF_CHANNEL!r}: it must be None (the RF channel "
+                        "of the run's mutrig_channel_map), \"off\" or an integer SMA raw channel "
+                        "0-15 (the word's 4-bit channel field), or /Event/rf holds no RF or the "
+                        "wrong pulses and the SMA monitor's RF phase is meaningless.")
+    if not _sma_channel_ok(PSM_CURRENT_CHANNEL):
+        problems.append(f"PSM_CURRENT_CHANNEL is {PSM_CURRENT_CHANNEL!r}: it must be None (the "
+                        "proton-current channel of the run's mutrig_channel_map), \"off\" or an "
+                        "integer SMA raw channel 0-15, or histograms/musip/current counts the wrong "
+                        "pulses.")
+    if (isinstance(PSM_RF_CHANNEL, int) and PSM_RF_CHANNEL == PSM_CURRENT_CHANNEL
+            and _sma_channel_ok(PSM_RF_CHANNEL)):
+        problems.append(f"PSM_RF_CHANNEL and PSM_CURRENT_CHANNEL are both {PSM_RF_CHANNEL}: the "
+                        "decoder takes the RF channel first, so the current pulses would become "
+                        "RF pulses and the current would never be counted.")
     # The container checks below are about which JSON file supplies a table, so they
     # mean nothing in db mode, where the database serves them all.
     if _JSON_MODE and PSM_DECODE and PSM_GEOMETRY_BASE and not PSM_GEOMETRY_FILES:
@@ -1155,6 +1331,34 @@ def check():
                         f"PSM_DELAYED_WINDOW_NS[0] ({PSM_DELAYED_WINDOW_NS[0]}): a wider S-S "
                         "clustering window absorbs the delayed pulse into its prompt cluster, "
                         "and the delayed-coincidence tag can no longer find it.")
+    if PSM_RECO and not (0 <= float(PSM_DELAYED_TOT_MIN) < math.inf):
+        problems.append(f"PSM_DELAYED_TOT_MIN ({PSM_DELAYED_TOT_MIN}) must be a finite ToT >= 0, "
+                        "the lower edge of the delayed summed-ToT band.")
+    if PSM_RECO and PSM_DELAYED_TOT_MAX is not None and not (
+            float(PSM_DELAYED_TOT_MAX) > float(PSM_DELAYED_TOT_MIN)):
+        problems.append(f"PSM_DELAYED_TOT_MAX ({PSM_DELAYED_TOT_MAX}) must be larger than "
+                        f"PSM_DELAYED_TOT_MIN ({PSM_DELAYED_TOT_MIN}), or None for no upper edge: "
+                        "the delayed ToT band [MIN, MAX) would take no candidate.")
+    _dt_width = float(PSM_DELAYED_WINDOW_NS[1]) - float(PSM_DELAYED_WINDOW_NS[0])
+    if PSM_RECO and not (isinstance(PSM_DELAYED_DT_BINS, int) and PSM_DELAYED_DT_BINS == _dt_width):
+        problems.append(f"PSM_DELAYED_DT_BINS ({PSM_DELAYED_DT_BINS!r}) must be the width of "
+                        f"PSM_DELAYED_WINDOW_NS in ns ({_dt_width:g}): dt and sb have one bin per ns.")
+    if PSM_RECO and PSM_PROMPT_RF_WINDOW_NS is not None and not (
+            float(PSM_PROMPT_RF_WINDOW_NS[0]) < float(PSM_PROMPT_RF_WINDOW_NS[1])):
+        problems.append(f"PSM_PROMPT_RF_WINDOW_NS {PSM_PROMPT_RF_WINDOW_NS} is empty; give [MIN, MAX) "
+                        "with MIN < MAX, or None for every prompt.")
+    if PSM_RECO and not all(isinstance(x, int) and 0 <= x <= 5 for x in PSM_TAGGED_STOP_LAYERS):
+        problems.append(f"PSM_TAGGED_STOP_LAYERS {PSM_TAGGED_STOP_LAYERS!r} must be stop layers 0..5 "
+                        "(1..5 = S1..S5), or () for every layer.")
+    if PSM_RECO and PSM_FAR_WINDOW_NS is not None and not (
+            float(PSM_FAR_WINDOW_NS[0]) < float(PSM_FAR_WINDOW_NS[1]) <= -float(PSM_DELAYED_WINDOW_NS[1])):
+        problems.append(f"PSM_FAR_WINDOW_NS {PSM_FAR_WINDOW_NS} must be [MIN, MAX) with MIN < MAX <= "
+                        f"-PSM_DELAYED_WINDOW_NS[1] ({-float(PSM_DELAYED_WINDOW_NS[1])}): an accidental "
+                        "window that reaches the mirrored sideband or the signal counts decays.")
+    if PSM_RECO and PSM_PAIR_WINDOW_NS is not None and not (
+            float(PSM_PAIR_WINDOW_NS[0]) < float(PSM_PAIR_WINDOW_NS[1])):
+        problems.append(f"PSM_PAIR_WINDOW_NS {PSM_PAIR_WINDOW_NS} is empty; give [MIN, MAX) with "
+                        "MIN < MAX, or None.")
     if PSM_RECO and PSM_DROP_CROSSTALK_GHOSTS and not (PSM_DECODE and PSM_GEOMETRY_BASE):
         problems.append("PSM_DROP_CROSSTALK_GHOSTS is on but there is no PIGeometrySvc "
                         "(PSM_DECODE, PSM_GEOMETRY_BASE): the ghost rule recovers each hit's "
@@ -1205,18 +1409,27 @@ tools = [PITMidasWaveDream()] if WD_ENABLED else []
 if PSM_DECODE:
     musip = PITMidasMusip(quadPixelPitch=float(PSM_QUAD_PIXEL_PITCH),
                           quadTimeBinWidth=float(PSM_QUAD_TIME_BIN_NS))
-    # rf_channel is what creates /Event/rf at all and current_channel what books
-    # histograms/musip/current; the tool's own sentinel cannot be written from
-    # Python, so "unset" means not assigning the property.
+    # Unset, the decoder takes the RF and current channels from the run's raw
+    # map (its role ids 2014/2015) and says at initialize where each came from;
+    # set, they override the map; "off" (the decoder's -2) switches the role
+    # off. The RF channel is what creates /Event/rf and the current channel
+    # what books histograms/musip/current.
     if PSM_RF_CHANNEL is not None:
-        musip.rf_channel = int(PSM_RF_CHANNEL)
+        musip.rf_channel = -2 if PSM_RF_CHANNEL == "off" else int(PSM_RF_CHANNEL)
     if PSM_CURRENT_CHANNEL is not None:
-        musip.current_channel = int(PSM_CURRENT_CHANNEL)
+        musip.current_channel = -2 if PSM_CURRENT_CHANNEL == "off" else int(PSM_CURRENT_CHANNEL)
     if PSM_SMA_COARSE_SHIFT is not None:
         musip.coarseShift = int(PSM_SMA_COARSE_SHIFT)
     musip.smaDiagnostics = bool(PSM_SMA_DIAGNOSTICS)
     musip.correctFineOffsets = bool(PSM_SMA_FINE_OFFSETS)
-    musip.fineOffsetSnapChannels = [int(PSM_RF_CHANNEL)] if PSM_RF_CHANNEL is not None else []
+    # The correction's roles are the decoder's defaults, by detector id through
+    # the run's raw map: S1 the reference, S2 voted, S5 halved, the RF role
+    # snapped, the lag ids (PSM_SMA_LAG_VIDS, the NIM copies) lag channels. Only
+    # the lag is a job knob.
+    musip.fineOffsetLagVids = [int(v) for v in PSM_SMA_LAG_VIDS] if PSM_SMA_NIM_LAG else []
+    if PSM_SMA_NIM_NOMINAL_DELAY_NS:
+        musip.fineOffsetLagNominalNs = {int(k): float(v)
+                                        for k, v in PSM_SMA_NIM_NOMINAL_DELAY_NS.items()}
     musip.skipFirstBank = bool(PSM_SMA_SKIP_STALE_FIRST_FRAME) and _SUBRUN == 0
     if PSM_SMA_SKIP_STALE_FIRST_FRAME and _SUBRUN is None:
         print(f"[nearline] WARNING    PSM_SMA_SKIP_STALE_FIRST_FRAME is on but "
@@ -1229,10 +1442,12 @@ if PSM_DECODE:
 algorithms = [PIMidasDecoder(decoders=tools)]
 
 if PSM_DECODE:
-    # The SMA calibration layer, /Event/mutrig -> /Event/mutrig_cal, in a
-    # sequencer of its own straight after the decoder and gated on the raw SMA
-    # hits. Today it only puts the hits in time order (the decoder writes them in
-    # readout order); it is where SMA time calibrations will go. It is not a
+    # The SMA calibration layer, /Event/mutrig -> /Event/mutrig_cal and the
+    # sidecar /Event/sma_hits, in a sequencer of its own straight after the
+    # decoder and gated on the raw SMA hits. It aligns the counter hits, pairs each
+    # counter's TOT word with its NIM copy where the run cables and calibrates one
+    # (PSM_SMA_NIM_PAIRING), and puts the hits in time order (the decoder writes
+    # them in readout order). It is not a
     # member of PSMSMASeq on purpose: the MuPix timewalk layer, the MuPix monitor
     # and the track reco read its output too, and must find it with the SMA
     # monitor switched off. It has to come before PSMTimewalkSeq, whose
@@ -1244,7 +1459,13 @@ if PSM_DECODE:
     # through it by construction.
     # The raw /Event/mutrig stays on the TES in readout order.
     sma_cal = PIPSMSMACalibration("PIPSMSMACalibration", input=_TES_MUTRIG,
-                                  output=_TES_MUTRIG_CAL)
+                                  output=_TES_MUTRIG_CAL, hitsOutput=_TES_SMA_HITS,
+                                  NimPairing=bool(PSM_SMA_NIM_PAIRING),
+                                  PairWindowNs=float(PSM_SMA_PAIR_WINDOW_NS),
+                                  TimeSource=str(PSM_SMA_TIME_SOURCE),
+                                  NimOnlyTot=float(PSM_SMA_NIM_ONLY_TOT))
+    if PSM_SMA_OFFSET_OVERRIDE_NS:
+        sma_cal.OffsetOverrideNs = {int(k): float(v) for k, v in PSM_SMA_OFFSET_OVERRIDE_NS.items()}
     algorithms.append(Gaudi__Sequencer("PSMSMACalSeq", RequireObjects=[_TES_MUTRIG],
                                        Members=[sma_cal]))
 
@@ -1345,6 +1566,15 @@ if WD_ENABLED and WD_SCALER_MONITOR:
         input=_TES_SCALERS, boards=[int(b) for b in WD_SCALER_BOARDS],
         timeBinS=float(WD_SCALER_TIME_BIN_S), timeMaxS=float(WD_SCALER_TIME_MAX_S),
         fillStale=bool(WD_SCALER_FILL_STALE))
+    # The run's "current" input of the WaveDREAM role table is counted into
+    # proton_current_counts (rate x interval, see PIWDScalerCount.hpp); the
+    # rate counts / seconds times PIPSMSMACalibration's sma_live_seconds is the
+    # normalisation combine_files.py prefers. A run whose table has no current
+    # input, or WD_ROLE_TABLE = "", books none.
+    if WD_ROLE_TABLE:
+        scaler_monitor.RoleTable = WD_ROLE_TABLE
+        if WD_ROLE_TAG or WD_TAG:
+            scaler_monitor.RoleTag = WD_ROLE_TAG or WD_TAG
     algorithms.append(Gaudi__Sequencer("WDScalerSeq", RequireObjects=[_TES_SCALERS],
                                        Members=[scaler_monitor]))
 
@@ -1432,8 +1662,14 @@ if PSM_SMA_MONITOR:
         HitsPerEventMax=int(PSM_SMA_HITS_PER_EVENT_MAX),
         DegenerateTotShare=float(PSM_SMA_DEGENERATE_TOT_SHARE),
         MarkerTotShare=float(PSM_SMA_MARKER_TOT_SHARE))
-    if PSM_RF_CHANNEL is not None:
-        sma_monitor.RFInput = _TES_RF
+    # Always wired: whether a run has an RF channel is decided by its raw map at
+    # initialize, after this file has run, and an absent /Event/rf is an empty
+    # pulse list to the monitor.
+    sma_monitor.RFInput = _TES_RF
+    # The calibration layer's sidecar, index-parallel to /Event/mutrig_cal: its
+    # NIM-only hits (a configured ToT, not a measured one) are kept out of the ToT
+    # spectra and the degenerate/marker judgement.
+    sma_monitor.ScintHitsInput = _TES_SMA_HITS
     # A frame is left out of dt_to_s1_wide when its wide pairs exceed this cap, so a
     # cap of 0 leaves every frame out; the property's own default (a million pairs)
     # stands otherwise.
@@ -1473,7 +1709,7 @@ if PSM_RECO:
         # Plane membership (which VID is L1 vs L2) from the psm_geometry table,
         # set only when PIGeometrySvc was actually created above.
         all_reco.GeometrySvc = "PIGeometrySvc"
-    if PSM_RF_CHANNEL is not None:
+    if PSM_DECODE:
         # Each tracklet's S1 hit gets its RF phase (s1rfphase) under the same
         # rule and defaults as the SMA monitor's rf_phase, and the prompt
         # tracklets fill xy_vs_s1phase, xxp_vs_s1phase and yyp_vs_s1phase (and
@@ -1481,6 +1717,9 @@ if PSM_RECO:
         # phase window is a projection of them. /Event/rf is optional per
         # frame, as there.
         all_reco.RFInput = _TES_RF
+        # The calibration layer's sidecar (index-parallel to S_hits) gives each
+        # tracklet nimMask / incompleteMask, a bit per counter S1..S5.
+        all_reco.ScintHitsInput = _TES_SMA_HITS
     weight_reco = PIPSMComputeWeight(
         input=all_reco.output, output=_TES_PSM_WEIGHTS,
         Strategy=int(PSM_WEIGHT_STRATEGY), DistanceL12=float(PSM_DISTANCE_L12),
@@ -1498,7 +1737,23 @@ if PSM_RECO:
         RequireLPair=int(PSM_REQUIRE_L_HITS), DistanceL12=float(PSM_DISTANCE_L12),
         PhaseSpaceBins=int(PSM_PHASE_SPACE_BINS),
         PhaseSpacePosRange=float(PSM_PHASE_SPACE_POS_RANGE_MM),
-        PhaseSpaceSlopeRange=float(PSM_PHASE_SPACE_SLOPE_RANGE_MRAD))
+        PhaseSpaceSlopeRange=float(PSM_PHASE_SPACE_SLOPE_RANGE_MRAD),
+        DtBins=int(PSM_DELAYED_DT_BINS),
+        DelayedTotMin=float(PSM_DELAYED_TOT_MIN),
+        DelayedStopPlateOnly=int(PSM_DELAYED_STOP_PLATE_ONLY),
+        TaggedStopLayers=[int(x) for x in PSM_TAGGED_STOP_LAYERS],
+        StopPhaseHist=int(PSM_STOP_PHASE_HIST))
+    if PSM_DELAYED_TOT_MAX is not None:
+        tag_reco.DelayedTotMax = float(PSM_DELAYED_TOT_MAX)
+    if PSM_PROMPT_RF_WINDOW_NS is not None:
+        tag_reco.PromptPhaseMin = float(PSM_PROMPT_RF_WINDOW_NS[0])
+        tag_reco.PromptPhaseMax = float(PSM_PROMPT_RF_WINDOW_NS[1])
+    if PSM_FAR_WINDOW_NS is not None:
+        tag_reco.FarWindowMin = float(PSM_FAR_WINDOW_NS[0])
+        tag_reco.FarWindowMax = float(PSM_FAR_WINDOW_NS[1])
+    if PSM_PAIR_WINDOW_NS is not None:
+        tag_reco.PairWindowMin = float(PSM_PAIR_WINDOW_NS[0])
+        tag_reco.PairWindowMax = float(PSM_PAIR_WINDOW_NS[1])
     algorithms.append(Gaudi__Sequencer(
         "PSMRecoSeq", RequireObjects=[_TES_MUTRIG_CAL],
         Members=[all_reco, PIPSMPatternReco(input=all_reco.output), weight_reco, tag_reco]))
@@ -1516,6 +1771,14 @@ if WRITE_NTUPLE:
         _ntuple_rules.append("drop " + _TWC_NTUPLE_DROP[PSM_TWC_NTUPLE])
     if PSM_DECODE and _SMA_CAL_NTUPLE_DROP[PSM_SMA_CAL_NTUPLE]:
         _ntuple_rules.append("drop " + _SMA_CAL_NTUPLE_DROP[PSM_SMA_CAL_NTUPLE])
+    # PSM_SMA_HITS_NTUPLE: kept by default (no rule, so NTUPLE_RULES decide), or
+    # dropped by a last rule.
+    if PSM_DECODE and not PSM_SMA_HITS_NTUPLE:
+        _ntuple_rules.append("drop " + _TES_SMA_HITS)
+    if PSM_DECODE and PSM_SMA_HITS_NTUPLE and PSM_SMA_CAL_NTUPLE == "calibrated":
+        print(f"[nearline] WARNING    PSM_SMA_CAL_NTUPLE = \"calibrated\" drops {_TES_MUTRIG}, "
+              f"so the raw TOT/NIM indices of {_TES_SMA_HITS} point into a collection this "
+              "file does not have (the sidecar's times, ToTs and flags are still valid).")
     if _ntuple_rules:
         output.SelectionRules = _ntuple_rules
     output.AuditExecute = output.AuditInitialize = output.AuditFinalize = True
@@ -1554,9 +1817,16 @@ print(f"[nearline] halves     WD={WD_ENABLED} WD_SCALER_MONITOR={WD_SCALER_MONIT
       f" PSM_TIMEWALK_CORRECTION={PSM_TIMEWALK_CORRECTION}"
       f" PSM_SMA_WIDE_DT={PSM_SMA_WIDE_DT} PSM_SMA_DIAGNOSTICS={PSM_SMA_DIAGNOSTICS}")
 print(f"[nearline] layers     "
-      + (f"PIPSMSMACalibration {_TES_MUTRIG}->{_TES_MUTRIG_CAL}"
+      + (f"PIPSMSMACalibration {_TES_MUTRIG}->{_TES_MUTRIG_CAL}+{_TES_SMA_HITS}"
          f" PIPSMMuPixTimewalkCorrection {_TES_MUQUAD}->{_TES_MUQUAD_TWC}"
          if PSM_DECODE else "none (PSM_DECODE off)"))
+print(f"[nearline] sma pair   PSM_SMA_NIM_PAIRING={PSM_SMA_NIM_PAIRING}"
+      f" PSM_SMA_PAIR_WINDOW_NS={PSM_SMA_PAIR_WINDOW_NS} PSM_SMA_TIME_SOURCE={PSM_SMA_TIME_SOURCE}"
+      f" PSM_SMA_NIM_ONLY_TOT={PSM_SMA_NIM_ONLY_TOT}"
+      f" PSM_SMA_OFFSET_OVERRIDE_NS={PSM_SMA_OFFSET_OVERRIDE_NS or 'none'}")
 print(f"[nearline] sma fine   PSM_SMA_FINE_OFFSETS={PSM_SMA_FINE_OFFSETS}"
+      f" PSM_SMA_NIM_LAG={PSM_SMA_NIM_LAG}"
+      f" PSM_SMA_LAG_VIDS={list(PSM_SMA_LAG_VIDS)}"
+      f" PSM_SMA_NIM_NOMINAL_DELAY_NS={PSM_SMA_NIM_NOMINAL_DELAY_NS or 'none'}"
       f" PSM_SMA_SKIP_STALE_FIRST_FRAME={PSM_SMA_SKIP_STALE_FIRST_FRAME} subrun={_SUBRUN}")
 print(f"[nearline] EvtMax     {EVT_MAX}")

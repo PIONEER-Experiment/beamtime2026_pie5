@@ -339,6 +339,72 @@ def test_an_owners_only_value_other_than_0_or_1_is_rejected(job_env, value):
         _run(target, text)
 
 
+def test_the_stop_tag_rules_reach_the_reco(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    job = _run(target)
+    tag = job["tag_reco"]
+    assert (tag.WindowMin, tag.WindowMax, tag.DtBins) == (18.0, 115.0, 97)
+    assert (tag.DelayedTotMin, tag.DelayedTotMax, tag.DelayedStopPlateOnly) == (10.0, 30.0, 1)
+    assert tag.TaggedStopLayers == [2, 3, 4]
+    assert (tag.FarWindowMin, tag.FarWindowMax) == (-1000.0, -200.0)
+    assert (tag.PairWindowMin, tag.PairWindowMax) == (-1000.0, 500.0)
+    assert tag.StopPhaseHist == 1
+    # the prompt RF window is machinery only: off in the job
+    assert job["PSM_PROMPT_RF_WINDOW_NS"] is None
+    assert "PromptPhaseMin" not in tag.__dict__ and "PromptPhaseMax" not in tag.__dict__
+
+
+def test_the_optional_stop_tag_rules_can_be_switched_off_or_on(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = (target.read_text()
+            .replace("PSM_DELAYED_TOT_MAX = 30.0", "PSM_DELAYED_TOT_MAX = None")
+            .replace("PSM_FAR_WINDOW_NS = (-1000.0, -200.0)", "PSM_FAR_WINDOW_NS = None")
+            .replace("PSM_PAIR_WINDOW_NS = (-1000.0, 500.0)", "PSM_PAIR_WINDOW_NS = None")
+            .replace("PSM_PROMPT_RF_WINDOW_NS = None", "PSM_PROMPT_RF_WINDOW_NS = (95.0, 98.5)"))
+    tag = _run(target, text)["tag_reco"]
+    for prop in ("DelayedTotMax", "FarWindowMin", "FarWindowMax", "PairWindowMin", "PairWindowMax"):
+        assert prop not in tag.__dict__
+    assert (tag.PromptPhaseMin, tag.PromptPhaseMax) == (95.0, 98.5)
+
+
+@pytest.mark.parametrize("old, new", [
+    ("PSM_DELAYED_TOT_MAX = 30.0", "PSM_DELAYED_TOT_MAX = 10.0"),
+    ("PSM_DELAYED_TOT_MAX = 30.0", "PSM_DELAYED_TOT_MAX = 5.0"),
+    ("PSM_DELAYED_TOT_MIN = 10.0", "PSM_DELAYED_TOT_MIN = -1.0"),
+    ("PSM_DELAYED_TOT_MIN = 10.0", "PSM_DELAYED_TOT_MIN = float('nan')"),
+    ("PSM_PROMPT_RF_WINDOW_NS = None", "PSM_PROMPT_RF_WINDOW_NS = (98.5, 95.0)"),
+    ("PSM_TAGGED_STOP_LAYERS = (2, 3, 4)", "PSM_TAGGED_STOP_LAYERS = (3, 6)"),
+    ("PSM_TAGGED_STOP_LAYERS = (2, 3, 4)", "PSM_TAGGED_STOP_LAYERS = ('S3',)"),
+    ("PSM_FAR_WINDOW_NS = (-1000.0, -200.0)", "PSM_FAR_WINDOW_NS = (-1000.0, -100.0)"),
+    ("PSM_FAR_WINDOW_NS = (-1000.0, -200.0)", "PSM_FAR_WINDOW_NS = (-200.0, -1000.0)"),
+    ("PSM_PAIR_WINDOW_NS = (-1000.0, 500.0)", "PSM_PAIR_WINDOW_NS = (500.0, 500.0)"),
+    ("PSM_DELAYED_DT_BINS = 97", "PSM_DELAYED_DT_BINS = 25"),
+    ("PSM_DELAYED_DT_BINS = 97", "PSM_DELAYED_DT_BINS = 97.0"),
+])
+
+def test_an_inconsistent_stop_tag_rule_is_rejected(job_env, old, new):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text()
+    assert old in text
+    with pytest.raises(SystemExit, match=new.split(" = ")[0]):
+        _run(target, text.replace(old, new))
+
+
+def test_the_dt_bins_follow_the_delayed_window(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = (target.read_text().replace("PSM_DELAYED_WINDOW_NS = (18.0, 115.0)", "PSM_DELAYED_WINDOW_NS = (20.0, 70.0)")
+            .replace("PSM_DELAYED_DT_BINS = 97", "PSM_DELAYED_DT_BINS = 50"))
+    tag = _run(target, text)["tag_reco"]
+    assert (tag.WindowMin, tag.WindowMax, tag.DtBins) == (20.0, 70.0, 50)
+    with pytest.raises(SystemExit, match="PSM_DELAYED_DT_BINS"):
+        _run(target, target.read_text().replace("PSM_DELAYED_WINDOW_NS = (18.0, 115.0)",
+                                                "PSM_DELAYED_WINDOW_NS = (20.0, 70.0)"))
+
+
 @pytest.mark.parametrize("value", ["0.0", "-1.0", "20.0", "25.0"])
 def test_a_scint_window_that_is_empty_or_reaches_the_delayed_window_is_rejected(job_env, value):
     tmp_path, midas = job_env
@@ -346,6 +412,234 @@ def test_a_scint_window_that_is_empty_or_reaches_the_delayed_window_is_rejected(
     text = target.read_text().replace("PSM_SCINT_WINDOW_NS = 5.0", f"PSM_SCINT_WINDOW_NS = {value}")
     with pytest.raises(SystemExit, match="PSM_SCINT_WINDOW_NS"):
         _run(target, text)
+
+
+def test_rf_and_current_channels_come_from_the_map_by_default(job_env):
+    tmp_path, midas = job_env
+    job = _run(render_job(midas, tmp_path / "run00790_00000.root", light=False))
+    assert job["PSM_RF_CHANNEL"] is None and job["PSM_CURRENT_CHANNEL"] is None
+    musip = job["musip"].__dict__
+    assert "rf_channel" not in musip and "current_channel" not in musip
+    # the snap list is the decoder's default: its resolved RF channel
+    assert "fineOffsetSnapChannels" not in musip
+    # whether a run has RF is decided by its map, so the consumers always get it
+    assert job["sma_monitor"].RFInput == "/Event/rf"
+    assert job["all_reco"].RFInput == "/Event/rf"
+
+
+def test_reco_and_sma_monitor_read_the_pairing_sidecar(job_env):
+    tmp_path, midas = job_env
+    job = _run(render_job(midas, tmp_path / "run00790_00000.root", light=False))
+    # the sidecar is index-parallel to /Event/mutrig_cal, which both read
+    assert job["all_reco"].S_hits == "/Event/mutrig_cal"
+    assert job["all_reco"].ScintHitsInput == "/Event/sma_hits"
+    assert job["sma_monitor"].input == "/Event/mutrig_cal"
+    assert job["sma_monitor"].ScintHitsInput == "/Event/sma_hits"
+    assert job["sma_cal"].hitsOutput == "/Event/sma_hits"
+
+
+def test_rf_and_current_channels_override_the_map_when_set(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = (target.read_text().replace("PSM_RF_CHANNEL = None", "PSM_RF_CHANNEL = 5")
+            .replace("PSM_CURRENT_CHANNEL = None", "PSM_CURRENT_CHANNEL = 9"))
+    job = _run(target, text)
+    assert job["musip"].rf_channel == 5 and job["musip"].current_channel == 9
+    assert "fineOffsetSnapChannels" not in job["musip"].__dict__
+
+
+def test_rf_and_current_channels_can_be_switched_off(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = (target.read_text().replace("PSM_RF_CHANNEL = None", 'PSM_RF_CHANNEL = "off"')
+            .replace("PSM_CURRENT_CHANNEL = None", 'PSM_CURRENT_CHANNEL = "off"'))
+    job = _run(target, text)
+    assert job["musip"].rf_channel == -2 and job["musip"].current_channel == -2
+
+
+def test_the_nim_lag_is_on_with_the_decoders_roles_by_default(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    job = _run(target)
+    assert job["PSM_SMA_NIM_LAG"] is True and job["PSM_SMA_NIM_NOMINAL_DELAY_NS"] == {}
+    musip = job["musip"].__dict__
+    # the lag ids are the NIM copies, set explicitly from PSM_SMA_LAG_VIDS
+    assert musip["fineOffsetLagVids"] == [2021, 2023, 2024, 2025, 2026]
+    # the other roles by detector id are the decoder's defaults; no raw-channel lists
+    for prop in ("fineOffsetLagNominalNs", "fineOffsetReferenceVid",
+                 "fineOffsetVoteVids", "fineOffsetHalvedVids", "fineOffsetVoteChannels",
+                 "fineOffsetHalvedChannels", "fineOffsetLagChannels", "fineOffsetReferenceChannel"):
+        assert prop not in musip, prop
+    text = (target.read_text().replace("PSM_SMA_NIM_LAG = True", "PSM_SMA_NIM_LAG = False")
+            .replace("PSM_SMA_NIM_NOMINAL_DELAY_NS = {}", "PSM_SMA_NIM_NOMINAL_DELAY_NS = {2025: 42}"))
+    musip = _run(target, text)["musip"]
+    assert musip.fineOffsetLagVids == []
+    assert musip.fineOffsetLagNominalNs == {2025: 42.0}
+    assert isinstance(musip.fineOffsetLagNominalNs[2025], float)
+
+
+def test_the_lag_ids_can_take_a_tot_id(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text().replace("PSM_SMA_LAG_VIDS = [2021, 2023, 2024, 2025, 2026]",
+                                      "PSM_SMA_LAG_VIDS = [2021, 2023, 2024, 2025, 2026, 2004]")
+    job = _run(target, text)
+    assert job["musip"].fineOffsetLagVids == [2021, 2023, 2024, 2025, 2026, 2004]
+    # the lag switch still wins
+    text = text.replace("PSM_SMA_NIM_LAG = True", "PSM_SMA_NIM_LAG = False")
+    assert _run(target, text)["musip"].fineOffsetLagVids == []
+
+
+@pytest.mark.parametrize("old, new, match", [
+    ("PSM_SMA_NIM_LAG = True", "PSM_SMA_NIM_LAG = 1", "PSM_SMA_NIM_LAG"),
+    ("PSM_SMA_NIM_LAG = True", "PSM_SMA_NIM_LAG = 'True'", "PSM_SMA_NIM_LAG"),
+    ("PSM_SMA_NIM_NOMINAL_DELAY_NS = {}", "PSM_SMA_NIM_NOMINAL_DELAY_NS = {'2025': 42}",
+     "PSM_SMA_NIM_NOMINAL_DELAY_NS"),
+    ("PSM_SMA_NIM_NOMINAL_DELAY_NS = {}", "PSM_SMA_NIM_NOMINAL_DELAY_NS = {2025: '42'}",
+     "PSM_SMA_NIM_NOMINAL_DELAY_NS"),
+    ("PSM_SMA_NIM_NOMINAL_DELAY_NS = {}", "PSM_SMA_NIM_NOMINAL_DELAY_NS = {2025: 2**20}",
+     "PSM_SMA_NIM_NOMINAL_DELAY_NS"),
+    ("PSM_SMA_NIM_NOMINAL_DELAY_NS = {}", "PSM_SMA_NIM_NOMINAL_DELAY_NS = {2025: float('nan')}",
+     "PSM_SMA_NIM_NOMINAL_DELAY_NS"),
+    ("PSM_SMA_NIM_NOMINAL_DELAY_NS = {}", "PSM_SMA_NIM_NOMINAL_DELAY_NS = [(2025, 42)]",
+     "PSM_SMA_NIM_NOMINAL_DELAY_NS"),
+    ("PSM_SMA_LAG_VIDS = [2021", "PSM_SMA_LAG_VIDS = [2001, 2021", "2001 \\(the S1 reference\\)"),
+    ("PSM_SMA_LAG_VIDS = [2021", "PSM_SMA_LAG_VIDS = [2014, 2021", "2014 \\(the RF role marker\\)"),
+    ("PSM_SMA_LAG_VIDS = [2021", "PSM_SMA_LAG_VIDS = [2002, 2021", "2002 \\(the parked id"),
+    ("PSM_SMA_LAG_VIDS = [2021", "PSM_SMA_LAG_VIDS = [2015, 2021", "2015 \\(the proton-current role marker\\)"),
+    ("PSM_SMA_LAG_VIDS = [2021", "PSM_SMA_LAG_VIDS = [2021, 2021", "PSM_SMA_LAG_VIDS"),
+    ("PSM_SMA_LAG_VIDS = [2021", "PSM_SMA_LAG_VIDS = ['2004', 2021", "PSM_SMA_LAG_VIDS"),
+    ("PSM_SMA_LAG_VIDS = [2021, 2023, 2024, 2025, 2026]", "PSM_SMA_LAG_VIDS = 2024", "PSM_SMA_LAG_VIDS"),
+])
+def test_a_bad_nim_lag_knob_is_rejected(job_env, old, new, match):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text()
+    assert old in text
+    with pytest.raises(SystemExit, match=match):
+        _run(target, text.replace(old, new))
+
+
+@pytest.mark.parametrize("rf, current, match", [
+    ("16", "None", "PSM_RF_CHANNEL is 16"),
+    ("'OFF'", "None", "PSM_RF_CHANNEL is 'OFF'"),
+    ("-2", "None", "PSM_RF_CHANNEL is -2"),
+    ("None", "'none'", "PSM_CURRENT_CHANNEL is 'none'"),
+    ("-1", "None", "PSM_RF_CHANNEL is -1"),
+    ("'6'", "None", "PSM_RF_CHANNEL is '6'"),
+    ("True", "None", "PSM_RF_CHANNEL is True"),
+    ("None", "16", "PSM_CURRENT_CHANNEL is 16"),
+    ("None", "6.0", "PSM_CURRENT_CHANNEL is 6.0"),
+    ("6", "6", "are both 6"),
+])
+def test_a_bad_rf_or_current_channel_is_rejected(job_env, rf, current, match):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = (target.read_text().replace("PSM_RF_CHANNEL = None", f"PSM_RF_CHANNEL = {rf}")
+            .replace("PSM_CURRENT_CHANNEL = None", f"PSM_CURRENT_CHANNEL = {current}"))
+    with pytest.raises(SystemExit, match=match):
+        _run(target, text)
+
+
+def test_the_scaler_monitor_counts_the_current_of_the_role_table(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    job = _run(target)
+    assert job["scaler_monitor"].RoleTable == "wd_channel_map"
+    assert "RoleTag" not in job["scaler_monitor"].__dict__
+    job = _run(target, target.read_text().replace('WD_ROLE_TABLE = "wd_channel_map"',
+                                                  'WD_ROLE_TABLE = ""'))
+    assert "RoleTable" not in job["scaler_monitor"].__dict__
+
+
+def test_sma_nim_pairing_knobs_reach_the_calibration_layer(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    job = _run(target)
+    cal = job["sma_cal"]
+    assert cal.input == "/Event/mutrig" and cal.output == "/Event/mutrig_cal"
+    assert cal.hitsOutput == "/Event/sma_hits"
+    assert cal.NimPairing is True and cal.PairWindowNs == 20.0
+    assert cal.TimeSource == "tot" and cal.NimOnlyTot == 1.0
+    # the development override is not set unless asked for
+    assert "OffsetOverrideNs" not in cal.__dict__
+    text = (target.read_text().replace("PSM_SMA_NIM_PAIRING = True", "PSM_SMA_NIM_PAIRING = False")
+            .replace("PSM_SMA_PAIR_WINDOW_NS = 20.0", "PSM_SMA_PAIR_WINDOW_NS = 12")
+            .replace('PSM_SMA_TIME_SOURCE = "tot"', 'PSM_SMA_TIME_SOURCE = "nim"')
+            .replace("PSM_SMA_NIM_ONLY_TOT = 1.0", "PSM_SMA_NIM_ONLY_TOT = 2")
+            .replace("PSM_SMA_OFFSET_OVERRIDE_NS = {}", "PSM_SMA_OFFSET_OVERRIDE_NS = {2024: -153522}"))
+    cal = _run(target, text)["sma_cal"]
+    assert cal.NimPairing is False and cal.PairWindowNs == 12.0 and cal.TimeSource == "nim"
+    assert cal.NimOnlyTot == 2.0 and isinstance(cal.NimOnlyTot, float)
+    assert cal.OffsetOverrideNs == {2024: -153522.0}
+    assert isinstance(cal.OffsetOverrideNs[2024], float)
+
+
+@pytest.mark.parametrize("mode, drops", [("raw", ["drop /Event/mutrig_cal"]),
+                                         ("both", []),
+                                         ("calibrated", ["drop /Event/mutrig"])])
+def test_sma_hits_is_kept_in_every_sma_cal_ntuple_mode(job_env, mode, drops, capsys):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text().replace('PSM_SMA_CAL_NTUPLE = "raw"', f'PSM_SMA_CAL_NTUPLE = "{mode}"')
+    rules = list(_run(target, text)["output"].SelectionRules)
+    # the default PSM_TWC_NTUPLE rule first, then the SMA mode's; nothing drops the sidecar
+    assert rules == ["drop /Event/muquad"] + drops
+    # "calibrated" drops what the sidecar's raw indices point into, and says so
+    warned = "raw TOT/NIM indices of /Event/sma_hits" in capsys.readouterr().out
+    assert warned == (mode == "calibrated")
+
+
+def test_sma_hits_ntuple_false_drops_the_sidecar_last(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = (target.read_text().replace("PSM_SMA_HITS_NTUPLE = True", "PSM_SMA_HITS_NTUPLE = False")
+            .replace("NTUPLE_RULES = []", 'NTUPLE_RULES = ["keep /Event/*"]'))
+    rules = list(_run(target, text)["output"].SelectionRules)
+    assert rules[0] == "keep /Event/*" and rules[-1] == "drop /Event/sma_hits"
+
+
+def test_users_rules_can_drop_the_sidecar(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text().replace("NTUPLE_RULES = []", 'NTUPLE_RULES = ["drop /Event/sma_hits"]')
+    rules = list(_run(target, text)["output"].SelectionRules)
+    assert rules[0] == "drop /Event/sma_hits"
+    assert not any(r.startswith("keep") and "sma_hits" in r for r in rules)
+
+
+@pytest.mark.parametrize("old, new, match", [
+    ("PSM_SMA_NIM_PAIRING = True", "PSM_SMA_NIM_PAIRING = 'False'", "PSM_SMA_NIM_PAIRING"),
+    ("PSM_SMA_NIM_PAIRING = True", "PSM_SMA_NIM_PAIRING = 1", "PSM_SMA_NIM_PAIRING"),
+    ("PSM_SMA_PAIR_WINDOW_NS = 20.0", "PSM_SMA_PAIR_WINDOW_NS = 0", "PSM_SMA_PAIR_WINDOW_NS"),
+    ("PSM_SMA_PAIR_WINDOW_NS = 20.0", "PSM_SMA_PAIR_WINDOW_NS = -5.0", "PSM_SMA_PAIR_WINDOW_NS"),
+    ("PSM_SMA_PAIR_WINDOW_NS = 20.0", "PSM_SMA_PAIR_WINDOW_NS = 5000.0", "PSM_SMA_PAIR_WINDOW_NS"),
+    ("PSM_SMA_PAIR_WINDOW_NS = 20.0", "PSM_SMA_PAIR_WINDOW_NS = '20'", "PSM_SMA_PAIR_WINDOW_NS"),
+    ("PSM_SMA_PAIR_WINDOW_NS = 20.0", "PSM_SMA_PAIR_WINDOW_NS = True", "PSM_SMA_PAIR_WINDOW_NS"),
+    ("PSM_SMA_PAIR_WINDOW_NS = 20.0", "PSM_SMA_PAIR_WINDOW_NS = float('nan')", "PSM_SMA_PAIR_WINDOW_NS"),
+    ('PSM_SMA_TIME_SOURCE = "tot"', 'PSM_SMA_TIME_SOURCE = "TOT"', "PSM_SMA_TIME_SOURCE"),
+    ('PSM_SMA_TIME_SOURCE = "tot"', "PSM_SMA_TIME_SOURCE = None", "PSM_SMA_TIME_SOURCE"),
+    ("PSM_SMA_NIM_ONLY_TOT = 1.0", "PSM_SMA_NIM_ONLY_TOT = -1.0", "PSM_SMA_NIM_ONLY_TOT"),
+    ("PSM_SMA_NIM_ONLY_TOT = 1.0", "PSM_SMA_NIM_ONLY_TOT = 300", "PSM_SMA_NIM_ONLY_TOT"),
+    ("PSM_SMA_NIM_ONLY_TOT = 1.0", "PSM_SMA_NIM_ONLY_TOT = '1'", "PSM_SMA_NIM_ONLY_TOT"),
+    # at or below PSM_LAYER_THR (0.2) a NIM-only hit would fire no layer
+    ("PSM_SMA_NIM_ONLY_TOT = 1.0", "PSM_SMA_NIM_ONLY_TOT = 0", "PSM_SMA_NIM_ONLY_TOT"),
+    ("PSM_SMA_NIM_ONLY_TOT = 1.0", "PSM_SMA_NIM_ONLY_TOT = 0.2", "PSM_SMA_NIM_ONLY_TOT"),
+    ("PSM_SMA_HITS_NTUPLE = True", "PSM_SMA_HITS_NTUPLE = 1", "PSM_SMA_HITS_NTUPLE"),
+    ("PSM_SMA_OFFSET_OVERRIDE_NS = {}", "PSM_SMA_OFFSET_OVERRIDE_NS = {'2024': 5.0}",
+     "PSM_SMA_OFFSET_OVERRIDE_NS"),
+    ("PSM_SMA_OFFSET_OVERRIDE_NS = {}", "PSM_SMA_OFFSET_OVERRIDE_NS = {2024: '5'}",
+     "PSM_SMA_OFFSET_OVERRIDE_NS"),
+    ("PSM_SMA_OFFSET_OVERRIDE_NS = {}", "PSM_SMA_OFFSET_OVERRIDE_NS = [(2024, 5.0)]",
+     "PSM_SMA_OFFSET_OVERRIDE_NS"),
+])
+def test_a_bad_sma_pairing_knob_is_rejected(job_env, old, new, match):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text()
+    assert old in text
+    with pytest.raises(SystemExit, match=match):
+        _run(target, text.replace(old, new))
 
 
 # -- the conditions source ----------------------------------------------------

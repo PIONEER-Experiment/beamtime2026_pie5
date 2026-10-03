@@ -1091,7 +1091,7 @@ class TuningLoop:
 
     def exposure(self, numbers, step=None, incomplete=None):
         """``measurement.exposure`` of MIDAS runs `numbers`, so the service
-        can normalise rates by run time when the SMA proton current is empty.
+        can normalise rates by run time when the proton current is empty.
 
         A run the daemon recorded for `step` (record_run_start/_stop) gets
         seconds = stop - start and wd_events = events at stop - events at
