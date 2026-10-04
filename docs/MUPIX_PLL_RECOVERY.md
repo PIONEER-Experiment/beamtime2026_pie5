@@ -52,6 +52,12 @@ in the message log.
 
 ## The yellow alarm
 
+(A yellow **MuPix sync** banner is something else: the SMA DQM analyzer,
+`sma_analyzer`, watches the chips all the time, during runs too, and raises it
+when a chip loses its PLL; it repairs nothing. See wavedream-midas-dqm
+`docs/SMA-DQM.md`, "The MuPix sync alarm (a chip lost its PLL)". The fix is
+the same: the recovery below, with the run stopped.)
+
 You get the yellow **Seq operator** banner and a message on the Sequencer page
 in these cases:
 
