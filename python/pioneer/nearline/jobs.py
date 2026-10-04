@@ -76,15 +76,19 @@ class BaseJob:
 
         cmd = self.build_command()
         if self.infile:
-            log_name = self.logpath / f"run{self.infile['filebase']}_{self.config['job_type']}.log"
+            log_name = self.logpath / f"{self.infile['filebase']}_{self.config['job_type']}.log"
         elif 'midas_run_number' in self.config.keys():
             log_name = self.logpath / f"run{self.config['midas_run_number']:05d}_{self.config['job_type']}.log"
         elif self.config.get("job_type", "") == "merge":
-            log_name = self.logpath / f"seq{self.config['id']:05d}_{self.config['job_type']}.log"
+            log_name = self.logpath / f"seq{self.config['job_id']:05d}_{self.config['job_type']}.log"
         else:
-            log_name = self.logpath / f"job{self.config['id']:05d}_{self.config['job_type']}.log"
+            log_name = self.logpath / f"job{self.config['job_id']:05d}_{self.config['job_type']}.log"
 
         self.logfile = log_name.open("w")
+        self.logfile.write(f"Job ID: {self.config['job_id']}, Run ID: {self.config.get('run_id', '---')}, Job Type: {self.config['job_type']}\n\n")
+        self.logfile.write(" ".join([str(c) for c in cmd]))
+        self.logfile.write("\n\n")
+        self.logfile.flush()
         if (dry_run_all_jobs):
             print(" ".join([str(c) for c in cmd]))
             self.proc = subprocess.Popen(['sleep', '2'])
