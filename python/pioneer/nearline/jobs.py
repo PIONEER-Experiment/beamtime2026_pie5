@@ -162,13 +162,38 @@ class DummyJob(BaseJob):
     def build_command(self):
         return ['sleep', '3']
 
+def odb_dump_path(data_dir, dump_file, run_number):
+    """Where mlogger wrote the ODB dump of run `run_number`, or None.
+
+    `dump_file` is /Logger/ODB Dump File (run%05d.json): mlogger formats it
+    with the run number when it holds a %, and places it in /Logger/Data dir
+    unless it is an absolute path. An empty setting means no dump.
+    """
+    if not dump_file:
+        return None
+    name = dump_file % run_number if "%" in dump_file else dump_file
+    return Path(data_dir) / name
+
+
 class RsyncJob(BaseJob):
     """
     Synchronise data between different locations.
     It can either be between two local locations (SSD to HDD transfer)
     or to a remote machine (DAQ machine to Analysis machine). It is assumed
     that SSH keys are configured for remote transfers.
+
+    A raw-data job also carries the run's ODB dump when the daemon names one
+    in `odb_dump_path`, so the analysis host can show a run's ODB without its
+    reconstruction output. It is added only if it exists: a run without a dump
+    must not fail the transfer of its data.
     """
+    def get_files(self, include_sidecars = True):
+        files = super().get_files(include_sidecars = include_sidecars)
+        dump = self.config.get('odb_dump_path')
+        if dump and Path(dump).is_file() and Path(dump) not in files:
+            files.append(Path(dump))
+        return files
+
     def build_command(self):
         return ['rsync', '-av', *self.get_files(), self.destination]
 

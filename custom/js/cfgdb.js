@@ -96,6 +96,7 @@ const state = {
    queue: null,              // data of the last good `queue`
    sequences: null,          // rows of the last good `sequences`
    configuration_tables : {'target_positions' : [], 'degrader_positions' : [], 'beamline_settings' : []},
+   showRunplan: false,       // runplan configurations shown in the tables
    runs: {},                 // runlog rows by database id, newest first when sorted
    nextBeforeId: null,       // paging cursor from the last runlog reply
    haveRunlog: false,
@@ -280,6 +281,27 @@ function staleHtml(st) {
 // Configuration Table
 // ---------------------------------------------------------------------------
 
+// The runplan backend writes one configuration per plan step, with a comment
+// "runplan <plan> step <n> ...". They pile up quickly and are not meant to be
+// picked by hand, so the tables hide them until asked. The choice is kept per
+// browser; it is a convenience, so a browser without storage just hides them.
+const RUNPLAN_COMMENT = /^runplan\s/;
+const SHOW_RUNPLAN_KEY = "cfgdb.showRunplan";
+
+function isRunplanConfig(row) {
+   return RUNPLAN_COMMENT.test((row && row.comment) || "");
+}
+
+function runplanAttr(row) {
+   return isRunplanConfig(row) ? " data-runplan='1'" : "";
+}
+
+/** The show/hide line under a table; filled in by applyRunplanVisibility(). */
+function runplanToggleHtml(rows) {
+   const n = (rows || []).filter(isRunplanConfig).length;
+   return '<div class="rundb-note cfg-runplan-toggle" data-count="' + n + '"></div>';
+}
+
 function configTableHtml(configuration_tables) {
    if (!configuration_tables) return '<div class="rundb-note">waiting for the first answer&hellip;</div>';
 
@@ -288,7 +310,7 @@ function configTableHtml(configuration_tables) {
    const target_body = configuration_tables.target_positions.map(function(row) {
       const do_not_use_cell = row.do_not_use
             ? " --- " : '<input type="checkbox" class="config-ckbx-target" value="' + row.config_type + ":" + row.config_id + '">';
-      return "<tr id=cfg_row" + row.config_id + "' data-values='" +
+      return "<tr" + runplanAttr(row) + " id=cfg_row" + row.config_id + "' data-values='" +
                   JSON.stringify(row.values || {}).replace(/'/g, "&#39;") +
                   "'>" +
               "<td>" + row.config_id + "</td>" +
@@ -306,7 +328,7 @@ function configTableHtml(configuration_tables) {
    const degrader_body = configuration_tables.degrader_positions.map(function(row) {
       const do_not_use_cell = row.do_not_use
             ? " --- " : '<input type="checkbox" class="config-ckbx-degrader"  value="' + row.config_type + ":" + row.config_id + '">';
-       return "<tr id=cfg_row" + row.config_id +  "' data-values='" +
+       return "<tr" + runplanAttr(row) + " id=cfg_row" + row.config_id +  "' data-values='" +
                   JSON.stringify(row.values || {}).replace(/'/g, "&#39;") +
                   "'>" +
               "<td>" + row.config_id + "</td>" +
@@ -322,7 +344,7 @@ function configTableHtml(configuration_tables) {
    const beamline_body   = configuration_tables.beamline_settings.map(function(row) {
       const do_not_use_cell = row.do_not_use
             ? " --- " : '<input type="checkbox" class="config-ckbx-beam"  value="' + row.config_type + ":" + row.config_id + '">';
-       return "<tr id=cfg_row" + row.config_id + "' data-values='" +
+       return "<tr" + runplanAttr(row) + " id=cfg_row" + row.config_id + "' data-values='" +
                   JSON.stringify(row.values || {}).replace(/'/g, "&#39;") +
                   "'>" +
               "<td>" + row.config_id + "</td>" +
@@ -348,6 +370,7 @@ function configTableHtml(configuration_tables) {
           target_header +
           target_body.join("") +
           "</table>" +
+          runplanToggleHtml(configuration_tables.target_positions) +
           '<div id="target-add-line"></div>' +
 
          '<h3 class="rundb-h"><a href="http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FDegrader%2FVariables"> Degrader Positions </a></h3>'+
@@ -355,6 +378,7 @@ function configTableHtml(configuration_tables) {
          degrader_header +
          degrader_body.join("") +
          "</table>" +
+         runplanToggleHtml(configuration_tables.degrader_positions) +
          '<div id="degrader-add-line"></div>' +
 
          '<h3 class="rundb-h"><a href="http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FEPICS">' + configuration_tables.beamline.name + ' Beamline </a></h3>'+
@@ -362,6 +386,7 @@ function configTableHtml(configuration_tables) {
          beamline_header +
          beamline_body.join("") +
          "</table>" +
+         runplanToggleHtml(configuration_tables.beamline_settings) +
          '<div id="beam_add_line"></div>' +
 
          '<table class="mtable rundb-table">' +
@@ -493,6 +518,40 @@ function renderAlerts() {
    }
 }
 
+function readShowRunplan() {
+   try { return root.localStorage.getItem(SHOW_RUNPLAN_KEY) === "1"; }
+   catch (err) { return false; }
+}
+
+function writeShowRunplan(show) {
+   try { root.localStorage.setItem(SHOW_RUNPLAN_KEY, show ? "1" : "0"); }
+   catch (err) { /* no storage: the choice lasts until the page is reloaded */ }
+}
+
+/**
+ * Show or hide the runplan rows and redo the lines under the tables. Hiding a
+ * row also unticks it: a run count that includes rows nobody can see would be
+ * a trap.
+ */
+function applyRunplanVisibility() {
+   const show = state.showRunplan;
+   document.querySelectorAll("#rundb-configs tr[data-runplan]").forEach(function (row) {
+      row.style.display = show ? "" : "none";
+      if (!show) row.querySelectorAll("input[type=checkbox]:checked").forEach(function (box) {
+         box.checked = false;
+      });
+   });
+   document.querySelectorAll("#rundb-configs .cfg-runplan-toggle").forEach(function (node) {
+      const n = Number(node.dataset.count) || 0;
+      const what = n + " runplan configuration" + (n === 1 ? "" : "s");
+      node.style.display = n ? "" : "none";
+      node.innerHTML = show
+         ? "Showing " + what + ' &mdash; <a href="#" class="cfg-runplan-switch">hide</a>'
+         : what + ' hidden &mdash; <a href="#" class="cfg-runplan-switch">show</a>';
+   });
+   updateNumRuns();
+}
+
 function updateNumRuns() {
    const num_targets = document.querySelectorAll( ".config-ckbx-target:checked" ).length;
    const num_degraders = document.querySelectorAll( ".config-ckbx-degrader:checked" ).length;
@@ -521,6 +580,16 @@ async function renderConfigurations() {
       "beamline" : {"name" : beamline, "table" : beamtable }
    };
    put("rundb-configs", configTableHtml(state.configuration_tables))
+
+   state.showRunplan = readShowRunplan();
+   applyRunplanVisibility();
+   el("rundb-configs").addEventListener("click", function (e) {
+      if (!e.target.matches(".cfg-runplan-switch")) return;
+      e.preventDefault();
+      state.showRunplan = !state.showRunplan;
+      writeShowRunplan(state.showRunplan);
+      applyRunplanVisibility();
+   });
 
    document.querySelectorAll( ".config-ckbx-target, .config-ckbx-degrader, .config-ckbx-beam" ).forEach(function(checkbox) {
       checkbox.addEventListener("change", updateNumRuns);
@@ -725,7 +794,7 @@ const CFGDB = {
    CONFIG_ROOT, DEFAULTS, ODB_PATHS,
    // pure builders, all testable without a browser or a database
    runStateWord, stripHtml, sequencerNoteHtml, staleHtml,
-   databaseError, note, init,
+   databaseError, note, init, isRunplanConfig,
    // loops, exported so a fixture page can drive them one step at a time
    pollOdb
 };
