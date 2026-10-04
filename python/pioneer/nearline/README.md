@@ -64,7 +64,7 @@ PIHistogramSvc        histograms/<instance>/<name> -> <out>_hists.root
 | instance | TES inputs | TES outputs | histograms |
 |---|---|---|---|
 | `PITMidasWaveDream` | WaveDREAM banks | `/Event/wd_event_header`, `wd_waveform`, `wd_channel_time`, `wd_timebase`, `wd_scalers` | — |
-| `PITMidasMusip` | `H000` | `/Event/muquad`, `/Event/mutrig`, `/Event/rf` (only on a run with an RF channel) | `musip/current` (only on a run with a proton-current channel); with `PSM_SMA_DIAGNOSTICS` also `musip/sma_word_types`, `sma_words_per_channel`, `sma_bank_words_per_frame`, `sma_trigger_words_per_frame`, `sma_frame_span_ms`, `sma_frame_gap_ms`, `sma_live_time`, `sma_fine_coarse_diff`, `sma_fine_vs_coarse`, `sma_fine_bit_occupancy`; with `PSM_PIXEL_MASK` also `musip/mupix_masked_hits` (pixel words the mask dropped, one bin per chip, labelled `<vid> (raw <id>)`) and `musip/mupix_masked_hits_per_pixel` (one bin per masked pixel, labelled `<vid> c<col> r<row>`) |
+| `PITMidasMusip` | `H000` | `/Event/muquad`, `/Event/mutrig`, `/Event/rf` (only on a run with an RF channel) | `musip/current` (only on a run with a proton-current channel); with `PSM_SMA_DIAGNOSTICS` also `musip/sma_word_types`, `sma_words_per_channel`, `sma_bank_words_per_frame`, `sma_trigger_words_per_frame`, `sma_frame_span_ms`, `sma_frame_gap_ms`, `sma_live_time`, `sma_fine_coarse_diff`, `sma_fine_vs_coarse`, `sma_fine_bit_occupancy`; with `PSM_PIXEL_MASK` also `musip/mupix_masked_hits` (pixel words the mask dropped, one bin per chip, labelled `<vid> (raw <id>)`) and `musip/mupix_masked_hits_per_pixel` (one bin per masked pixel, labelled `<vid> c<col> r<row>`); always `musip/mupix_tot_vs_chip` (pixel ToT per chip before the ToT cut, x = chip labelled `<vid> (raw <id>)`, y = ToT 0..31, booked at every `PSM_MUPIX_TOT_CUT`, `-1` included). With the cut on, the finalize line `N pixel word(s) with ToT <= C dropped by the ToT cut` gives the count per chip |
 | `PITMidasMusip` | `H000` | (state product) | `/Event/sma_time_state` (PIPSMSMATimeState): per H000 bank and SMA channel, the fine-offset k, how it was found, mixed/undetermined flags, word counters and S5 class counts, and for each NIM copy the frame's lag against S1 (`m_lagNs`, `INT32_MIN` = none) and whether it was removed (`m_flags` bit 2); one entry per bank. Version 2; version-1 files read back with the lag columns at `INT32_MIN` |
 | `PIPSMSMACalibration` | `/Event/mutrig` | `/Event/mutrig_cal`; `/Event/sma_hits` (PIPSMSMAHits, index-parallel to `mutrig_cal`: id, time, aligned TOT and NIM times, ToT, NIM width, flags, raw TOT/NIM indices, the ToT written) | always `sma_live_seconds` (one bin: the summed SMA frame spans, last minus first hit time of every frame, frames over 10 s left out; the live time the merge step multiplies the WaveDREAM rate with); per counter whose NIM copy the run cables (named by the TOT id): `dt_raw_<id>`, `dt_aligned_<id>` (t_NIM − nearest t_TOT, ±200 ns), `dt_wide_<id>` (all TOT words within 2^19 ns, the fine-field span), `dt_vs_tot_<id>` (the walk), `classes_<id>`, `nim_width_<id>`, `nim_candidates_<id>` |
 | `PIPSMMuPixTimewalkCorrection` | `/Event/muquad`; `/Event/mutrig_cal` (optional, only with `PSM_TIMEWALK`) | `/Event/muquad_twc` | `twc_hits` (hits corrected, hits passed through without constants, events without counters (no `/Event/mutrig_cal`), events); with `PSM_TIMEWALK` the all-pairs dt(pixel − S1) vs pixel ToT before and after the correction, `twc_dt_vs_tot_raw_<vid>` / `twc_dt_vs_tot_cor_<vid>` per chip (detector ids 10011-10014, 10021-10024) and `twc_dt_vs_tot_raw_L<n>` / `twc_dt_vs_tot_cor_L<n>` per plane |
@@ -276,6 +276,7 @@ stops the job at `initialize()`, as it does for `PIWDWaveformAnalysis`.
 | `PSM_SMA_SKIP_STALE_FIRST_FRAME` | `True` | Frame 0 of subrun 0 holds a stale replay of the previous run. On, the decoder drops the first H000 bank when the input file is subrun 0 (the second number in the name, `run00790_00000`); other subruns, and a name with no subrun (the banner warns), are left alone. Changes the hits, so `LIGHT` does not switch it off |
 | `PSM_PIXEL_MASK` | `True` | Drops MuPix pixel words on hot pixels: the run's interval of `mupix_pixel_mask` in `bt2026_psm_readout_map.json`, a list of (detector id, column, row). The decoder counts what it drops in `histograms/musip/mupix_masked_hits` (per chip) and `mupix_masked_hits_per_pixel` and in its finalize line `N pixel word(s) on the M masked pixel(s) dropped`. The shipped table masks **nothing** on [0, open); a noisy-pixel study adds an interval through `python -m pioneer.conddb.mupix_mask` (see *Masking hot pixels* below). A run the table does not resolve for — the container missing from the job, or an interval closed without a replacement — stops the job at `initialize()` rather than running unmasked. `False` decodes every pixel word and books neither histogram. Noise bursts are not treated by the mask |
 | `PSM_PIXEL_MASK_TAG` | `None` | Tag of `mupix_pixel_mask` to read; `None` is the table's default tag. A trial mask under its own tag is tried by naming it here; anything but `None` or a non-empty string is rejected by `check()` |
+| `PSM_MUPIX_TOT_CUT` | `2` | Drops MuPix pixel hits whose ToT (256 ns counts, 0..31) is at or below this value, in the decoder, before the timewalk layer, the MuPix monitor and the track reco. Low ToT (0-2) is mostly crosstalk ghosts, noise bursts and hot pixels. `musip/mupix_tot_vs_chip` is filled before the cut, so the dropped population stays visible. `-1` keeps every hit; anything but an integer in [-1, 31] (a bool included) is rejected by `check()`. Needs a reco_testbeam with the `mupixTotCut` property; on an older build the job prints a WARNING and keeps every ToT |
 | `PSM_SMA_NIM_PAIRING` | `True` | `PIPSMSMACalibration` pairs each counter's TOT word with its NIM copy (S1L..S5L, ids 2021, 2023-2026) into one hit, for every counter whose copy the run's `mutrig_channel_map` interval cables **and** the `sma_time_alignment` table has an offset for. A cabled copy without an offset is histogrammed only and its words stay out of `/Event/mutrig_cal`. The shipped table has no NIM offsets, so the output stays the time-ordered TOT hits until they are measured; harmless on runs without copies. `False` drops the NIM words and applies no offsets. See *SMA calibration*. Changes the hits, so `LIGHT` does not switch it off; not a bool is rejected by `check()` |
 | `PSM_SMA_PAIR_WINDOW_NS` | `20.0` | Largest aligned \|t_NIM − t_TOT\| of a pair (inclusive). Too narrow and walk or jitter splits real pairs into a TOT-only and a NIM-only hit; too wide and a NIM word pairs with a neighbouring particle's TOT word (about one RF period, 20 ns, apart). `check()` wants a number in (0, 1000] |
 | `PSM_SMA_TIME_SOURCE` | `"tot"` | Time of a paired hit: `"tot"` (the TOT word's leading edge, which walks with amplitude) or `"nim"` (the NIM copy's CFD time). `"nim"` can reorder hits. A NIM-only hit always has the NIM time. Anything else is rejected by `check()` |
@@ -1667,33 +1668,34 @@ where an unreachable server fails the job (*Conditions DB down*).
 16. `PSM_SMA_DEGENERATE_TOT_SHARE` or `PSM_SMA_MARKER_TOT_SHARE` outside `(0, 1]`: both are shares of one counter's hits.
 17. `PSM_SMA_COARSE_SHIFT` neither `None` nor an integer 0-18: above 18 the coarse field no longer pins the fine field's wrap.
 18. `PSM_PIXEL_MASK_TAG` neither `None` nor a non-empty string: it names a tag of `mupix_pixel_mask`.
-19. `PSM_TIMEWALK_CORRECTION_TAG` neither `None` nor a non-empty string: it names a tag of `mupix_timewalk`.
-20. `PSM_TWC_NTUPLE` not one of `"both"`, `"corrected"`, `"raw"`.
-21. `PSM_SMA_CAL_NTUPLE` not one of `"both"`, `"calibrated"`, `"raw"`; `PSM_SMA_PAIR_WINDOW_NS` not a number in (0, 1000]; `PSM_SMA_TIME_SOURCE` not `"tot"` or `"nim"`; `PSM_SMA_NIM_ONLY_TOT` not a number above `PSM_LAYER_THR` and at most 255; `PSM_SMA_OFFSET_OVERRIDE_NS` not a dict of int → number; `PSM_SMA_NIM_NOMINAL_DELAY_NS` not a dict of int → number with |ns| below 2^19; `PSM_SMA_LAG_VIDS` not a list of distinct ints, or naming 2001, 2003, 2006, 2014 or 2015.
-22. `LIGHT`, `PSM_PIXEL_MASK`, `PSM_TIMEWALK`, `PSM_TIMEWALK_CORRECTION`, `PSM_SMA_WIDE_DT`, `PSM_SMA_FINE_OFFSETS`, `PSM_SMA_NIM_LAG`, `PSM_SMA_SKIP_STALE_FIRST_FRAME`, `PSM_SMA_NIM_PAIRING` or `PSM_SMA_HITS_NTUPLE` not a bool (`NL_LIGHT` or a rendered `light` other than `1`/`0` ends up here): a string such as `"False"` is true in Python and would switch the setting on.
-23. `PSM_TIMEWALK` on and `PSM_TIMEWALK_DT_MIN`/`_MAX`/`_BINS` not an axis: max not above min, or bins not an integer 1-8192.
-24. `PSM_RF_CHANNEL` or `PSM_CURRENT_CHANNEL` neither `None`, `"off"` nor an integer 0-15, or the two the same integer: the SMA word's channel field is 4 bits, and the decoder takes the RF channel first, so the current pulses would become RF pulses.
-25. A `GEOCOND` base with an empty `PSM_GEOMETRY_FILES` (json mode): nothing supplies the table it names.
-26. `COND:isel` in `PSM_GEOMETRY_TRANS` without `bt2026_isel.json` in `ODB_SPECS`.
-27. json mode, `PSM_PIXEL_MASK` on (with `PSM_DECODE`) and a `PSM_GEOMETRY_FILES` without `bt2026_psm_readout_map.json`: nothing would supply the `mupix_pixel_mask` table, and the decoder stops at `initialize()`.
-28. json mode, `PSM_TIMEWALK_CORRECTION` on (with `PSM_DECODE`) and a `PSM_GEOMETRY_FILES` without `bt2026_psm_readout_map.json`: nothing would supply the `mupix_timewalk` table, and the correction layer stops at `initialize()`.
-29. `PSM_WEIGHT_STRATEGY` not `0`, `1` or `2`.
-30. `PSM_WEIGHT_STRATEGY >= 1` without both `PSM_DECODE` and `PSM_GEOMETRY_BASE`: no `PIGeometrySvc` to take the L1/L2 plane footprints from.
-31. `PSM_WEIGHT_STRATEGY >= 1` without `COND:isel` in `PSM_GEOMETRY_TRANS`: every run would be treated as sitting at the design stage position.
-32. Exactly one of `WD_ALIGN_TABLE` / `WD_ECAL_TABLE` set: `PIWDCalibrator` needs both.
-33. `WD_ENABLED` with an empty `WD_RF_TABLE`: `PIWDRFPhase` runs first in `WDAnalysisSeq` and `PIWDWaveformAnalysis` reads `/Event/wd_rf_phase`, so the RF table cannot be empty.
-34. json mode, `WD_ROLE_TABLE` set with an empty `WD_CONDITIONS_FILES`: nothing would supply the `wd_channel_map` table.
-35. `WD_CHANNEL_SETTINGS_TABLE` set with an empty `ODB_SPECS`: only the begin-of-run ODB dump serves `wd_channel_settings`.
-36. `WD_CAL_CHANNELS` not a subset of `WD_CHANNELS`: they would have no features to calibrate.
-37. `WD_SCALER_MONITOR` without `WD_ENABLED`: nothing would produce `/Event/wd_scalers`.
-38. `WD_SCALER_TIME_BIN_S` not positive or not below `WD_SCALER_TIME_MAX_S`, or a serial listed twice in `WD_SCALER_BOARDS`.
-39. `WD_RF_REFINE` on with `WD_RF_REFINE_POINTS` below 2: a scan needs at least 2 points.
-40. `PSM_PHASE_SPACE_BINS` not a positive multiple of 64: the phase-space histograms would not rebin onto the 64-bin minitwin export exactly.
-41. `PSM_PHASE_SPACE_POS_RANGE_MM` or `PSM_PHASE_SPACE_SLOPE_RANGE_MRAD` not positive: both are half-widths of a symmetric axis.
-42. `PSM_L_WINDOW_BEFORE_NS` and `PSM_L_WINDOW_AFTER_NS` giving an empty L-hit window: no tracklet would get an L pair.
-43. `PSM_DROP_CROSSTALK_GHOSTS` on without `PSM_DECODE` and a `PSM_GEOMETRY_BASE`: the ghost rule recovers each hit's column and row from the chip placement the `PIGeometrySvc` serves.
-44. `OUTPUT_LEVEL` not one of `DEBUG`, `ERROR`, `INFO`, `WARNING`.
-45. `PSM_GEOMETRY_TAG` neither `None` nor a non-empty string: it names a tag of the geometry table.
+19. `PSM_MUPIX_TOT_CUT` not an int (a bool included) in [-1, 31]: it is the highest MuPix ToT the decoder drops, `-1` none.
+20. `PSM_TIMEWALK_CORRECTION_TAG` neither `None` nor a non-empty string: it names a tag of `mupix_timewalk`.
+21. `PSM_TWC_NTUPLE` not one of `"both"`, `"corrected"`, `"raw"`.
+22. `PSM_SMA_CAL_NTUPLE` not one of `"both"`, `"calibrated"`, `"raw"`; `PSM_SMA_PAIR_WINDOW_NS` not a number in (0, 1000]; `PSM_SMA_TIME_SOURCE` not `"tot"` or `"nim"`; `PSM_SMA_NIM_ONLY_TOT` not a number above `PSM_LAYER_THR` and at most 255; `PSM_SMA_OFFSET_OVERRIDE_NS` not a dict of int → number; `PSM_SMA_NIM_NOMINAL_DELAY_NS` not a dict of int → number with |ns| below 2^19; `PSM_SMA_LAG_VIDS` not a list of distinct ints, or naming 2001, 2003, 2006, 2014 or 2015.
+23. `LIGHT`, `PSM_PIXEL_MASK`, `PSM_TIMEWALK`, `PSM_TIMEWALK_CORRECTION`, `PSM_SMA_WIDE_DT`, `PSM_SMA_FINE_OFFSETS`, `PSM_SMA_NIM_LAG`, `PSM_SMA_SKIP_STALE_FIRST_FRAME`, `PSM_SMA_NIM_PAIRING` or `PSM_SMA_HITS_NTUPLE` not a bool (`NL_LIGHT` or a rendered `light` other than `1`/`0` ends up here): a string such as `"False"` is true in Python and would switch the setting on.
+24. `PSM_TIMEWALK` on and `PSM_TIMEWALK_DT_MIN`/`_MAX`/`_BINS` not an axis: max not above min, or bins not an integer 1-8192.
+25. `PSM_RF_CHANNEL` or `PSM_CURRENT_CHANNEL` neither `None`, `"off"` nor an integer 0-15, or the two the same integer: the SMA word's channel field is 4 bits, and the decoder takes the RF channel first, so the current pulses would become RF pulses.
+26. A `GEOCOND` base with an empty `PSM_GEOMETRY_FILES` (json mode): nothing supplies the table it names.
+27. `COND:isel` in `PSM_GEOMETRY_TRANS` without `bt2026_isel.json` in `ODB_SPECS`.
+28. json mode, `PSM_PIXEL_MASK` on (with `PSM_DECODE`) and a `PSM_GEOMETRY_FILES` without `bt2026_psm_readout_map.json`: nothing would supply the `mupix_pixel_mask` table, and the decoder stops at `initialize()`.
+29. json mode, `PSM_TIMEWALK_CORRECTION` on (with `PSM_DECODE`) and a `PSM_GEOMETRY_FILES` without `bt2026_psm_readout_map.json`: nothing would supply the `mupix_timewalk` table, and the correction layer stops at `initialize()`.
+30. `PSM_WEIGHT_STRATEGY` not `0`, `1` or `2`.
+31. `PSM_WEIGHT_STRATEGY >= 1` without both `PSM_DECODE` and `PSM_GEOMETRY_BASE`: no `PIGeometrySvc` to take the L1/L2 plane footprints from.
+32. `PSM_WEIGHT_STRATEGY >= 1` without `COND:isel` in `PSM_GEOMETRY_TRANS`: every run would be treated as sitting at the design stage position.
+33. Exactly one of `WD_ALIGN_TABLE` / `WD_ECAL_TABLE` set: `PIWDCalibrator` needs both.
+34. `WD_ENABLED` with an empty `WD_RF_TABLE`: `PIWDRFPhase` runs first in `WDAnalysisSeq` and `PIWDWaveformAnalysis` reads `/Event/wd_rf_phase`, so the RF table cannot be empty.
+35. json mode, `WD_ROLE_TABLE` set with an empty `WD_CONDITIONS_FILES`: nothing would supply the `wd_channel_map` table.
+36. `WD_CHANNEL_SETTINGS_TABLE` set with an empty `ODB_SPECS`: only the begin-of-run ODB dump serves `wd_channel_settings`.
+37. `WD_CAL_CHANNELS` not a subset of `WD_CHANNELS`: they would have no features to calibrate.
+38. `WD_SCALER_MONITOR` without `WD_ENABLED`: nothing would produce `/Event/wd_scalers`.
+39. `WD_SCALER_TIME_BIN_S` not positive or not below `WD_SCALER_TIME_MAX_S`, or a serial listed twice in `WD_SCALER_BOARDS`.
+40. `WD_RF_REFINE` on with `WD_RF_REFINE_POINTS` below 2: a scan needs at least 2 points.
+41. `PSM_PHASE_SPACE_BINS` not a positive multiple of 64: the phase-space histograms would not rebin onto the 64-bin minitwin export exactly.
+42. `PSM_PHASE_SPACE_POS_RANGE_MM` or `PSM_PHASE_SPACE_SLOPE_RANGE_MRAD` not positive: both are half-widths of a symmetric axis.
+43. `PSM_L_WINDOW_BEFORE_NS` and `PSM_L_WINDOW_AFTER_NS` giving an empty L-hit window: no tracklet would get an L pair.
+44. `PSM_DROP_CROSSTALK_GHOSTS` on without `PSM_DECODE` and a `PSM_GEOMETRY_BASE`: the ghost rule recovers each hit's column and row from the chip placement the `PIGeometrySvc` serves.
+45. `OUTPUT_LEVEL` not one of `DEBUG`, `ERROR`, `INFO`, `WARNING`.
+46. `PSM_GEOMETRY_TAG` neither `None` nor a non-empty string: it names a tag of the geometry table.
 
 ## The phase-space histograms are minitwin input
 
