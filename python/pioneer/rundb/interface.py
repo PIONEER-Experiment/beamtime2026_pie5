@@ -384,6 +384,38 @@ class interface:
         conn.close()
         return job_id
 
+    def bump_postproc_priority(self, job_id : int, priority = None):
+        conn = connect(self.user, self.password)
+        with conn.cursor() as cursor:
+            if priority is None:
+                # Bump to be next run
+                cursor.execute(
+                    """
+                    SELECT COALESCE(MIN(p.priority), 1) - 1
+                    FROM state.postproc_job p
+                    JOIN state.postproc_job j
+                    ON j.id = %(id)s
+                    WHERE utils.is_pending(p.status)
+                    AND p.id <> j.id
+                    AND p.client = j.client
+                    AND p.job_type = j.job_type
+                    """,
+                    {"id": job_id}
+                )
+                priority = cursor.fetchone()[0]
+            cursor.execute(
+                """
+                UPDATE state.postproc_job
+                SET priority = %(prio)s
+                WHERE id = %(id)s
+                """, {
+                    "prio" : priority,
+                    "id" : job_id
+                }
+            )
+        conn.commit()
+        conn.close()
+
     def end_of_midas_run(self, run_id : int, recorded_events : int, stop_time : str,
                          schedule_post_processing : bool = True) -> bool:
         conn = connect(self.user, self.password)
