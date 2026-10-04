@@ -159,6 +159,20 @@ class interface:
         conn.close()
         return run_id
 
+    def get_status(self, id : int, table : str = 'midas_run'):
+        conn = connect(self.user, self.password)
+        with conn.cursor() as cursor:
+            table_ident = psycopg.sql.Identifier(table)
+            query = psycopg.sql.SQL(
+                    "SELECT status FROM state.{table} WHERE id = {value}"
+                ).format(
+                    table=table_ident,
+                    value=psycopg.sql.Placeholder()
+                )
+            cursor.execute(query, (id,))
+            res = cursor.fetchone()
+        return res[0] if res else None
+
     def start_of_midas_run(self, run_id : int, run_number : int, start_time : str):
         conn = connect(self.user, self.password)
         with conn.cursor() as cursor:

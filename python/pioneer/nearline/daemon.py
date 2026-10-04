@@ -448,6 +448,16 @@ class NearlineDaemon:
         run_start = client.odb_get("/Runinfo/Start time")
         quality = None
 
+        if run_db_pk != 0:
+            # Verify we have a good run db primary key
+            db_status = self.db_interface.get_status(run_db_pk, 'midas_run')
+            if db_status is None:
+                self.client.msg(f"/Nearline/Info/Run DB PK {run_db_pk} does not exist, fetching new one.", is_error = True )
+                run_db_pk = 0
+            if db_status not in ('CLAIMED', 'PENDING'):
+                self.client.msg(f"Invalid state transition: /Nearline/Info/Run DB PK {run_db_pk} is attributed to a run in status {db_status}. Creating a new run.", is_error = True )
+                run_db_pk = 0
+
         if run_db_pk == 0:
             # if MIDAS is unaware of a run in the table, register a new run
             # This is likely going to happen if someone started a run manually.
