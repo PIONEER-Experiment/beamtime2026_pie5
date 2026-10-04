@@ -376,6 +376,13 @@ PSM_SMA_SKIP_STALE_FIRST_FRAME = True
 PSM_PIXEL_MASK = True
 # Tag of mupix_pixel_mask to read; None reads the table's default tag.
 PSM_PIXEL_MASK_TAG = None
+# Drop the MuPix pixel hits whose ToT (time over threshold, 256 ns counts, 0..31) is
+# at or below this value, in the decoder, before the timewalk layer, the MuPix
+# monitor and the track reco see them. Low ToT (0-2) is mostly crosstalk ghosts,
+# noise bursts and hot pixels. musip/mupix_tot_vs_chip is filled before the cut, so
+# the dropped population stays visible there. -1 keeps every hit; an integer in
+# [-1, 31].
+PSM_MUPIX_TOT_CUT = 2
 # --- SMA calibration layer: TOT + NIM pairing -------------------------------
 # PIPSMSMACalibration (/Event/mutrig -> /Event/mutrig_cal and /Event/sma_hits) pairs
 # each counter's TOT word with its low-threshold NIM copy (S1L..S5L, ids 2021,
@@ -1140,6 +1147,11 @@ def check():
                                                and PSM_PIXEL_MASK_TAG):
         problems.append(f"PSM_PIXEL_MASK_TAG is {PSM_PIXEL_MASK_TAG!r}: it must be None (the "
                         "table's default tag) or the name of a tag of mupix_pixel_mask.")
+    if not (isinstance(PSM_MUPIX_TOT_CUT, int) and not isinstance(PSM_MUPIX_TOT_CUT, bool)
+            and -1 <= PSM_MUPIX_TOT_CUT <= 31):
+        problems.append(f"PSM_MUPIX_TOT_CUT is {PSM_MUPIX_TOT_CUT!r}: it must be an integer in "
+                        "[-1, 31] (MuPix hits with a ToT at or below it are dropped in the "
+                        "decoder; -1 keeps every hit).")
     if PSM_TIMEWALK_CORRECTION_TAG is not None and not (
             isinstance(PSM_TIMEWALK_CORRECTION_TAG, str) and PSM_TIMEWALK_CORRECTION_TAG):
         problems.append(f"PSM_TIMEWALK_CORRECTION_TAG is {PSM_TIMEWALK_CORRECTION_TAG!r}: it "
@@ -1405,6 +1417,8 @@ audit = AuditorSvc()
 audit.Auditors += [ChronoAuditor()]
 services.append(audit)
 
+# What the banner adds after PSM_MUPIX_TOT_CUT: nothing once the decoder takes it.
+_TOT_CUT_NOTE = " (no decode)"
 tools = [PITMidasWaveDream()] if WD_ENABLED else []
 if PSM_DECODE:
     musip = PITMidasMusip(quadPixelPitch=float(PSM_QUAD_PIXEL_PITCH),
@@ -1437,6 +1451,16 @@ if PSM_DECODE:
     musip.applyPixelMask = bool(PSM_PIXEL_MASK)
     if PSM_PIXEL_MASK_TAG:
         musip.pixelMaskTag = str(PSM_PIXEL_MASK_TAG)
+    # Feature-detect: a reco_testbeam built before the cut existed would die at
+    # option parsing on the unknown property.
+    if "mupixTotCut" in PITMidasMusip.getDefaultProperties():
+        musip.mupixTotCut = int(PSM_MUPIX_TOT_CUT)
+        _TOT_CUT_NOTE = ""
+    else:
+        _TOT_CUT_NOTE = " (not applied: old reco)"
+        print("[nearline] WARNING    the installed PITMidasMusip has no mupixTotCut "
+              "property (reco_testbeam older than the MuPix ToT cut): every MuPix ToT "
+              "is kept")
     tools.append(musip)
 
 algorithms = [PIMidasDecoder(decoders=tools)]
@@ -1815,6 +1839,7 @@ print(f"[nearline] halves     WD={WD_ENABLED} WD_SCALER_MONITOR={WD_SCALER_MONIT
       f" PSM_DECODE={PSM_DECODE} PSM_RECO={PSM_RECO} PSM_MUPIX_MONITOR={PSM_MUPIX_MONITOR}"
       f" PSM_SMA_MONITOR={PSM_SMA_MONITOR} PSM_TIMEWALK={PSM_TIMEWALK}"
       f" PSM_TIMEWALK_CORRECTION={PSM_TIMEWALK_CORRECTION}"
+      f" PSM_MUPIX_TOT_CUT={PSM_MUPIX_TOT_CUT}{_TOT_CUT_NOTE}"
       f" PSM_SMA_WIDE_DT={PSM_SMA_WIDE_DT} PSM_SMA_DIAGNOSTICS={PSM_SMA_DIAGNOSTICS}")
 print(f"[nearline] layers     "
       + (f"PIPSMSMACalibration {_TES_MUTRIG}->{_TES_MUTRIG_CAL}+{_TES_SMA_HITS}"

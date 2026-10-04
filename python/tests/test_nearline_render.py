@@ -212,7 +212,10 @@ def test_rendered_full_job_keeps_everything(job_env, capsys):
     assert job["musip"].smaDiagnostics is True
     assert job["musip"].correctFineOffsets is True
     assert job["musip"].skipFirstBank is True      # run00790_00000 is subrun 0
-    assert "[nearline] light      off" in capsys.readouterr().out
+    assert job["musip"].mupixTotCut == 2
+    out = capsys.readouterr().out
+    assert "[nearline] light      off" in out
+    assert " PSM_MUPIX_TOT_CUT=2 PSM_SMA_WIDE_DT=" in out
 
 
 def test_stale_first_frame_is_skipped_only_for_subrun_0(job_env):
@@ -241,6 +244,8 @@ def test_rendered_light_job_switches_off_the_four(job_env, capsys):
     # the SMA fine-time correction and the stale-frame skip change the hits, so
     # light mode leaves them on
     assert job["musip"].correctFineOffsets is True and job["musip"].skipFirstBank is True
+    # the ToT cut changes the hits too
+    assert job["musip"].mupixTotCut == 2
     # the correction itself is not part of light mode
     assert job["twc"].applyTimewalkCorrection is True
     out = capsys.readouterr().out
@@ -640,6 +645,29 @@ def test_a_bad_sma_pairing_knob_is_rejected(job_env, old, new, match):
     assert old in text
     with pytest.raises(SystemExit, match=match):
         _run(target, text.replace(old, new))
+
+
+@pytest.mark.parametrize("new", ['"2"', "True", "-2", "32"])
+def test_a_bad_mupix_tot_cut_is_rejected(job_env, new):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text()
+    assert "PSM_MUPIX_TOT_CUT = 2\n" in text
+    with pytest.raises(SystemExit, match="PSM_MUPIX_TOT_CUT"):
+        _run(target, text.replace("PSM_MUPIX_TOT_CUT = 2\n", f"PSM_MUPIX_TOT_CUT = {new}\n"))
+
+
+def test_an_old_reco_keeps_every_mupix_tot(job_env, monkeypatch, capsys):
+    # a reco_testbeam built before the cut has no mupixTotCut property: setting it
+    # would stop gaudirun.py, so the job leaves it unset and says so
+    tmp_path, midas = job_env
+    monkeypatch.setattr(sys.modules["pi_midas.PIONEER_MIDAS_READERConf"].PITMidasMusip,
+                        "getDefaultProperties", classmethod(lambda cls: set()))
+    job = _run(render_job(midas, tmp_path / "run00790_00000.root", light=False))
+    assert "mupixTotCut" not in job["musip"].__dict__
+    out = capsys.readouterr().out
+    assert "[nearline] WARNING    the installed PITMidasMusip has no mupixTotCut" in out
+    assert " PSM_MUPIX_TOT_CUT=2 (not applied: old reco) " in out
 
 
 # -- the conditions source ----------------------------------------------------
