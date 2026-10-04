@@ -469,11 +469,17 @@ class interface:
 
             # List all registered files
             all_files = self.find_files(run_ids = [run_id], extensions = ['mid.lz4'])
-            for f in all_files:
-                self.schedule_postproc_job_on_file(f['id'], 'farline', 'farline', [remote_job_id])
+            farjobs = list()
+            for i,f in enumerate(all_files):
+                farjob_id = self.schedule_postproc_job_on_file(f['id'], 'farline', 'farline', [remote_job_id])
+                farjobs.append({'job_id' : farjob_id, 'file_id' : f['id']})
+                if i < 4:
+                    self.bump_postproc_priority(farjob_id)
 
             # farline backup SSD->HDD
-            self.schedule_postproc_job(run_id, 'backup', 'farline', [remote_job_id])
+            remote_backup_id = self.schedule_postproc_job(run_id, 'backup', 'farline', [remote_job_id])
+            for fj in farjobs:
+                self.schedule_postproc_job_on_file(fj['file_id'], 'cleanup', 'farline', [remote_backup_id, fj['job_id']])
 
         return True
 
