@@ -858,7 +858,7 @@ GRANT USAGE, SELECT ON SEQUENCE state.run_sequence_id_seq      TO bot;
 GRANT USAGE, SELECT ON SEQUENCE state.runs_in_sequence_id_seq  TO bot;
 
 GRANT UPDATE ON state.midas_run     TO bot;
-GRANT UPDATE (status)                   ON state.postproc_job  TO bot;
+GRANT UPDATE (status, priority)         ON state.postproc_job  TO bot;
 GRANT UPDATE (status)                   ON state.file_list     TO bot;
 GRANT UPDATE (status)                   ON state.run_sequence  TO bot;
 
