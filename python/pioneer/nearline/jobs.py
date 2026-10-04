@@ -4,6 +4,25 @@ import json
 
 from pathlib import Path
 
+import requests
+
+WEBHOOK_URL = 
+
+def send_to_slack(message: str) -> None:
+    if not message.strip():
+        raise ValueError("empty message, nothing sent")
+
+    response = requests.post(
+        WEBHOOK_URL,
+        json={"text": message},
+        timeout=30,
+    )
+
+    response.raise_for_status()
+
+    if response.text != "ok":
+        raise RuntimeError(f"Slack returned: {response.text}")
+
 from pioneer.rundb.interface import interface as db_interface
 
 from pioneer.nearline.render import hists_file_name, registered_file_name, render_job
@@ -106,7 +125,14 @@ class BaseJob:
     def finalise(self):
         if self.rc is None:
             raise RuntimeError("Finalise called before job was finished")
-        status = 'DONE' if self.rc == 0 else 'FAILED'
+        if self.rc != 0:
+            status = 'FAILED'
+            msg = f"{self.config['job_type']} job with ID {self.config['job_id']} exited with non-zero exit code {self.rc}."
+            msg += f" For more details, see " + self.logfile.name
+            send_to_slack(msg)
+
+        else:
+            status = 'DONE'
         self.db.update_status(self.table, self.config['job_id'], status)
         self.logfile.close()
         return status
