@@ -91,8 +91,8 @@ class FarlineDaemon:
                 job_cfg['destination_path'] = f"{self.backup_opath}/run{job_cfg['midas_run_number']:05d}"
             else:
                 # Either a single midas file or a bulk backup/cleanup of all midas files on the farline machine
-                job_cfg['source_path']      = f"{self.ssd_midas_path}/run{job_cfg['midas_run_number']:05d}"
-                job_cfg['destination_path'] = f"{self.backup_mpath}/run{job_cfg['midas_run_number']:05d}"
+                job_cfg['source_path']      = f"{self.ssd_midas_path}"
+                job_cfg['destination_path'] = f"{self.backup_mpath}"
 
         job_cfg['log_path'] = self.log_path
 
