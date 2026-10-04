@@ -18,6 +18,7 @@ shifter's page.
 | `nearline_job.py` | **the edit-me file *and* the template.** A Gaudi options file: settings block, then linear assembly. `gaudirun.py` execs it; it is not a module and must not be imported. It carries twelve `${name}` placeholders, all inside string literals, so it is valid Python and runs unrendered |
 | `render.py` | fills those placeholders and writes the complete job next to the outputs as `<filebase>.py`. `render_job()` is what both callers use; `python -m pioneer.nearline.render IN OUT` renders and stops |
 | `process.py` | **process one file by hand**: `python -m pioneer.nearline.process <midas file> [--out-dir DIR] [--light] [--conditions SOURCE]` renders the job and runs `gaudirun.py` on it. Standard library plus `render` and `pioneer.conddb.pgservice` only, so it imports where `jobs.py` cannot |
+| `requeue.py` | **a run the daemon missed**: `python -m pioneer.nearline.requeue RUN [RUN ...] [--apply]` writes the run row, raw-file rows and post-processing jobs the daemon's MIDAS callbacks would have written, so pinky and piana process the run as usual. Dry run without `--apply`; see *A run the daemon missed* |
 | `jobs.py` | job classes the daemon schedules: `GaudiJob` (this job), `RsyncJob`, `CleanJob`, `MergeJob`, `DummyJob` |
 | `daemon.py` | the long-running process: MIDAS client, per-resource queues, dispatch and status write-back to the run database |
 | `run.py` | run-sequence definitions (`midas_run_sequence`, `midas_run`) written into the run database |
@@ -891,6 +892,150 @@ file: a re-run reads `~/.pgpass` (or `PGPASSWORD`) of whoever runs it.
 in at that moment, exactly as the daemon bakes in its own, so set them before
 the `process` command rather than before the `gaudirun.py` that re-runs it.
 
+### A run the daemon missed
+
+The daemon writes a run's rows in the run database only from its MIDAS
+callbacks: the run row when the run starts, a file row and a `nearline` job
+each time a subrun file is closed, and at the stop the raw backup, the remote
+copy, the cleanup and piana's `farline` jobs. A run taken while the daemon was
+down, or stopped while it was restarting, gets none of that, and neither
+daemon will ever pick it up. You see it on the RunDB page as a run that is
+missing from the runlog, or as a row that stays `RUNNING` long after the run
+ended. A row left `RUNNING` also breaks the **next** start: the daemon finds
+its id still in `/Nearline/Info/Run DB PK`, refuses to reuse it ("Can't start
+run with id N. Expected status to be 'PENDING' or 'CLAIMED' ...") and the
+start transition fails.
+
+`requeue` writes the rows the callbacks would have written, so that pinky
+(`nearline` jobs, histograms only) and piana (`farline` jobs, the full job)
+process the run exactly as if the daemon had been up. Run it on pinky, next to
+the daemon, after the run has ended:
+
+```bash
+source /home/pinky/bt2026/beamtime2026_pie5/software/env.sh
+python -m pioneer.nearline.requeue 1106 1108 1110      # dry run: writes nothing
+```
+
+**1. Read the dry run.** It changes nothing (it connects as the read-only
+role) and prints, for each run, what `--apply` would do:
+
+```
+run 1106
+  row new: create from run01106.json (DONE, start 'Sat Oct  3 22:50:19 2026', stop 'Sat Oct  3 22:55:01 2026', events 412345, quality '')
+  raw files to register: 22
+    nearline  nearline  22 create  run01106_00000.mid.lz4 .. run01106_00021.mid.lz4
+    nearline  backup    1 create
+    nearline  remote    1 create
+    nearline  cleanup   1 create
+    farline   farline   22 create  run01106_00000.mid.lz4 .. run01106_00021.mid.lz4
+    farline   backup    1 create
+
+run   row  row action  files registered  jobs created  reset  present  result
+1106  new  create      22                48            0      0        ok
+```
+
+The job lines are the rows the RunDB page will show under the run, one line
+per client and job type (`-v` lists every job): `create` is a new row,
+`present (DONE)` one that is already there and is left alone, `reset (was
+FAILED)` one that `--again` puts back to `PENDING`. The `row` line says what
+happens to the run row:
+
+| the run database has | `requeue` |
+|---|---|
+| no row with this run number | creates one from mlogger's `runNNNNN.json` in the data directory: status `DONE`, start and stop time, events (the sum of `Events written` over the logger channels), quality, author `requeue` plus the operator, and the run's description in the note. No row and no `runNNNNN.json`: refused |
+| a row left `RUNNING` (or `CLAIMED`) | closes it as the stop would have: `DONE`, stop time and events from `runNNNNN.json`. mlogger writes that file when the run stops, so without it (or without a stop time in it) the run may still be going: refused |
+| a finished row | leaves it as it is and fills in what is missing |
+| a sequencer row that never started (`--run-id PK`) | attaches the run number to it, then closes it; needs `runNNNNN.json`, like closing. One run per command. Refused for the row in `/Nearline/Info/Run DB PK`, which is the next start's |
+| a row in `ERROR` | refused. The daemon's auto-recovery marks a run's row `ERROR` and registers its later files under a new row (author `AutoRecovery`) that has no run number, so the files may already be registered there; registering them again would make duplicates. An expert sorts out the rows first |
+
+Raw files (`runNNNNN.mid.lz4`, `runNNNNN_*.mid.lz4`) on disk that have no row
+are registered, and a file row left `RUNNING` is closed. A **file row whose
+file is gone** gets a warning and nothing on pinky: no `nearline` job for it,
+and no raw backup or remote copy for the run, because those copy every raw
+file of the run and would fail. piana's `farline` jobs need the remote copy,
+so they are not queued either unless the run already has one. If such a row
+was left `RUNNING`, it is set to `ERROR`: otherwise the live daemon, which
+closes every open file row of its logger channel at the next file change,
+would close it and queue a `nearline` job on a file that is not there. A run
+of quality `Debug` (any case) gets only `nearline` jobs, as at the stop; name
+the stages with `--stage` to queue more.
+
+`requeue` refuses a run, writes nothing for it and says why, when:
+
+* MIDAS is taking it now;
+* it has raw files on disk without a row **and** already has its run-level
+  transfer jobs (raw backup, remote copy, cleanup). Those copy, and the
+  cleanup deletes, only the files registered when they run, so a file
+  registered afterwards could be deleted without ever being copied. The
+  message lists the jobs and the steps an expert would take by hand: put the
+  cleanup on `HOLDING` if it has not run; register the files and queue their
+  `nearline` jobs; reset the backup and the remote copy so they copy every
+  file; make the cleanup depend on the new `nearline` jobs; queue `farline`
+  jobs for the new files depending on the remote copy; release (or reset) the
+  cleanup;
+* `--again` would reset a job that a `CLAIMED` or `RUNNING` job waits for,
+  directly or through other jobs (the database would pull the running job back
+  to `DEPENDING` under the daemon running it). The message names the running
+  jobs; run it again once they are `DONE` or `FAILED`;
+* one of the row cases in the table above says so.
+
+The dry run shows the same refusals.
+
+**2. Write it.** The expert takes a dump of the run database first (it is the
+production database; for example `pg_dump -h localhost -U <role that can read
+every table> -d pioneer -Fc -f ~/rundb-before-requeue-$(date +%F-%H%M).dump`),
+then:
+
+```bash
+python -m pioneer.nearline.requeue 1106 1108 1110 --apply
+```
+
+It writes as the daemon's role (`bot`) and prints the same report with what it
+did. Running it again is harmless: what is already there is counted as
+`present` and nothing new is written.
+
+**3. Watch the RunDB page.** The runs appear in the runlog (or turn `DONE`)
+with their files. Expand one: the `nearline` jobs go `PENDING` → `RUNNING` →
+`DONE` on pinky, `/Nearline/config/Num parallel jobs` at a time. The cleanup
+stays `DEPENDING` until every other pinky job of the run is `DONE`, and the
+`farline` jobs stay `DEPENDING` until the remote copy is `DONE`; then piana
+picks them up.
+
+**4. Clear a stale primary key.** If the report ends with "/Nearline/Info/Run
+DB PK is N while no run is being taken", clear it before the next start (the
+script never writes the ODB):
+
+```bash
+odbedit -c 'set "/Nearline/Info/Run DB PK" 0'
+```
+
+Without a MIDAS connection (no `midas` python package, or the experiment does
+not answer) the script says so, cannot check the run being taken or the
+primary key, and takes the data directory from `--data-dir` or
+`/home/pinky/online`. The dry run still works; `--apply` is refused unless
+`--no-midas-check` is given, which says you have checked that none of the
+listed runs is being taken (a row left `RUNNING` is still closed only when
+its `runNNNNN.json` is there). Check the key by hand then:
+`odbedit -c 'ls "/Nearline/Info"'`.
+
+| option | default | what it does |
+|---|---|---|
+| `--apply` | off | write the rows; without it nothing is written |
+| `--stage nearline\|transfer\|farline` | all (only `nearline` for quality `Debug`) | queue only these stages; repeat for several. `nearline` = the per-file job on pinky, `transfer` = raw backup, remote copy and cleanup on pinky, `farline` = the full job per file and the SSD→HDD backup on piana |
+| `--again` | off | also put the `DONE` and `FAILED` jobs of the chosen stages back to `PENDING`. `CLAIMED` and `RUNNING` jobs are never touched, and a run where one of them waits for a job to be reset is refused |
+| `--run-id PK` | none | attach to this existing row (a `PENDING` or `CLAIMED` row without a run number) instead of creating one |
+| `--data-dir DIR` | the ODB's `/Logger/Data dir`, else `/home/pinky/online` | where the raw files and `runNNNNN.json` are |
+| `--channel N` | `0` | the logger channel the files came from (file rows get producer `logger_N`) |
+| `--no-midas-check` | off | allow `--apply` when the ODB cannot be read |
+| `-v` | off | list every job instead of one line per job type |
+
+`--again` reruns more than it names, because the database puts a finished job
+back to waiting when a job it depends on is reset: resetting the remote copy
+(`--stage transfer`) makes piana's `farline` jobs of that run run again after
+it, and resetting `nearline` jobs makes the cleanup run again after them. The
+dry run lists those jobs as `reset` too. To rerun only failed `nearline` jobs,
+the `psql` of *Conditions DB down*, step 4, is still the narrowest tool.
+
 ### Light mode (pinky)
 
 Light mode is a **light** nearline job for pinky, so that it keeps up with the
@@ -1359,10 +1504,12 @@ about a hand run: the job's row stays `FAILED` until step 4.
 
 ### 4. Requeue the failed jobs once the database is back
 
-There is no requeue command. A job is requeued by setting its row back to
-`PENDING`, which the daemon then claims like a new one. First list what failed
-(the run numbers are MIDAS run numbers; the password of the run database role
-`readonly` is `readonly`, see `docs/DEPLOY-pinky-rundb.md`):
+A job is requeued by setting its row back to `PENDING`, which the daemon then
+claims like a new one. (For a run that has no jobs at all, because the daemon
+was down, see *A run the daemon missed*; its `--again` resets whole stages.)
+First list what failed (the run numbers are MIDAS run numbers; the password of
+the run database role `readonly` is `readonly`, see
+`docs/DEPLOY-pinky-rundb.md`):
 
 ```bash
 psql -h localhost -U readonly -d pioneer -c "

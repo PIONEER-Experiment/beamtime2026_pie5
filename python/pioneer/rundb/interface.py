@@ -8,6 +8,10 @@ from pioneer.rundb.config import connect
 
 
 class interface:
+    # The run-level stages schedule_run_post_processing queues, in the order
+    # the stop transition queues them.
+    RUN_STAGES = ("transfer", "farline")
+
     def __init__(self, user = "readonly", password = "readonly"):
         self.user = user
         self.password = password
@@ -158,6 +162,59 @@ class interface:
         conn.commit()
         conn.close()
         return run_id
+
+    def create_finished_run(self, run_number : int, start_time, stop_time, recorded_events : int | None,
+                            quality : str | None, author : str, note : str) -> int:
+        """
+        Register MIDAS run `run_number` as a run that is over (status DONE),
+        for a run the nearline daemon never saw start or stop. One row with
+        its number, times and events plus its annotation, written in one
+        transaction, so a failure leaves no half-made row. The times are
+        passed on as given, like the daemon passes /Runinfo/Start time and
+        /Runinfo/Stop time: MIDAS strings are read by the server in its time
+        zone.
+
+        Returns:
+        The run database id of the new row.
+        """
+        conn = connect(self.user, self.password)
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    WITH new_run AS (
+                        INSERT INTO state.midas_run
+                            (status, midas_run_number, start_time, stop_time, recorded_events, quality)
+                        VALUES ('DONE', %s, %s, %s, %s, %s) RETURNING id
+                    )
+                    INSERT INTO logs.run_annotations (run_id, author, note)
+                    SELECT new_run.id, %s, %s
+                    FROM new_run
+                    RETURNING run_id;
+                    """,
+                    (run_number, start_time, stop_time, recorded_events, quality, author, note)
+                )
+                run_id = cursor.fetchone()[0]
+            conn.commit()
+        finally:
+            conn.close()
+        return run_id
+
+    def get_midas_run(self, run_id : int) -> dict | None:
+        """Row `run_id` of state.midas_run as a dict (id, status,
+        midas_run_number, start_time, stop_time, recorded_events, quality),
+        or None."""
+        conn = connect(self.user, self.password)
+        with conn.cursor(row_factory = psycopg.rows.dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT id, status, midas_run_number, start_time, stop_time, recorded_events, quality
+                FROM state.midas_run WHERE id = %s
+                """, (run_id, )
+            )
+            result = cursor.fetchone()
+        conn.close()
+        return dict(result) if result is not None else None
 
     def start_of_midas_run(self, run_id : int, run_number : int, start_time : str):
         conn = connect(self.user, self.password)
@@ -412,24 +469,190 @@ class interface:
         conn.close()
 
         if (schedule_post_processing):
+            return self.schedule_run_post_processing(run_id)
+
+        return True
+
+    def schedule_run_post_processing(self, run_id : int, stages = RUN_STAGES,
+                                     existing_ok : bool = False, outcome : list | None = None) -> bool:
+        """
+        Queue the run-level post-processing of run `run_id`: the jobs the stop
+        transition queues once the run's last file is closed.
+
+        `stages` picks from RUN_STAGES:
+        - 'transfer' (client 'nearline', pinky): raw backup, remote copy and
+          cleanup. The cleanup depends on every job of the run queued before
+          it, so the per-file nearline jobs have to be queued first.
+        - 'farline' (client 'farline', piana): one full job per raw file and
+          the SSD->HDD backup, all waiting for the remote copy.
+
+        With `existing_ok` False (the stop transition) a run-level job that is
+        already there ends the scheduling with False, as it always did. With
+        `existing_ok` True (pioneer.nearline.requeue) a job that is already
+        there is fine and its id is looked up: the farline jobs need the id
+        of a remote copy queued earlier. Then False means a job could neither
+        be queued nor found, or 'farline' was asked for and the run has no
+        remote copy job to wait for.
+
+        `outcome`, if given, gets one dict per job: client, job_type, file_id,
+        job_id and created (False: it was already there).
+
+        Returns:
+        True when everything asked for is queued.
+        """
+        ok = True
+
+        def note(client, task, file_id, job_id, created):
+            if outcome is not None:
+                outcome.append({"client" : client, "job_type" : task, "file_id" : file_id,
+                                "job_id" : job_id, "created" : created})
+
+        def run_job(task, client, dependencies = None):
+            job_id = self.schedule_postproc_job(run_id, task, client, dependencies)
+            if job_id is not None:
+                note(client, task, None, job_id, True)
+                return job_id
+            if not existing_ok:
+                return None
+            existing = self.find_postproc_job(run_id, client, task)
+            if existing is None:
+                return None
+            note(client, task, None, existing['id'], False)
+            return existing['id']
+
+        remote_job_id = None
+        if 'transfer' in stages:
             # Schedule the backup jobs.
-            if self.schedule_postproc_job(run_id, 'backup', 'nearline') is None:
+            if run_job('backup', 'nearline') is None:
                 return False
-            remote_job_id = self.schedule_postproc_job(run_id, 'remote', 'nearline')
+            remote_job_id = run_job('remote', 'nearline')
             if remote_job_id is None:
                 return False
-            if self.schedule_postproc_job(run_id, 'cleanup', 'nearline', 'all') is None:
+            if run_job('cleanup', 'nearline', 'all') is None:
                 return False
+
+        if 'farline' in stages:
+            if remote_job_id is None:
+                existing = self.find_postproc_job(run_id, 'nearline', 'remote')
+                if existing is None:
+                    return False
+                remote_job_id = existing['id']
 
             # List all registered files
             all_files = self.find_files(run_ids = [run_id], extensions = ['mid.lz4'])
             for f in all_files:
-                self.schedule_postproc_job_on_file(f['id'], 'farline', 'farline', [remote_job_id])
+                job_id = self.schedule_postproc_job_on_file(f['id'], 'farline', 'farline', [remote_job_id])
+                if job_id != -1:
+                    note('farline', 'farline', f['id'], job_id, True)
+                elif existing_ok:
+                    existing = self.find_postproc_job(run_id, 'farline', 'farline', f['id'])
+                    if existing is None:
+                        ok = False
+                    else:
+                        note('farline', 'farline', f['id'], existing['id'], False)
 
-            # farline backup SSD->HDD
-            self.schedule_postproc_job(run_id, 'backup', 'farline', [remote_job_id])
+            # farline backup SSD->HDD. The stop transition never failed over it.
+            if run_job('backup', 'farline', [remote_job_id]) is None and existing_ok:
+                ok = False
 
-        return True
+        return ok
+
+    def find_postproc_job(self, run_id : int, client : str, job_type : str, file_id : int | None = None) -> dict | None:
+        """The job of run `run_id` with this client, type and file (None: a
+        run-level job) as {"id", "status"}, or None. There is at most one,
+        by the unique index on those four columns."""
+        conn = connect(self.user, self.password)
+        with conn.cursor(row_factory = psycopg.rows.dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT id, status FROM state.postproc_job
+                WHERE midas_run_id = %s AND client = %s AND job_type = %s
+                AND file_id IS NOT DISTINCT FROM %s
+                """, (run_id, client, job_type, file_id)
+            )
+            result = cursor.fetchone()
+        conn.close()
+        return dict(result) if result is not None else None
+
+    def find_postproc_jobs(self, run_id : int) -> list[dict]:
+        """Every post-processing job of run `run_id`, in id order, as
+        {"id", "file_id", "client", "job_type", "status"}."""
+        conn = connect(self.user, self.password)
+        with conn.cursor(row_factory = psycopg.rows.dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT id, file_id, client, job_type, status FROM state.postproc_job
+                WHERE midas_run_id = %s ORDER BY id
+                """, (run_id, )
+            )
+            result = cursor.fetchall()
+        conn.close()
+        return [dict(r) for r in result]
+
+    def find_dependents(self, job_ids : list[int]) -> list[dict]:
+        """Every job that waits for one of `job_ids`, directly or through
+        other jobs (state.postproc_depends), as {"id", "file_id", "client",
+        "job_type", "status"}, in id order. These are the jobs the database
+        recomputes when one of `job_ids` changes status."""
+        if not job_ids:
+            return []
+        conn = connect(self.user, self.password)
+        with conn.cursor(row_factory = psycopg.rows.dict_row) as cursor:
+            cursor.execute(
+                """
+                WITH RECURSIVE dependent(id) AS (
+                    SELECT pp_job_id FROM state.postproc_depends WHERE depends_on = ANY(%s)
+                    UNION
+                    SELECT d.pp_job_id FROM state.postproc_depends d JOIN dependent ON d.depends_on = dependent.id
+                )
+                SELECT j.id, j.file_id, j.client, j.job_type, j.status
+                FROM state.postproc_job j JOIN dependent ON dependent.id = j.id
+                ORDER BY j.id
+                """, (list(job_ids), )
+            )
+            result = cursor.fetchall()
+        conn.close()
+        return [dict(r) for r in result]
+
+    def reset_jobs(self, run_id : int, job_types : list[str], clients : list[str],
+                   file_ids : list[int] | None = None) -> list[int]:
+        """
+        Put the DONE and FAILED jobs of run `run_id` with one of `job_types`
+        and one of `clients` back to PENDING, so the daemons run them again.
+        `file_ids`, if given, limits it to the jobs on those files. A job
+        that is CLAIMED or RUNNING belongs to a daemon and is never touched,
+        nor is one a person put on hold or cancelled.
+
+        Each reset job then has its state recomputed from its dependencies,
+        as the database does when a dependency changes: a cleanup reset
+        together with the jobs it waits for goes to DEPENDING instead of
+        running at once, and one that waits for a failed job to BLOCKED.
+
+        Returns:
+        The ids of the jobs reset.
+        """
+        query = """
+            UPDATE state.postproc_job SET status = 'PENDING'
+            WHERE midas_run_id = %s AND job_type = ANY(%s) AND client = ANY(%s)
+            AND status IN ('DONE', 'FAILED')
+            """
+        params = [run_id, list(job_types), list(clients)]
+        if file_ids is not None:
+            query += " AND file_id = ANY(%s)"
+            params.append(list(file_ids))
+        query += " RETURNING id"
+
+        conn = connect(self.user, self.password)
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(query, params)
+                job_ids = sorted(r[0] for r in cursor.fetchall())
+                for job_id in job_ids:
+                    cursor.execute("SELECT state.recompute_job_state(%s)", (job_id, ))
+            conn.commit()
+        finally:
+            conn.close()
+        return job_ids
 
     def add_new_configuration(self, table : str, values : dict, comment : str = "Mystery Configuration") -> int | None:
         """
@@ -800,6 +1023,27 @@ class interface:
         conn.commit()
         conn.close()
         return result[0] if result else None
+
+    def register_logger_file(self, run_id : int, filebase : str, fileext : str, channel : int | str = 0) -> int:
+        """Register a raw file MIDAS logger channel `channel` has finished
+        writing (status DONE), for a file the daemon never saw opened.
+        open_file followed by the close of the stop transition, in one row.
+
+        Returns:
+        The file's id in state.file_list.
+        """
+        conn = connect(self.user, self.password)
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO state.file_list (run_id, filebase, fileext, producer, status)
+                VALUES (%s, %s, %s, %s, 'DONE') RETURNING id
+                """, (run_id, filebase, fileext, f"logger_{channel}")
+            )
+            result = cursor.fetchone()
+        conn.commit()
+        conn.close()
+        return result[0]
 
     def close_files_in_channel(self, logger_channel : int):
         conn = connect(self.user, self.password)
