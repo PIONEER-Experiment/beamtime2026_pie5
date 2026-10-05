@@ -6,7 +6,7 @@ from pathlib import Path
 
 import requests
 
-WEBHOOK_URL = 
+WEBHOOK_URL = ""
 
 def send_to_slack(message: str) -> None:
     if not message.strip():
@@ -77,7 +77,10 @@ class BaseJob:
         self.proc = None
         self.rc = None
         self.table = config.get("table", "postproc_job")
-        self.infile = self.db.find_job_file(config['job_id'])
+        if config['job_type'] != 'merge':
+            self.infile = self.db.find_job_file(config['job_id'])
+        else:
+            self.infile = None
 
     def build_command(self):
         # This function should be overwritten by the actual job description
@@ -338,7 +341,7 @@ class MergeJob(BaseJob):
         return cfg_file_path
 
     def build_command(self):
-        cmd = [sys.executable, "-m", "pioneer.nearline.combine_files", str(self.build_job_description_file())]
+        cmd = [sys.executable, "-m", "pioneer.nearline.combine_files", str(self.build_job_description_file()), "--detect-histograms"]
         return cmd;
 
     @property
