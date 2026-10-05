@@ -263,6 +263,12 @@ def main():
             obj.Write(parts[-1])
     output.Close()
 
+    import subprocess
+
+    subprocess.run(
+            ["rsync", config["output"], "analysis:~/nearline/combined"],
+            check=True,
+    )
 
 
 if __name__ == "__main__":
