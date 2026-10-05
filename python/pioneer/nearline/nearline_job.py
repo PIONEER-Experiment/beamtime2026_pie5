@@ -383,6 +383,18 @@ PSM_PIXEL_MASK_TAG = None
 # the dropped population stays visible there. -1 keeps every hit; an integer in
 # [-1, 31].
 PSM_MUPIX_TOT_CUT = 2
+# High-ToT copies of the MuPix monitor's stage-weighted maps (xy_hitot_mt,
+# xxp_hitot_mt, yyp_hitot_mt, track_xy_expanded_hitot_w, xxp_central_hitot_w,
+# yyp_central_hitot_w). They take the same L1/L2 pairs with the same weights as
+# the maps without hitot, but only the pairs whose L1 hit AND L2 hit both have a
+# ToT (256 ns counts, 0..31) at or above this value. The decoder has already
+# dropped every hit with ToT <= PSM_MUPIX_TOT_CUT, so every hit the monitor sees
+# has ToT >= PSM_MUPIX_TOT_CUT + 1: at or below that value the six maps are bin
+# for bin copies of their originals (the job prints a WARNING), and they select
+# something only above it. -1 books and fills none of the six; an integer in
+# [-1, 31]. The website and the minitwin feed do not read these maps: they appear
+# only in the histogram file.
+PSM_MUPIX_HIGH_TOT_MIN = 13
 # --- SMA calibration layer: TOT + NIM pairing -------------------------------
 # PIPSMSMACalibration (/Event/mutrig -> /Event/mutrig_cal and /Event/sma_hits) pairs
 # each counter's TOT word with its low-threshold NIM copy (S1L..S5L, ids 2021,
@@ -1152,6 +1164,11 @@ def check():
         problems.append(f"PSM_MUPIX_TOT_CUT is {PSM_MUPIX_TOT_CUT!r}: it must be an integer in "
                         "[-1, 31] (MuPix hits with a ToT at or below it are dropped in the "
                         "decoder; -1 keeps every hit).")
+    if not (isinstance(PSM_MUPIX_HIGH_TOT_MIN, int) and not isinstance(PSM_MUPIX_HIGH_TOT_MIN, bool)
+            and -1 <= PSM_MUPIX_HIGH_TOT_MIN <= 31):
+        problems.append(f"PSM_MUPIX_HIGH_TOT_MIN is {PSM_MUPIX_HIGH_TOT_MIN!r}: it must be an "
+                        "integer in [-1, 31] (the MuPix monitor's high-ToT maps keep the pairs "
+                        "whose L1 and L2 hits both have a ToT at or above it; -1 books none).")
     if PSM_TIMEWALK_CORRECTION_TAG is not None and not (
             isinstance(PSM_TIMEWALK_CORRECTION_TAG, str) and PSM_TIMEWALK_CORRECTION_TAG):
         problems.append(f"PSM_TIMEWALK_CORRECTION_TAG is {PSM_TIMEWALK_CORRECTION_TAG!r}: it "
@@ -1419,6 +1436,8 @@ services.append(audit)
 
 # What the banner adds after PSM_MUPIX_TOT_CUT: nothing once the decoder takes it.
 _TOT_CUT_NOTE = " (no decode)"
+# The same for PSM_MUPIX_HIGH_TOT_MIN: nothing once the monitor takes it.
+_HIGH_TOT_NOTE = " (no monitor)"
 tools = [PITMidasWaveDream()] if WD_ENABLED else []
 if PSM_DECODE:
     musip = PITMidasMusip(quadPixelPitch=float(PSM_QUAD_PIXEL_PITCH),
@@ -1645,6 +1664,29 @@ if PSM_MUPIX_MONITOR:
               "PIPSMMuPixMonitor/xy_mt, xxp_mt, yyp_mt are written, so the minitwin "
               "feed and combine_files will fail on this job's files until "
               "reco_testbeam is rebuilt")
+    # The six high-ToT maps (PSM_MUPIX_HIGH_TOT_MIN). Feature-detected like the
+    # minitwin properties: a reco_testbeam built before them would die at option
+    # parsing on the unknown property.
+    if "HighTotMin" in _mupix_known:
+        mupix_monitor.HighTotMin = int(PSM_MUPIX_HIGH_TOT_MIN)
+        _HIGH_TOT_NOTE = ""
+        # The decoder drops ToT <= its cut, so every hit here has ToT >= cut + 1
+        # (>= 0 when the cut is -1 or not applied by an old decoder): a threshold
+        # at or below that selects every pair. Legal, so not a check() problem.
+        _tot_floor = (int(PSM_MUPIX_TOT_CUT) if not _TOT_CUT_NOTE else -1) + 1
+        if 0 <= int(PSM_MUPIX_HIGH_TOT_MIN) <= _tot_floor:
+            print(f"[nearline] WARNING    PSM_MUPIX_HIGH_TOT_MIN = {PSM_MUPIX_HIGH_TOT_MIN} "
+                  f"is at or below the lowest ToT the decoder keeps ({_tot_floor}, "
+                  f"PSM_MUPIX_TOT_CUT + 1): every pair passes, so the six "
+                  f"PIPSMMuPixMonitor/*_hitot_* maps are copies of the originals")
+    elif int(PSM_MUPIX_HIGH_TOT_MIN) == -1:
+        # An old build writes no high-ToT maps, which is exactly what -1 asks for.
+        _HIGH_TOT_NOTE = ""
+    else:
+        _HIGH_TOT_NOTE = " (not applied: old reco)"
+        print("[nearline] WARNING    the installed PIPSMMuPixMonitor has no HighTotMin "
+              "property (reco_testbeam older than the high-ToT maps): no "
+              "PIPSMMuPixMonitor/*_hitot_* maps are written")
     if _MUPIX_TIMEWALK:
         # The all-pairs timewalk reads the time-ordered SMA hits as an optional
         # input: the sequencer stays gated on the MuPix hits alone, and a frame
@@ -1840,6 +1882,7 @@ print(f"[nearline] halves     WD={WD_ENABLED} WD_SCALER_MONITOR={WD_SCALER_MONIT
       f" PSM_SMA_MONITOR={PSM_SMA_MONITOR} PSM_TIMEWALK={PSM_TIMEWALK}"
       f" PSM_TIMEWALK_CORRECTION={PSM_TIMEWALK_CORRECTION}"
       f" PSM_MUPIX_TOT_CUT={PSM_MUPIX_TOT_CUT}{_TOT_CUT_NOTE}"
+      f" PSM_MUPIX_HIGH_TOT_MIN={PSM_MUPIX_HIGH_TOT_MIN}{_HIGH_TOT_NOTE}"
       f" PSM_SMA_WIDE_DT={PSM_SMA_WIDE_DT} PSM_SMA_DIAGNOSTICS={PSM_SMA_DIAGNOSTICS}")
 print(f"[nearline] layers     "
       + (f"PIPSMSMACalibration {_TES_MUTRIG}->{_TES_MUTRIG_CAL}+{_TES_SMA_HITS}"
