@@ -128,7 +128,7 @@ class Server:
         if cmd in mcmd.MidasCommands:
             # Catch commands that require the midas client to answer properly,
             # e.g. for ODB access or extra messages
-            reply = mcmd.call(client = client, cmd = cmd, args = args)
+            reply = mcmd.call(client = client, cmd = cmd, args = args, view = self.view)
 
         else:
             allowed = actions_allowed(client) if cmd in commands.ACTION_COMMANDS else False

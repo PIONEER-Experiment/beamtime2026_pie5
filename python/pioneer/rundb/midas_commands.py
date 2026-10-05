@@ -2,13 +2,16 @@
 from pioneer.nearline.run import midas_run_sequence
 from pioneer.rundb.interface import interface as db_iface
 from pioneer.rundb.commands import CommandError
+from pioneer.rundb import commands, goto
 from pioneer.sequencer.config_writer import write_config
 from midas.client import MidasClient
 import json
 
 MidasCommands = [
     "generate_sequence",
-    "add_config_from_odb"
+    "add_config_from_odb",
+    "goto_preview",
+    "goto_config",
 ]
 
 def schedule_configuration(config):
@@ -38,7 +41,27 @@ def schedule_configuration(config):
     
     return {"runs": mrs_beam.schedule()}
 
-def call(client : MidasClient, cmd : str, args):
+def _goto(client : MidasClient, view, cmd : str, args):
+    """goto_preview / goto_config, answered in the page's standard envelope."""
+    try:
+        parsed = json.loads(args) if isinstance(args, str) else (args or {})
+        config_id = int(parsed.get("config_id"))
+    except (TypeError, ValueError):
+        return json.dumps(commands.error_envelope(cmd, "usage", f"{cmd} needs a numeric config_id"))
+    try:
+        if cmd == "goto_preview":
+            data = goto.preview(client, view, config_id)
+        else:
+            data = goto.load(client, view, config_id)
+    except goto.GotoError as exc:
+        return json.dumps(commands.error_envelope(cmd, exc.kind, str(exc)))
+    except Exception as exc:  # noqa: BLE001 - the page must get JSON whatever happens
+        return json.dumps(commands.error_envelope(cmd, "internal", f"{exc.__class__.__name__}: {exc}"))
+    return json.dumps(commands.ok_envelope(cmd, data, 0), default=str)
+
+def call(client : MidasClient, cmd : str, args, view = None):
+    if cmd in ("goto_preview", "goto_config"):
+        return _goto(client, view, cmd, args)
     if cmd == "generate_sequence":
         data = schedule_configuration(json.loads(args))
     elif cmd == "add_config_from_odb":

@@ -52,15 +52,18 @@ def load_isel_config(seq : SequenceClient, cfg_key : str,   aConfig : dict):
         timeout = 60
     )
 
+# EPICS device types a beamline configuration writes.
+# 2 (Beam Blocker) is a security feature we are not writing to. Open/Close of beam blocker
+# is a shifter responsibility and should not be automated.
+# 3 (PSA) and 6 (Value) are not considerd writable
+WRITEABLE_DEVICE_TYPES = (
+    1, # Magnets
+    4, # Separator
+    5, # Slits
+)
+
 def load_beam_config(seq : SequenceClient, cfg_key : str,  aConfig : dict):
-    writeable_device_types = [
-        1, # Magnets
-        4, # Separator
-        5, # Slits
-    ]
-    # 2 (Beam Blocker) is a security feature we are not writing to. Open/Close of beam blocker
-    # is a shifter responsibility and should not be automated.
-    # 3 (PSA) and 6 (Value) are not considerd writable
+    writeable_device_types = WRITEABLE_DEVICE_TYPES
 
     odb_path    = config_odb_paths[cfg_key]
     ca_names    = seq.odb_get(odb_path + "/Settings/CA Name")

@@ -97,6 +97,7 @@ const state = {
    sequences: null,          // rows of the last good `sequences`
    configuration_tables : {'target_positions' : [], 'degrader_positions' : [], 'beamline_settings' : []},
    showAuto: false,          // runplan + mystery configurations shown in the tables
+   gotoWatch: null,          // token of the go-to arrival watch in progress, if any
    runs: {},                 // runlog rows by database id, newest first when sorted
    nextBeforeId: null,       // paging cursor from the last runlog reply
    haveRunlog: false,
@@ -323,19 +324,27 @@ function autoToggleHtml(rows) {
           '" data-mystery="' + mystery + '"></div>';
 }
 
+/** The "go to" button of one row; none for a row marked do_not_use. */
+function gotoCell(row) {
+   if (row.do_not_use) return " --- ";
+   return '<button type="button" class="mbutton cfg-goto" data-config="' + Number(row.config_id) +
+          '" title="Load this configuration into the ODB now, without starting a run">go to</button>';
+}
+
 function configTableHtml(configuration_tables) {
    if (!configuration_tables) return '<div class="rundb-note">waiting for the first answer&hellip;</div>';
 
    // Render target positions
-   const target_header = "<tr><th>config id</th><th>select</th><th>seq_id</th><th>comment</th><th>xpos</th><th>ypos</th></tr>"
+   const target_header = "<tr><th>config id</th><th>select</th><th>go to</th><th>seq_id</th><th>comment</th><th>xpos</th><th>ypos</th></tr>"
    const target_body = configuration_tables.target_positions.map(function(row) {
       const do_not_use_cell = row.do_not_use
             ? " --- " : '<input type="checkbox" class="config-ckbx-target" value="' + row.config_type + ":" + row.config_id + '">';
-      return "<tr" + autoAttr(row) + " id=cfg_row" + row.config_id + "' data-values='" +
+      return "<tr" + autoAttr(row) + " id=cfg_row" + row.config_id + " data-values='" +
                   JSON.stringify(row.values || {}).replace(/'/g, "&#39;") +
                   "'>" +
               "<td>" + row.config_id + "</td>" +
               "<td>" + do_not_use_cell + "</td>" +
+              "<td>" + gotoCell(row) + "</td>" +
               "<td>" + (row.values ? row.values.seq_id : "---") + "</td>" +
               "<td>" + (row.comment ? row.comment : " --- ") + "</td>" +
               "<td>" + (row.values ? row.values.xpos : "---") + "</td>" +
@@ -345,15 +354,16 @@ function configTableHtml(configuration_tables) {
    });
 
    // Render target positions
-   const degrader_header = '<tr><th>config id</th><th>select</th><th>seq_id</th><th>comment</th><th>xpos</th></tr>'
+   const degrader_header = '<tr><th>config id</th><th>select</th><th>go to</th><th>seq_id</th><th>comment</th><th>xpos</th></tr>'
    const degrader_body = configuration_tables.degrader_positions.map(function(row) {
       const do_not_use_cell = row.do_not_use
             ? " --- " : '<input type="checkbox" class="config-ckbx-degrader"  value="' + row.config_type + ":" + row.config_id + '">';
-       return "<tr" + autoAttr(row) + " id=cfg_row" + row.config_id +  "' data-values='" +
+       return "<tr" + autoAttr(row) + " id=cfg_row" + row.config_id + " data-values='" +
                   JSON.stringify(row.values || {}).replace(/'/g, "&#39;") +
                   "'>" +
               "<td>" + row.config_id + "</td>" +
               "<td>" + do_not_use_cell + "</td>" +
+              "<td>" + gotoCell(row) + "</td>" +
               "<td>" + (row.values ? row.values.seq_id : "---") + "</td>" +
               "<td>" + (row.comment ? row.comment : " --- ") + "</td>" +
               "<td>" + (row.values ? row.values.xpos : "---") + "</td>" +
@@ -361,15 +371,16 @@ function configTableHtml(configuration_tables) {
 
    });
 
-   const beamline_header = '<tr><th>config id</th><th>select</th><th>seq_id</th><th>comment</th></tr>'
+   const beamline_header = '<tr><th>config id</th><th>select</th><th>go to</th><th>seq_id</th><th>comment</th></tr>'
    const beamline_body   = configuration_tables.beamline_settings.map(function(row) {
       const do_not_use_cell = row.do_not_use
             ? " --- " : '<input type="checkbox" class="config-ckbx-beam"  value="' + row.config_type + ":" + row.config_id + '">';
-       return "<tr" + autoAttr(row) + " id=cfg_row" + row.config_id + "' data-values='" +
+       return "<tr" + autoAttr(row) + " id=cfg_row" + row.config_id + " data-values='" +
                   JSON.stringify(row.values || {}).replace(/'/g, "&#39;") +
                   "'>" +
               "<td>" + row.config_id + "</td>" +
               "<td>" + do_not_use_cell + "</td>" +
+              "<td>" + gotoCell(row) + "</td>" +
               "<td>" + (row.values ? row.values.seq_id : " ---" ) + "</td>" +
               "<td>" + (row.comment ? row.comment : " --- ") + "</td>" +
               "</tr>"
@@ -386,7 +397,8 @@ function configTableHtml(configuration_tables) {
          '<tr><td>Schedule the Runs</td><td><button class="dlgButtonDefault" id="submit_config"> schedule </button></td></tr>' +
          '</table>';
 
-   return '<h3 class="rundb-h"><a href="http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FXYTable%2FVariables"> Target Positions </a></h3>' +
+   return '<div id="cfg-goto-status"></div>' +
+          '<h3 class="rundb-h"><a href="http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FXYTable%2FVariables"> Target Positions </a></h3>' +
           '<table class="mtable rundb-table">' +
           target_header +
           target_body.join("") +
@@ -589,6 +601,141 @@ function updateNumRuns() {
    document.getElementById("submit_num_runs").textContent = num_targets * num_degraders * num_beams;
 }
 
+// ---------------------------------------------------------------------------
+// Go to: load one configuration into the ODB without starting a run
+// ---------------------------------------------------------------------------
+//
+// Two calls to the client: goto_preview says what would change, the shifter
+// confirms, goto_config writes the Demand values (the sequencer's own setters)
+// and returns at once with the conditions the sequencer would have waited for.
+// The page then watches those until the hardware is there. A run in progress
+// or a running sequencer does not stop a load; it shows up as a warning.
+
+const GOTO_POLL_MS = 1000;
+const GOTO_SHOWN_CHANGES = 40;    // the confirm dialog lists at most this many
+
+function gotoNumber(v) {
+   const n = Number(v);
+   return Number.isFinite(n) ? String(Math.round(n * 1e4) / 1e4) : esc(v);
+}
+
+/** The confirm dialog body for a goto_preview reply. */
+function gotoConfirmHtml(p) {
+   const changed = (p.changes || []).filter(function (c) { return c.changes; });
+   const same = (p.changes || []).length - changed.length;
+   let html = "<b>Load configuration " + Number(p.config_id) + " (" + esc(p.config_type) +
+              ") into the ODB now?</b><br>No run is started.";
+   (p.warnings || []).forEach(function (w) {
+      html += '<div class="rundb-alert red" style="text-align:left">' +
+              '<span class="rundb-warnword">Warning:</span> ' + esc(w) + "</div>";
+   });
+   if (!changed.length) {
+      html += '<div class="rundb-note">Every setting is already at this configuration.</div>';
+   } else {
+      html += '<table class="mtable rundb-table" style="margin:8px auto">' +
+              "<tr><th>setting</th><th>now</th><th>new</th></tr>";
+      changed.slice(0, GOTO_SHOWN_CHANGES).forEach(function (c) {
+         html += "<tr><td>" + esc(c.name) + "</td><td>" + gotoNumber(c.now) +
+                 "</td><td><b>" + gotoNumber(c.new) + "</b></td></tr>";
+      });
+      html += "</table>";
+      if (changed.length > GOTO_SHOWN_CHANGES) {
+         html += '<div class="rundb-note">and ' + (changed.length - GOTO_SHOWN_CHANGES) +
+                 " more changes</div>";
+      }
+   }
+   if (same) html += '<div class="rundb-note">' + same + " setting" + (same === 1 ? "" : "s") +
+                     " already there</div>";
+   return html;
+}
+
+/** "/a/b[3]" -> ["/a/b", 3]; "/a/b" -> ["/a/b", null]. */
+function splitIndex(path) {
+   const m = /^(.*)\[(\d+)\]$/.exec(path);
+   return m ? [m[1], Number(m[2])] : [path, null];
+}
+
+/** How many of the arrival conditions the ODB values meet. `read` maps base path to value. */
+function arrivalCount(arrival, read) {
+   let met = 0;
+   (arrival || []).forEach(function (r) {
+      const parts = splitIndex(r.path);
+      let v = read[parts[0]];
+      if (parts[1] !== null) v = Array.isArray(v) ? v[parts[1]] : undefined;
+      if (v === undefined || v === null) return;
+      const ok = r.op === "=="
+         ? Number(v) === Number(r.target)
+         : Number(r.target) <= Number(v) && Number(v) <= Number(r.upper);
+      if (ok) met++;
+   });
+   return met;
+}
+
+function gotoStatus(klass, html) {
+   put("cfg-goto-status", '<div class="rundb-alert ' + klass + '">' + html + "</div>");
+}
+
+/** Watch the conditions goto_config returned until they hold, or give up. */
+async function watchArrival(done) {
+   const token = {};
+   state.gotoWatch = token;
+   const what = "configuration " + Number(done.config_id) + " (" + esc(done.config_type) + ")";
+   const arrival = done.arrival || [];
+   const bases = Array.from(new Set(arrival.map(function (r) { return splitIndex(r.path)[0]; })));
+   const stableMs = (Number(done.stable_for) || 0) * 1000;
+   const timeoutMs = (Number(done.timeout) || 60) * 1000;
+   const t0 = Date.now();
+   let allSince = null;
+   while (state.gotoWatch === token) {
+      let read = {};
+      try {
+         const values = await R.odb(bases);
+         bases.forEach(function (b, i) { read[b] = values[i]; });
+      } catch (err) { read = {}; }
+      if (state.gotoWatch !== token) return;
+      const met = arrivalCount(arrival, read);
+      const secs = Math.round((Date.now() - t0) / 1000);
+      if (met === arrival.length) {
+         if (allSince === null) allSince = Date.now();
+         if (Date.now() - allSince >= stableMs) {
+            gotoStatus("", "Reached " + what + " after " + secs + " s.");
+            return;
+         }
+      } else {
+         allSince = null;
+      }
+      if (Date.now() - t0 > timeoutMs && met < arrival.length) {
+         gotoStatus("red", "Not at " + what + " after " + secs + " s: " + met + " of " + arrival.length +
+                    " readbacks in tolerance. The Demand values are set; check the equipment pages.");
+         return;
+      }
+      gotoStatus("yellow", "Going to " + what + "&hellip; " + met + " of " + arrival.length +
+                 " readbacks in tolerance (" + secs + " s)");
+      await new Promise(function (resolve) { setTimeout(resolve, GOTO_POLL_MS); });
+   }
+}
+
+async function gotoClicked(configId) {
+   const pre = await R.call("goto_preview", { config_id: configId }, maxBytes());
+   if (!pre || !pre.ok) {
+      dlgAlert("Cannot go to configuration " + configId + ": " +
+               esc((pre && pre.error && pre.error.message) || "no answer"));
+      return;
+   }
+   dlgConfirm(gotoConfirmHtml(pre.data), async function (yes) {
+      if (!yes) return;
+      const done = await R.call("goto_config", { config_id: configId }, maxBytes());
+      if (!done || !done.ok) {
+         state.gotoWatch = null;
+         gotoStatus("red", "Loading configuration " + configId + " failed: " +
+                    esc((done && done.error && done.error.message) || "no answer"));
+         return;
+      }
+      pollOdb();      // the current-position highlight follows the new Demand
+      watchArrival(done.data);
+   });
+}
+
 // renderConfigurations is only called asyncronously upon loading the page.
 // Updates are going to be rare enough such that reloading the page is acceptable.
 async function renderConfigurations() {
@@ -614,6 +761,8 @@ async function renderConfigurations() {
    state.showAuto = readShowAuto();
    applyAutoVisibility();
    el("rundb-configs").addEventListener("click", function (e) {
+      const button = e.target.closest(".cfg-goto");
+      if (button) { e.preventDefault(); gotoClicked(Number(button.dataset.config)); return; }
       if (!e.target.matches(".cfg-auto-switch")) return;
       e.preventDefault();
       state.showAuto = !state.showAuto;
@@ -674,7 +823,7 @@ async function renderConfigurations() {
 
    });
    document.addEventListener("click", function(e) {
-      if (e.target.matches("input[type=checkbox]")) return;
+      if (e.target.matches("input[type=checkbox]") || e.target.closest(".cfg-goto")) return;
       const row = e.target.closest("tr[data-values]");
       if (!row) return;
 
@@ -825,6 +974,7 @@ const CFGDB = {
    // pure builders, all testable without a browser or a database
    runStateWord, stripHtml, sequencerNoteHtml, staleHtml,
    databaseError, note, init, isRunplanConfig, isMysteryConfig, autoCountText,
+   gotoConfirmHtml, arrivalCount, splitIndex,
    // loops, exported so a fixture page can drive them one step at a time
    pollOdb
 };
