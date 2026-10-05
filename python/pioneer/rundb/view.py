@@ -509,11 +509,18 @@ class RunDbView:
 
     # ----------------------------------------------------------------- the views
 
-    def status(self, actions_allowed: bool = False, actions_built: bool = False) -> dict:
+    def status(self, actions_allowed: bool = False, actions_built: bool = False,
+               five_point_offered: bool = False) -> dict:
         """What the client is, whether the database answers, and what is in it.
 
         The only view that survives an unreachable database: the page needs
         something to say, and "not answering" is the something.
+
+        The three flags under `client` come from the command layer, which is
+        the only place that knows them: whether the ODB allows actions, whether
+        the action module is built at all, and whether the five-point action
+        could work here (built, and writing to a scratch database -- on any
+        other database it is refused, so the page does not offer it).
         """
         database = {
             "dsn": pg.describe_dsn(self.dsn),
@@ -574,6 +581,7 @@ class RunDbView:
                 "uptime_s": int(time.time() - self.started_at),
                 "actions_allowed": bool(actions_allowed),
                 "actions_built": bool(actions_built),
+                "five_point_offered": bool(five_point_offered),
                 "version": VERSION,
                 "last_error": self.last_error,
             },

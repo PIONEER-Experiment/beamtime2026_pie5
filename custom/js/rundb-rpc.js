@@ -16,10 +16,11 @@
 // wrong -- client stopped, database down, reply longer than we asked for -- comes
 // back as an ok:false envelope carrying a kind the page can put into words.
 //
-// Nothing in this file knows what a run, a queue or a sequence is; that is
-// rundb.js. The pure helpers at the bottom (statusInfo, retrySize, halveLimit,
-// formatDuration, ...) are exported on the same global so `node --test` can
-// exercise them without a browser.
+// Rendering is rundb.js. The one exception is the Clear queue sentences, which
+// live here as plain strings so the tests can read them without a DOM. The pure
+// helpers (statusInfo, retrySize, halveLimit, formatDuration, clearQueueArgs,
+// ...) are exported on the same global so `node --test` can exercise them
+// without a browser.
 //
 // No build step, no bundler, no modules: plain <script src>, one global, the
 // way every other MIDAS custom page in this repo does it.
@@ -42,9 +43,10 @@ let clientName = "RunDBView";
 // They are never sent twice. Every retry in this file exists because a reply
 // did not fit in the buffer we asked for -- which says nothing about whether
 // the work was done -- so asking again would risk a second set of runs in the
-// queue. An action that comes back too_large is handed to the caller as it is,
-// and the panel says the runs may or may not have been created.
-const ACTION_CMDS = { schedule_five_point: true };
+// queue, or a second round of cancellations. An action that comes back
+// too_large is handed to the caller as it is, and the page says the write may
+// or may not have happened.
+const ACTION_CMDS = { schedule_five_point: true, clear_queue: true };
 
 function isAction(cmd) { return Object.prototype.hasOwnProperty.call(ACTION_CMDS, cmd); }
 
@@ -308,6 +310,272 @@ function esc(text) {
 }
 
 // ---------------------------------------------------------------------------
+// What an action's error says about the database
+// ---------------------------------------------------------------------------
+
+// Kinds that mean the client considered the request and turned it down before
+// writing anything. Anything else -- no answer, an answer we could not read, an
+// answer that did not fit -- says nothing about what happened at the far end.
+const REFUSED_KINDS = { usage: true, denied: true, db: true, unknown_command: true };
+
+function wasRefused(kind) {
+   return Object.prototype.hasOwnProperty.call(REFUSED_KINDS, kind);
+}
+
+// ---------------------------------------------------------------------------
+// Clear queue
+// ---------------------------------------------------------------------------
+//
+// The sentences of the Clear queue dialog and of the line it leaves under the
+// queue. DOM-free, so the tests can read them; rundb.js escapes them and puts
+// them on screen.
+//
+// The client decides everything that matters: which runs match, which one the
+// sequencer may be about to take, and -- under the row lock -- which of the ids it
+// is sent are still in a status it may cancel. These only put its answers into
+// words.
+
+// The statuses Clear queue may touch (actions.py). By name, not by flag:
+// DEPENDING is pending too, and is never cancelled from here.
+const CLEAR_STATUSES = ["PENDING", "HOLDING"];
+
+// The operator name the client accepts (commands.py). It is the author of the
+// annotation written beside every cancelled run, and goes in the MIDAS message.
+const OPERATOR_MAX = 64;
+
+/**
+ * Is the Clear queue button worth showing?
+ *
+ * Only on a client armed for actions, and only when the last queue read has
+ * something it could cancel: a button that can only ever answer "nothing to
+ * do" is a button a shifter learns to ignore.
+ */
+function clearQueueOffered(client, queue) {
+   if (!client || !client.actions_allowed) return false;
+   const runs = (queue && queue.runs) || [];
+   return runs.some(function (row) {
+      const name = row && row.status ? String(row.status).toUpperCase() : "";
+      return CLEAR_STATUSES.indexOf(name) >= 0;
+   });
+}
+
+/** The operator name, trimmed, or "" when it would be refused. */
+function operatorName(text) {
+   const name = text === null || text === undefined ? "" : String(text).trim();
+   return name.length > 0 && name.length <= OPERATOR_MAX ? name : "";
+}
+
+/**
+ * The args object for clear_queue, from the preview the dialog is showing.
+ *
+ * The ids are the ones the dialog listed as going to CANCELLED, and only those.
+ * A run it listed as kept is not sent: the dialog promised it stays PENDING,
+ * and that holds even if the sequencer stops before OK is pressed -- the
+ * shifter clears again for it. A run scheduled since the dialog opened is never
+ * in this list either, so it is never cancelled. The client still re-checks
+ * every id it is sent, and keeps one the sequencer may have reached since.
+ * `sequencer_running` is not ours to send: the client reads it from the ODB and
+ * refuses a caller that tries.
+ *
+ * null when there is nothing to send.
+ */
+function clearQueueArgs(data, includeHolding, operator) {
+   if (!data) return null;
+   const seen = {};
+   const ids = [];
+   (data.will_cancel || []).forEach(function (id) {
+      const n = Number(id);
+      if (!isFinite(n) || seen[n]) return;
+      seen[n] = true;
+      ids.push(n);
+   });
+   return { run_ids: ids, include_holding: Boolean(includeHolding), operator: operatorName(operator) };
+}
+
+function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
+
+/** ["PENDING", "HOLDING"] -> "PENDING or HOLDING". */
+function orList(names) {
+   const list = (names && names.length ? names : ["PENDING"]).map(String);
+   if (list.length === 1) return list[0];
+   return list.slice(0, -1).join(", ") + " or " + list[list.length - 1];
+}
+
+/** [1, 2, 3, ...] -> "1, 2, 3", with "and N more" past `max`. */
+function idList(ids, max) {
+   const list = ids || [];
+   const cap = max || 40;
+   if (list.length <= cap) return list.join(", ");
+   return list.slice(0, cap).join(", ") + " and " + (list.length - cap) + " more";
+}
+
+/** The label of the button that writes: "Cancel 12 runs". */
+function clearQueueButtonLabel(n) {
+   const k = Number(n) || 0;
+   return "Cancel " + plural(k, "run", "runs");
+}
+
+/**
+ * The dialog's first sentence: how many runs become CANCELLED, by the status
+ * each one has now, under the name the database stores.
+ */
+function clearQueueSummary(data) {
+   if (!data) return "";
+   const which = orList(data.statuses);
+   const will = (data.will_cancel || []).map(Number);
+   const kept = data.kept_head || [];
+   if (!will.length) {
+      if (kept.length) return "Nothing would be cancelled: the only " + which + " runs are ones the sequencer may be about to take.";
+      return "There are no " + which + " runs in the queue, so there is nothing to cancel.";
+   }
+   const byStatus = {};
+   const order = [];
+   (data.runs || []).forEach(function (run) {
+      if (will.indexOf(Number(run.id)) < 0) return;
+      const name = String(run.status || "?");
+      if (!byStatus[name]) { byStatus[name] = 0; order.push(name); }
+      byStatus[name]++;
+   });
+   const parts = order.map(function (name) { return byStatus[name] + " " + name; });
+   return "This will set " + plural(will.length, "run", "runs") + " to CANCELLED" +
+      (parts.length ? " (" + parts.join(", ") + ")" : "") + ". " +
+      "CLAIMED and RUNNING runs, and runs that have finished, are not touched.";
+}
+
+/**
+ * The line about the runs the client keeps for the sequencer, or "".
+ *
+ * The sequencer loads a run's configuration into the ODB -- moving devices --
+ * while that run is still PENDING, so cancelling it under the sequencer gives
+ * an untracked run or a refused start. The client cannot tell exactly which run
+ * that is, so it keeps every one it might be (the lowest-priority PENDING runs,
+ * and the run the nearline daemon has attached, whatever its priority). This
+ * says which, without claiming more than that.
+ */
+function clearQueueKeptSentence(data) {
+   const kept = (data && data.kept_head) || [];
+   if (!kept.length) return "";
+   const one = kept.length === 1;
+   return "The sequencer is running, so " + (one ? "DB id " : "DB ids ") + idList(kept) +
+      (one ? " stays PENDING: the sequencer may be about to take it."
+           : " stay PENDING: the sequencer may be about to take one of them.") +
+      " Stop the sequencer and clear again to remove " + (one ? "it." : "them.");
+}
+
+/** The line for a list the client cut short, or "". */
+function clearQueueCappedSentence(data) {
+   if (!data || !data.capped) return "";
+   const shown = (data.runs || []).length;
+   const total = Number(data.total);
+   return "Only the first " + shown + (isFinite(total) && total > shown ? " of " + total : "") +
+      " matching runs are listed, and only those are cancelled. Clear again for the rest.";
+}
+
+/**
+ * Why the dialog's button is dead, or "" when it is not.
+ *
+ * `preview` is {pending, data, error} as the dialog holds it.
+ */
+function clearQueueBlocked(preview, operator) {
+   const view = preview || {};
+   if (view.pending) return "Waiting for the client to list the runs…";
+   if (view.error) return "The client could not list the runs, so nothing can be cancelled from here.";
+   if (!view.data) return "Waiting for the client to list the runs…";
+   if (!(view.data.will_cancel || []).length) return "There is nothing to cancel.";
+   if (!operatorName(operator)) {
+      const raw = operator === null || operator === undefined ? "" : String(operator).trim();
+      return raw.length > OPERATOR_MAX
+         ? "The operator name is longer than " + OPERATOR_MAX + " characters."
+         : "Type your name in Operator first: it is recorded with every cancelled run.";
+   }
+   return "";
+}
+
+// Error kinds this page makes up itself when no usable reply came back: the
+// call timed out, mhttpd could not be reached or said the client is gone, or
+// what came back was not an envelope.
+const NO_REPLY_KINDS = { timeout: true, transport: true, client_down: true, bad_reply: true };
+
+/**
+ * Whether an error envelope is the client's own answer, as opposed to one
+ * this page built because no answer came (`local`, or a no-reply kind).  Only
+ * an answer that carries a message counts: without one there is nothing the
+ * client said to show.
+ */
+function clientAnswered(env) {
+   const err = (env && env.error) || {};
+   return !env.local && !Object.prototype.hasOwnProperty.call(NO_REPLY_KINDS, err.kind) &&
+      !!String(err.message || "").trim();
+}
+
+/**
+ * What came back from clear_queue, as {level, head, lines}.
+ *
+ *   level "ok"       the client answered; head says how many were cancelled
+ *   level "refused"  the client turned it down; nothing was written
+ *   level "unknown"  some or all of it may have happened: either no usable
+ *                    answer came back ("did not answer"), or the client answered
+ *                    with an error it could not resolve, such as a failed commit
+ *                    (`answered: true`, "could not confirm")
+ *
+ * The split is REFUSED_KINDS, the same as the five-point panel's: a request
+ * that went out and did not come back may well have been carried out.
+ */
+function clearQueueResult(env) {
+   if (!env) return null;
+   if (env.ok === false) {
+      const err = env.error || {};
+      if (!wasRefused(err.kind) && clientAnswered(env)) {
+         // The client did answer, with an error it could not resolve (a
+         // commit that failed, say): it is not that nothing came back, it is
+         // that the client itself does not know what the database kept.
+         const message = String(err.message).replace(/[\s.]+$/, "");
+         return { level: "unknown", answered: true,
+            head: "The client could not confirm whether the runs were cancelled:",
+            lines: [message + ". Look at the queue before pressing again."] };
+      }
+      if (!wasRefused(err.kind)) {
+         return { level: "unknown", head: "The client did not answer.",
+            lines: ["The runs may still have been cancelled. Look at the queue before pressing again.",
+                    String(err.message || err.kind || "no detail given")] };
+      }
+      if (err.kind === "denied") {
+         return { level: "refused", head: "Nothing was cancelled.",
+            lines: ["This client is not armed for actions, so it refused the request.",
+                    String(err.message || "")].filter(Boolean) };
+      }
+      return { level: "refused", head: "Nothing was cancelled.",
+         lines: [String(err.message || "the client refused the request"),
+                 String(err.hint || "")].filter(Boolean) };
+   }
+   const data = env.data || {};
+   const cancelled = data.cancelled || [];
+   const kept = data.kept_head || [];
+   const skipped = data.skipped || [];
+   const lines = [];
+   if (cancelled.length) {
+      lines.push((cancelled.length === 1 ? "DB id " : "DB ids ") + idList(cancelled) +
+         (cancelled.length === 1 ? " is" : " are") + " now CANCELLED" +
+         (data.operator ? ", recorded as cancelled by " + data.operator : "") + ".");
+   }
+   if (kept.length) {
+      lines.push((kept.length === 1 ? "Kept DB id " : "Kept DB ids ") + idList(kept) +
+         " PENDING: the sequencer may be about to take " + (kept.length === 1 ? "it" : "one of them") +
+         ". Stop the sequencer and clear again to remove " + (kept.length === 1 ? "it." : "them."));
+   }
+   if (skipped.length) {
+      lines.push("Skipped " + plural(skipped.length, "run", "runs") +
+         " whose status changed after the dialog listed " + (skipped.length === 1 ? "it" : "them") + ": " +
+         idList(skipped.map(function (s) {
+            return s.id + " (" + (s.status ? s.status : "no longer in the database") + ")";
+         })) + ".");
+   }
+   return { level: "ok",
+      head: cancelled.length ? "Cancelled " + plural(cancelled.length, "run", "runs") + "." : "Nothing was cancelled.",
+      lines: lines };
+}
+
+// ---------------------------------------------------------------------------
 // The jrpc call
 // ---------------------------------------------------------------------------
 
@@ -555,7 +823,12 @@ const RunDbRpc = {
    statusClass, statusSeverity, statusInfo, statusTable, worstStatus, countEntries, isPendingStatus,
    retrySize, halveLimit,
    formatDuration, formatStamp, formatClock, formatCount, clockNow,
-   basename, esc, normFlags, errorEnvelope, withTimeout
+   basename, esc, normFlags, errorEnvelope, withTimeout,
+   // what an action's error means, and the Clear queue sentences
+   REFUSED_KINDS, wasRefused, NO_REPLY_KINDS, clientAnswered,
+   CLEAR_STATUSES, OPERATOR_MAX, clearQueueOffered, operatorName, clearQueueArgs, clearQueueButtonLabel,
+   clearQueueSummary, clearQueueKeptSentence, clearQueueCappedSentence, clearQueueBlocked,
+   clearQueueResult, orList, idList
 };
 
 root.RunDbRpc = RunDbRpc;

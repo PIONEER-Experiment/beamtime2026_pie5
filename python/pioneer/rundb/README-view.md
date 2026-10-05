@@ -12,8 +12,9 @@ few seconds cannot disturb data taking.
   psycopg nor MIDAS.
 * `rpc_server.py` — the MIDAS client `RunDBView`, which answers the custom page
   over jrpc and does nothing else.
-* `actions.py` — the exception: the one command that writes, behind two gates.
-  See "Actions" below.
+* `actions.py` — the exception: the commands that write (clearing the queue,
+  and on scratch databases a five-point scan), behind two gates. See "Actions"
+  below.
 
 Status names are passed through exactly as the database stores them —
 `PENDING`, `HOLDING`, `RUNSDONE` and the rest — in every row, in `queue`'s
@@ -55,7 +56,9 @@ them; credentials come from the command line only, never from the ODB.
 
 ## Actions
 
-`actions.py` is the one module here that writes. It offers a single action,
+`actions.py` is the one module here that writes. It offers two actions,
+`clear_queue` and `schedule_five_point`. `clear_queue` is described last, under
+"Clearing the queue"; the two gates and the message-log lines below apply to both. First,
 `schedule_five_point`: five runs at the five target positions of
 `config.target_position` with `seq_id = 2`, grouped into one sequence, carrying
 whatever other settings were chosen (one configuration per device; a
@@ -92,8 +95,13 @@ and, if the write fails, the error carries
 queue and cancel them. The reply never says "nothing happened" over a queue that
 has just grown.
 
-Arm it **on the laptop scratch experiment only**. It has never been run against
-the experiment's own database, and that is a decision, not an oversight:
+Arm the five-point scan **on the laptop scratch experiment only**. The action
+and its preview refuse any database that is not a scratch one (`_require_scratch`,
+in the action itself, so the page and the command line behave alike); the
+status reply carries `client.five_point_offered`, true only when the write
+connection string names `pioneer_rundb_test`, `pioneer_rundb_scratch` or
+`pioneer_rundb_actions`, and the page shows its five-point form only when that
+is true. That is a decision, not an oversight:
 
 ```sh
 python -m pioneer.rundb.rpc_server --experiment rundb --client RunDBView \
@@ -112,10 +120,10 @@ python -m pioneer.rundb.actions five-point --config-id 42 --events 2000000 \
     --write-dsn "…" --confirm                   # creates the runs
 ```
 
-The command line refuses any database not named `pioneer_rundb_test`,
-`pioneer_rundb_scratch` or `pioneer_rundb_actions`, before it connects to
-anything: scheduling into the
-experiment's own run database is not enabled in this version. Validation happens
+The `five-point` command line refuses any database not named
+`pioneer_rundb_test`, `pioneer_rundb_scratch` or `pioneer_rundb_actions`, before
+it connects to anything: scheduling into the experiment's own run database is
+not enabled in this version. Validation happens
 before any write, so a refusal leaves the queue exactly as it was — `state.midas_run`,
 `state.run_sequence` and `state.runs_in_sequence` all unchanged. What is checked:
 every id exists, none is marked `do_not_use`, no two share a `config_type`, none
@@ -124,6 +132,102 @@ table (a parent row with no settings would schedule nothing and report success),
 none of the five target points is marked `do_not_use` (four points are not a
 five-point scan, so it is refused rather than trimmed), at most 16
 configurations, and `requested_events` a whole number between 1 and 10^10.
+
+### Clearing the queue
+
+`clear_queue` sets waiting runs to `CANCELLED`. Unlike five-point it is meant
+for the experiment's own database. It writes straight through psycopg on the
+write connection (not through `interface`), in one transaction with
+`statement_timeout` 5 s and `lock_timeout` 3 s; a timeout rolls everything back.
+The write connection gets `connect_timeout=5` unless its connection string sets
+one.
+
+`preview_clear_queue` (a read command, no ODB flag, but it needs the action
+module for its connection, like `preview_five_point`):
+
+| | |
+|---|---|
+| args | `include_holding` (JSON `true`/`false`, default `false`) |
+| reply | `statuses` (`["PENDING"]`, or `["PENDING", "HOLDING"]`), `sequencer_running`, `runs` (one entry per queued run in those statuses, in queue order, at most 2000: `id`, `status`, `priority`, `midas_run_number`, `requested_events`), `will_cancel` (ids), `kept_head` (ids), `head_reason` (a sentence or `null`), `total` (the full count), `capped` (`true` if `runs` was cut at 2000) |
+
+`clear_queue` (an action: both gates):
+
+| | |
+|---|---|
+| args | `run_ids` (non-empty list of at most 2000 ids, the ones the dialog showed), `include_holding` (default `false`), `operator` (required text, trimmed, one line, at most 64 characters; the author of the annotations) |
+| reply | `cancelled` (ids), `kept_head` (ids left `PENDING`), `skipped` (`[{id, status}]`, ids whose status was no longer in `statuses` when the row was locked, `status` null if the run is gone), `statuses`, `sequencer_running`, `operator` |
+| errors | `usage` (bad arguments, nothing written), `denied` (a gate is closed), `db` (busy, timed out, or refused: "nothing was cancelled"), `internal` (no write connection string; or the commit itself failed, so the outcome is not known: look at the queue) |
+
+Only the ids named are touched, and each only if it is still `PENDING` (or
+`HOLDING`, if asked) when the transaction locks it (`SELECT ... FOR UPDATE`).
+The protected runs are worked out once after that, and the locked rows that are
+not protected are cancelled by id, so `cancelled`, `kept_head` and `skipped`
+describe exactly the rows that were changed. `kept_head` lists only ids that
+were sent: the page sends the preview's `will_cancel`, so a run the dialog
+showed as kept is never cancelled by that OK, even if the sequencer stopped in
+between. `CLAIMED`, `RUNNING` and finished runs are never in the chosen
+statuses. Ids must be whole numbers; `2.7` is refused, not truncated (this now
+holds for every id argument of every command). Each cancelled run gets one
+`logs.run_annotations` row with the operator as author and the same note for
+the whole batch: `cancelled from the RunDB page (Clear queue)` (`... the
+command line ...` from the CLI), and while the sequencer was running
+`; sequencer running, next run(s) <ids> left PENDING` (or just `; sequencer
+running` if nothing was protected). A `CANCELLED` run makes its sequence
+`FAILED` through the existing trigger.
+
+**`sequencer_running` is server-side.** It is not an argument of either command:
+`commands.parse_args` refuses it as an unknown key, so a caller cannot send it.
+`rpc_server.sequencer_running` reads `/PySequencer/State/Running` from the ODB on
+every call to either command and hands it to `dispatch_envelope` as
+`server_args`. Only an explicit `false` means stopped; a failed read or any
+other value counts as running. While running, every `PENDING` run at the lowest
+priority (ties included, by `IS NOT DISTINCT FROM`, so a NULL priority works) is
+kept, because the sequencer loads that run's settings while it is still
+`PENDING` and cancelling it then gives the nearline daemon an invalid state
+transition at run start. While running, the server also reads
+`/Nearline/Info/Run DB PK` (the run `sequencer/config_loader.py` loaded) and
+passes it as `loaded_run_id`, another server-side extra the caller cannot
+send; that run is kept as well if it is still `PENDING`, because the priority
+head can move while the sequencer waits over a loaded run. A failed read, a
+missing key or `0` protects nothing extra. Stop the sequencer and clear again
+to take the kept runs. Between the ODB reads and the UPDATE there is a short
+window that cannot be closed from here.
+
+`status` reads the ODB flag too (it reads no other ODB key), and reports
+`client.actions_allowed` as the flag **and** a built action module, so the
+page knows whether to show its write buttons.
+
+Audit lines in the MIDAS log (`RunDBView: action clear_queue accepted: operator
+'NAME' cancelled N run(s) [ids] (PENDING), kept next run [ids] (sequencer
+running), skipped N`) say who, how many and which ids, cut at 40 ids with "and N
+more". A refused one carries the error kind and message, and summarises its
+arguments (operator, how many ids, `include_holding`) in at most 200
+characters instead of echoing them.
+
+`status` also carries `client.five_point_offered` beside `actions_allowed` and
+`actions_built`; see above.
+
+The manual path is the same two commands through the same command layer, so
+`--json` prints what the page would get:
+
+```sh
+python -m pioneer.rundb.actions clear-queue --operator NAME \
+    --write-dsn "host=localhost dbname=pioneer user=shifter"           # preview, exit 3
+python -m pioneer.rundb.actions clear-queue --operator NAME \
+    --write-dsn "..." --yes [--run-id ID ...] [--include-holding] \
+    [--include-head | --keep-run-id ID] [--json]
+```
+
+Without `--yes` it previews and writes nothing. `--include-head` replaces the
+ODB read (there may be no MIDAS): without it the sequencer is treated as running
+and the next run is kept; give it only with the sequencer stopped. It is allowed
+on any database, takes no notice of `/RunDBView/Allow actions` and writes no MIDAS
+message (it has no MIDAS client); the annotations say it came from the command
+line. The preview exits 3 (not 2, which argparse uses for a bad command line).
+With `--yes` and `--run-id` (repeatable) it clears exactly those ids, the list
+a preview showed; with `--yes` alone it clears the `will_cancel` list of a fresh
+preview taken at that moment, up to 2000 per call. `--keep-run-id ID` stands in
+for the `/Nearline/Info/Run DB PK` read.
 
 ## Tests
 

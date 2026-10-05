@@ -112,3 +112,45 @@ tr.rundb-detailrow > td { background: rgba(128, 128, 128, 0.10); padding: 6px 10
 .rundb-actionform        { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
                            margin: 6px 0; }
 .rundb-actionform label  { display: inline-flex; gap: 5px; align-items: center; }
+
+/* --- Clear queue ------------------------------------------------------- */
+
+/* The button sits in the Queue heading; it should not be bold or 1.05em. */
+.rundb-htools     { margin-left: 10px; font-weight: normal; font-size: 0.85em; }
+.rundb-hbutton    { font-size: 95%; }
+
+/* A page-local dialog, not MIDAS dlgConfirm: it needs a table, a checkbox and
+   a text field. z-index 25 is above the MIDAS header (2) and side menu (1) and
+   below MIDAS's own dialogs (30/31, controls.js), so an alarm still shows.
+
+   The box sets its own background *and* text colour, and so does everything in
+   it that is coloured, as every pair in this file does: midas.css has no dark
+   theme, and a pair that is set together stays readable whether the browser
+   leaves the page light or darkens it for the viewer. */
+.rundb-modal-back { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 25;
+                    background: rgba(0, 0, 0, 0.45);
+                    display: flex; align-items: flex-start; justify-content: center;
+                    padding: 48px 16px 16px 16px; box-sizing: border-box; overflow-y: auto; }
+.rundb-modal      { background: #fff; color: #222; border: 1px solid #888; border-radius: 6px;
+                    box-shadow: 6px 6px 10px 4px rgba(0, 0, 0, 0.2);
+                    width: 52em; max-width: 100%; box-sizing: border-box; padding: 12px 16px; }
+.rundb-modal-h    { font-weight: 600; font-size: 1.15em; margin-bottom: 6px; }
+.rundb-modal-text { margin-bottom: 8px; }
+.rundb-modal-summary { margin: 6px 0; font-weight: 600; }
+.rundb-modal-check,
+.rundb-modal-field { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0; }
+.rundb-modal-field input { flex: 1 1 14em; min-width: 0; max-width: 24em; }
+/* A long queue scrolls inside the dialog; the buttons stay in reach. */
+.rundb-modal-table{ max-height: 45vh; overflow: auto; margin: 4px 0; }
+.rundb-modal-table table.rundb-table { margin-top: 0; }
+.rundb-modal-buttons { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+.rundb-modal-why  { margin-top: 4px; color: #666; font-size: 90%; min-height: 1.2em; }
+/* Wraps rather than widening the table: the list scrolls inside the dialog, and
+   a nowrap "kept" sentence was cut off at the dialog's right edge. */
+td.rundb-kept     { font-weight: 600; color: #1a7f37; }
+/* At phone width the run-number and requested-events columns go, so that what
+   OK will do to each run (the last column) is on screen without scrolling. */
+@media (max-width: 600px) {
+   .rundb-modal-table th:nth-child(2), .rundb-modal-table td:nth-child(2),
+   .rundb-modal-table th:nth-child(5), .rundb-modal-table td:nth-child(5) { display: none; }
+}

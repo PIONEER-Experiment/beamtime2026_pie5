@@ -6,9 +6,13 @@ who wants to know what the run database says without knowing any Postgres.
 ## What it is
 
 **RunDB**, in the side menu. It shows what runs have been taken, what is
-queued next, and which scans (sequences) they belong to. It **only reads**.
-It does not start a run, does not change the queue order, and does not touch
-the sequencer. You cannot break anything by clicking around it.
+queued next, and which scans (sequences) they belong to. It never starts a
+run, never changes the queue order and never touches the sequencer. Apart
+from one button, it only reads, so you cannot break anything by clicking
+around it. The one button is **Clear queue...** (see "Clearing the queue"
+below). It is there only when the page has been armed for it; on an
+unarmed page, which is the normal state until someone decides otherwise, the
+page reads and nothing else.
 
 ## The strip at the top
 
@@ -62,6 +66,9 @@ A run sitting in the queue with status **HOLDING** is not stuck by accident —
 a person put it there on purpose (paused pending a decision), which is why it
 is shown in yellow rather than grey. It will not start until a person takes
 it off hold.
+
+If the queue is full of runs you no longer want, see "Clearing the queue"
+below.
 
 ## Reading the runlog
 
@@ -151,9 +158,175 @@ python -m pioneer.rundb.view config <id>
 Add `--json` to any of these to see the exact reply the page itself gets —
 useful for telling "the page is broken" from "the data is like this."
 
-## Actions
+## Clearing the queue
 
-There are none. The panel on the page, if you scroll to it, says in one
-sentence that actions are disabled on this client. This page does not
-schedule runs, start runs, or change the queue — as of this deploy it never
-will without a separate, explicit decision to arm it.
+Use this when runs are queued that should not be taken: a scan set up with the
+wrong settings, or a queue left over from a previous shift. It sets the queued
+runs to `CANCELLED`. It does not start or stop anything.
+
+### When the button is there
+
+**Clear queue...** sits in the heading of the Queue section. It is shown only
+when both of these hold:
+
+1. the page has been armed for actions (the yellow line at the top of the
+   Actions panel says "This client is armed for actions"; if it does not say
+   that, the button never appears, and clearing has to be done from the
+   command line, see below), and
+2. the queue currently has at least one `PENDING` or `HOLDING` run. With
+   nothing to cancel, there is no button.
+
+### The dialog
+
+Pressing the button opens a dialog and the client immediately lists what
+it would cancel. Nothing has been changed yet.
+
+- **The list.** One row per run: DB id, run number ("not taken" if it has not
+  been started), status exactly as the database stores it, priority, requested
+  events, and what happens to it when you press OK: `CANCELLED`, or "kept".
+  The sentence above the list says how many runs will be cancelled.
+- **Which runs.** Only `PENDING` runs by default. Runs on hold (`HOLDING`)
+  are left alone unless you tick **also cancel HOLDING runs**. That box is
+  unticked every time the dialog opens, so you have to ask for it each time;
+  ticking it makes the client list again.
+- **Operator.** Type your name (at most 64 characters, one line). It is
+  required: the OK button stays dead, with the reason written under it, until
+  there is a name. The name is recorded with every cancelled run and in the
+  MIDAS message. The page remembers it until you reload, so you type it once.
+- **Close**, Esc, or a click outside the box closes the dialog and changes
+  nothing.
+- If the queue is longer than 2000 runs, only the first 2000 are listed and
+  only those are cancelled; the dialog says so. Press the button again for
+  the rest.
+
+The OK button says how many runs it will cancel ("Cancel 12 runs").
+
+### What OK does
+
+- Every listed run marked `CANCELLED` goes to `CANCELLED`. It is one step:
+  either they all change or none does.
+- OK sends only the runs marked `CANCELLED`. A run the dialog showed as "kept"
+  is never cancelled by that OK, even if the sequencer has stopped in the
+  meantime: open the dialog again to see it listed for cancelling.
+- Each cancelled run gets an annotation in the run database naming you and
+  saying it was cancelled from the RunDB page. It is stored in the database's
+  `logs.run_annotations`; the page itself does not show annotations.
+- One line is written to the MIDAS Messages page, from `RunDBView`, with your
+  name, how many runs were cancelled, and their DB ids.
+- Only the runs the dialog listed are touched. A run scheduled while the dialog
+  was open is not cancelled, and neither is one that changed status in the
+  meantime (for example one the sequencer has just taken, or one someone put on
+  hold). Those are reported as "skipped" in the result.
+- A `CLAIMED` or `RUNNING` run, and anything already finished, is never touched.
+  Clearing the queue does not stop the run that is going.
+
+### When the sequencer is running
+
+The sequencer picks the queued run with the lowest priority number and spends
+a while setting up that run's configuration (moving devices) **while it is
+still `PENDING`**. Cancelling it at that moment would leave the sequencer
+starting a run the database says is cancelled. So while the sequencer is
+running, the next run is **kept `PENDING`**. When several `PENDING` runs share
+the lowest priority number, all of them are kept, because there is no telling
+which of them the sequencer will take. The run the sequencer has already
+picked is kept too, even if a run with a lower priority number was queued
+after it picked it (the sequencer can wait at a prompt for minutes with a run
+loaded).
+
+The dialog shows such runs as "kept - sequencer is loading it", with a yellow
+line explaining it. To remove them as well:
+
+1. Stop the sequencer on the **Sequencer** page.
+2. Open **Clear queue...** again. Nothing is kept now, and OK cancels the
+   rest.
+
+The sequencer's state is read from the ODB each time you press the button and
+again when you press OK, so it cannot be set from the page. If the page cannot
+tell, it assumes the sequencer is running. There is a short window, between
+that read at OK and the change in the database, that cannot be closed from
+here: if you start the sequencer at the very moment you press OK, stop it, look
+at the queue, and start it again.
+
+### The result line
+
+After OK the dialog closes and a line stays under the queue until you press
+**Dismiss**. The queue is re-read straight away.
+
+- **"Cancelled N runs."** followed by the DB ids that are now `CANCELLED`, and
+  the name recorded.
+- **"Kept DB id ... PENDING: the sequencer is about to take it."** A run that
+  became the next run after the dialog listed it. The case above: stop the
+  sequencer, then clear again.
+- **"Skipped N runs whose status changed after the dialog listed them"**,
+  with the id and the status each has now. Look at the queue and clear again
+  if you still want them gone.
+- **"Nothing was cancelled."** (red) The client refused, with its reason: for
+  example the name was missing, the database was busy ("try again in a
+  moment"), or the page is not armed. Nothing was written.
+- An error saying **whether the runs were cancelled "is not known"** means the
+  database lost the change at the last moment, while saving it. Look at the
+  queue before clearing again.
+- **"The client did not answer. The runs may still have been cancelled. Look
+  at the queue before pressing again."** (red) The request went out and no
+  usable answer came back, so it may or may not have been carried out. Check
+  the Queue section, or **Refresh now**, before trying again. The page never
+  sends the same clear twice by itself.
+
+### Sequences and runplan steps
+
+A run in a scan (a sequence) that is cancelled makes the **whole sequence
+`FAILED`**: the database treats `CANCELLED` as a failure and marks the
+sequence accordingly (after the short delay mentioned under "Sequences"). The
+sequence's other runs are not cancelled unless they were queued and listed too.
+A runplan step whose run was cancelled is reported by the runplan as
+cancelled.
+
+### It cannot be undone from this page
+
+There is no un-cancel. A `CANCELLED` run stays in the runlog as it is. To run
+that configuration again, schedule it afresh from **ConfigDB**. Check the list
+before pressing OK.
+
+### From the command line, if the page is down or not armed
+
+The same thing without a browser, MIDAS or the client. It needs a connection
+string for a database user that may write (ask whoever manages the database;
+do not paste the password into a log):
+
+```bash
+python -m pioneer.rundb.actions clear-queue --operator "Your Name" \
+    --write-dsn "host=localhost dbname=pioneer user=shifter"
+```
+
+Without `--yes` this only **previews**: it lists the runs (marking those that
+would be kept), says "nothing was written", and exits with status 3. When the
+list is right, run it again with `--yes` added to cancel them. Without
+`--run-id`, `--yes` takes a fresh look at the queue and cancels what that
+preview would cancel, which may differ from what you saw if the queue changed
+in between. To cancel exactly the runs you previewed, give each one:
+`--yes --run-id 812 --run-id 813 ...`. Other options:
+
+- `--include-holding` also cancels `HOLDING` runs.
+- `--include-head` says the sequencer is stopped, so the next run is cancelled
+  too. Without it the next run is kept, because this command cannot see MIDAS.
+  **Use it only after stopping the sequencer on the Sequencer page.**
+- `--keep-run-id ID` keeps that run as well, for when the sequencer is running
+  and you know which run it has loaded (`/Nearline/Info/Run DB PK`). Not
+  together with `--include-head`.
+- `--json` prints the exact reply the page would get.
+
+The annotations say "cancelled from the command line". This path writes no line
+to the MIDAS Messages page, since it does not talk to MIDAS. It does not look
+at `/RunDBView/Allow actions` either: it is the manual path, and whoever can
+run it has the database password.
+
+## Other actions
+
+The page can also schedule a five-point scan, but only on a scratch
+database. On the experiment's own database the Actions panel says so in one
+line ("offered on scratch databases only; use the ConfigDB page"), and
+five-point scans are scheduled from ConfigDB as before.
+
+Everything else here is read-only. The page does not schedule other runs, start
+runs, change the queue order or touch the sequencer. On a page that has not been
+armed, the panel says in one sentence that actions are disabled on this client.

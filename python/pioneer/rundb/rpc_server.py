@@ -31,6 +31,7 @@ Credentials never come from the ODB.  They come from `--dsn` or
 
 import argparse
 import functools
+import json
 import os
 import signal
 import sys
@@ -58,6 +59,28 @@ DEFAULTS = {
     "Beamline" : "PiE5",
     "Client name": "RunDBView",
 }
+
+# Where the python sequencer says whether it is running.  Read for the two
+# clear-queue commands only, see `sequencer_running`.
+SEQUENCER_RUNNING = "/PySequencer/State/Running"
+
+# Where the sequencer writes the database id of the run it has loaded
+# (`sequencer/config_loader.py`); 0 between runs.  Read beside the flag above,
+# see `loaded_run_id`.
+LOADED_RUN = "/Nearline/Info/Run DB PK"
+
+# The commands that need to know whether the sequencer is running.
+SEQUENCER_COMMANDS = ("clear_queue", "preview_clear_queue")
+
+# The longest a refused clear's summary of its arguments may be in an audit
+# line.  The caller chose those arguments, and a refusal is exactly the case
+# where they may be anything at all.
+AUDIT_ARGS_CHARS = 200
+
+# How many run ids an audit line spells out before it says "and N more".  A
+# MIDAS message is one line on the Messages page and has a length limit of its
+# own; a clear of a long queue would otherwise be cut off mid-list.
+AUDIT_IDS_SHOWN = 40
 
 _stop = False
 
@@ -100,6 +123,98 @@ def actions_allowed(client) -> bool:
         return False
 
 
+def sequencer_running(client) -> bool:
+    """Whether the sequencer is running, read from the ODB now.
+
+    Read on every clear-queue call and never taken from the caller: it decides
+    whether the run at the head of the queue is protected, and a page must not
+    be able to talk the client into cancelling a run the sequencer may be
+    loading into the ODB at that moment.  A read that fails, a missing key or
+    anything other than an explicit false counts as running -- the cost of being
+    wrong that way is one run left in the queue for a second clear, the cost
+    of being wrong the other way is a run started on settings that were
+    cancelled under it.
+
+    "Explicit false" is `False` or the integer 0: the MIDAS python client
+    returns a BOOL key as the int 0 or 1 (seen with midas ee45b114), so a
+    test for `False` alone would read a stopped sequencer as running.
+    """
+    try:
+        value = client.odb_get(SEQUENCER_RUNNING)
+    except Exception:  # noqa: BLE001 - unreadable means "assume it is running"
+        return True
+    stopped = isinstance(value, int) and value == 0    # False, or a BOOL read as 0
+    return not stopped
+
+
+def loaded_run_id(client):
+    """The database id of the run the sequencer has loaded, or None.
+
+    Read only while the sequencer is running, beside `sequencer_running`: the
+    run it has picked is protected by identity as well as by being the head of
+    the queue, because the head can move (a run with a lower priority number
+    queued while the sequencer waits at a prompt) while the run being set up
+    stays the same.  A failed read, a missing key, 0 or anything that is not a
+    positive whole number protects nothing extra; the priority head is still
+    kept either way.
+    """
+    try:
+        value = client.odb_get(LOADED_RUN)
+    except Exception:  # noqa: BLE001 - nothing extra to protect
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _ids_text(ids) -> str:
+    """A list of run ids for an audit line, cut at `AUDIT_IDS_SHOWN`."""
+    ids = list(ids or [])
+    text = ", ".join(str(item) for item in ids[:AUDIT_IDS_SHOWN])
+    if len(ids) > AUDIT_IDS_SHOWN:
+        text += f" and {len(ids) - AUDIT_IDS_SHOWN} more"
+    return f"[{text}]"
+
+
+def _clear_args_text(args) -> str:
+    """What a clear asked for, short enough for one message line.
+
+    The other actions echo their arguments as sent, but a clear carries up to
+    two thousand run ids; the audit line says how many, which statuses and who,
+    each piece cut short and the whole at `AUDIT_ARGS_CHARS`.  Anything that
+    does not parse is echoed as it is (cut the same way), which is itself
+    worth seeing.
+    """
+    try:
+        given = json.loads(args) if isinstance(args, str) else dict(args or {})
+    except (TypeError, ValueError):
+        return repr(args)[:AUDIT_ARGS_CHARS]
+    if not isinstance(given, dict):
+        return repr(args)[:AUDIT_ARGS_CHARS]
+    run_ids = given.get("run_ids")
+    count = len(run_ids) if isinstance(run_ids, (list, tuple)) else repr(run_ids)[:20]
+    text = (f"operator {repr(given.get('operator'))[:70]}, {count} run id(s) given, "
+            f"include_holding {repr(given.get('include_holding', False))[:20]}")
+    return text[:AUDIT_ARGS_CHARS]
+
+
+def _audit_success(cmd: str, args, data: dict) -> str:
+    """The part of an accepted action's audit line that says what it did."""
+    if cmd == "clear_queue":
+        cancelled = data.get("cancelled") or []
+        kept = data.get("kept_head") or []
+        line = (f"operator {data.get('operator')!r} cancelled {len(cancelled)} run(s) "
+                f"{_ids_text(cancelled)} ({', '.join(data.get('statuses') or [])})")
+        if kept:
+            line += f", kept next run {_ids_text(kept)} (sequencer running)"
+        line += f", skipped {len(data.get('skipped') or [])}"
+        return line
+    # What it created, in the log, so the Messages page answers "which runs
+    # are these?" without anybody opening psql.
+    return (f"{args} -> sequence {data.get('sequence_id')}, "
+            f"runs {data.get('run_ids')}")
+
+
 class Server:
     """Holds the view and the actions module between calls."""
 
@@ -131,11 +246,28 @@ class Server:
             reply = mcmd.call(client = client, cmd = cmd, args = args, view = self.view)
 
         else:
-            allowed = actions_allowed(client) if cmd in commands.ACTION_COMMANDS else False
+            # The flag is read for every action and for `status` -- the page
+            # decides from the status reply whether to show its buttons at all,
+            # so `status` has to report the flag as it is now.  No other read
+            # looks at it.
+            reads_flag = cmd in commands.ACTION_COMMANDS or cmd == "status"
+            allowed = actions_allowed(client) if reads_flag else False
+            # Whether the sequencer is running, and which run it has loaded,
+            # are the server's to say, not the page's: both are read from the
+            # ODB for every clear-queue call and handed to the command layer
+            # beside the caller's arguments, which cannot carry them
+            # (`commands.parse_args` refuses them as unknown keys).
+            extra = None
+            if cmd in SEQUENCER_COMMANDS:
+                extra = {"sequencer_running": sequencer_running(client)}
+                if extra["sequencer_running"]:
+                    loaded = loaded_run_id(client)
+                    if loaded is not None:
+                        extra["loaded_run_id"] = loaded
             try:
                 envelope, reply = commands.dispatch_envelope(
                     self.view, self.actions, cmd, args,
-                    max_len=max_len, actions_allowed=allowed,
+                    max_len=max_len, actions_allowed=allowed, server_args=extra,
                 )
             except Exception as exc:  # noqa: BLE001 - the page must get JSON whatever happens
                 envelope = commands.error_envelope(
@@ -151,23 +283,26 @@ class Server:
                 # refusal is not an error condition, so it is not highlighted.
                 # Both gates, the same way the command layer reads them: the ODB
                 # flag can be true on a client that has no action module at all.
+                shown = _clear_args_text(args) if cmd == "clear_queue" else args
                 if allowed and self.actions is not None:
                     worked = bool(envelope.get("ok"))
-                    line = (f"{self.view.client_name}: action {cmd} "
-                            f"{'accepted' if worked else 'refused'}: {args}")
                     if worked:
-                        # What it created, in the log, so the Messages page answers
-                        # "which runs are these?" without anybody opening psql.
-                        data = envelope.get("data") or {}
-                        line += (f" -> sequence {data.get('sequence_id')}, "
-                                f"runs {data.get('run_ids')}")
+                        line = (f"{self.view.client_name}: action {cmd} accepted: "
+                                + _audit_success(cmd, args, envelope.get("data") or {}))
+                    else:
+                        error = envelope.get("error") or {}
+                        line = (f"{self.view.client_name}: action {cmd} refused: {shown}")
+                        if cmd == "clear_queue":
+                            # Why, since the arguments alone no longer say it.
+                            line += (f" ({error.get('kind')}: "
+                                     f"{str(error.get('message'))[:AUDIT_ARGS_CHARS]})")
                     client.msg(line, is_error=False)
                 else:
                     reason = ("actions not built into this client"
                             if self.actions is None
                             else f"actions disabled in {ROOT}/Allow actions")
                     client.msg(f"{self.view.client_name}: refused action {cmd} "
-                            f"({reason}): {args}", is_error=False)
+                            f"({reason}): {shown}", is_error=False)
 
         return midas.status_codes["SUCCESS"], reply
 
