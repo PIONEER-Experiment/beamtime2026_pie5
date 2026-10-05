@@ -72,11 +72,13 @@ class midas_run_sequence:
                                 )
                 run_list.append(this_run.schedule())
             else:
+                # Handed down even when this level has no configuration of its
+                # own (a ConfigDB level kept at its current setting).
+                if (self.the_sub_sequence.num_ev is None):
+                    self.the_sub_sequence.num_ev = self.num_ev;
+                self.the_sub_sequence.parent_description = descr
+                self.the_sub_sequence.authors.update(self.authors)
                 for k, v in zip(key_list, it):
-                    if (self.the_sub_sequence.num_ev is None):
-                        self.the_sub_sequence.num_ev = self.num_ev;
-                    self.the_sub_sequence.parent_description = descr
-                    self.the_sub_sequence.authors.update(self.authors)
                     self.the_sub_sequence.set_config_list(k, [v])
                 run_list.extend(self.the_sub_sequence.schedule())
         self.seq_id = self.iface.register_sequence(run_list, self.on_complete)

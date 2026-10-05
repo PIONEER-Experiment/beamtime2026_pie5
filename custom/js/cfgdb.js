@@ -331,6 +331,45 @@ function gotoCell(row) {
           '" title="Load this configuration into the ODB now, without starting a run">go to</button>';
 }
 
+// ---------------------------------------------------------------------------
+// "Current setting": a level of a new sequence that is not changed
+// ---------------------------------------------------------------------------
+//
+// The first row of each table. Ticked, the sequence carries no configuration
+// for that table, so the sequencer leaves the equipment where it is; the row's
+// configurations are unticked and locked meanwhile. Each table needs either
+// configurations or this row, so a forgotten selection is still caught.
+
+const CURRENT_LEVELS = {
+   target:   { checkbox: ".config-ckbx-target",   name: "target positions" },
+   degrader: { checkbox: ".config-ckbx-degrader", name: "degrader positions" },
+   beamline: { checkbox: ".config-ckbx-beam",     name: "beamline settings" }
+};
+
+/** The "current setting" row of one table, `columns` wide. */
+function currentRowHtml(level, columns) {
+   return '<tr class="cfg-current-row"><td> --- </td>' +
+          '<td><input type="checkbox" class="config-ckbx-current" data-level="' + level + '"></td>' +
+          '<td colspan="' + (columns - 2) + '"><b>current setting</b> &mdash; do not change the ' +
+          CURRENT_LEVELS[level].name + ' in this sequence</td></tr>';
+}
+
+/** Levels ticked "current setting", e.g. ["degrader"]. */
+function currentLevels() {
+   return Array.from(document.querySelectorAll(".config-ckbx-current:checked")).map(function (box) {
+      return box.dataset.level;
+   });
+}
+
+/** Untick and lock a level's configurations while its "current setting" is ticked. */
+function currentToggled(box) {
+   document.querySelectorAll(CURRENT_LEVELS[box.dataset.level].checkbox).forEach(function (cfg) {
+      if (box.checked) cfg.checked = false;
+      cfg.disabled = box.checked;
+   });
+   updateNumRuns();
+}
+
 function configTableHtml(configuration_tables) {
    if (!configuration_tables) return '<div class="rundb-note">waiting for the first answer&hellip;</div>';
 
@@ -401,6 +440,7 @@ function configTableHtml(configuration_tables) {
           '<h3 class="rundb-h"><a href="http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FXYTable%2FVariables"> Target Positions </a></h3>' +
           '<table class="mtable rundb-table">' +
           target_header +
+          currentRowHtml("target", 7) +
           target_body.join("") +
           "</table>" +
           autoToggleHtml(configuration_tables.target_positions) +
@@ -409,6 +449,7 @@ function configTableHtml(configuration_tables) {
          '<h3 class="rundb-h"><a href="http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FDegrader%2FVariables"> Degrader Positions </a></h3>'+
          '<table class="mtable rundb-table">' +
          degrader_header +
+         currentRowHtml("degrader", 6) +
          degrader_body.join("") +
          "</table>" +
          autoToggleHtml(configuration_tables.degrader_positions) +
@@ -417,6 +458,7 @@ function configTableHtml(configuration_tables) {
          '<h3 class="rundb-h"><a href="http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FEPICS">' + configuration_tables.beamline.name + ' Beamline </a></h3>'+
          '<table class="mtable rundb-table">' +
          beamline_header +
+         currentRowHtml("beamline", 5) +
          beamline_body.join("") +
          "</table>" +
          autoToggleHtml(configuration_tables.beamline_settings) +
@@ -595,10 +637,15 @@ function applyAutoVisibility() {
 }
 
 function updateNumRuns() {
-   const num_targets = document.querySelectorAll( ".config-ckbx-target:checked" ).length;
-   const num_degraders = document.querySelectorAll( ".config-ckbx-degrader:checked" ).length;
-   const num_beams = document.querySelectorAll( ".config-ckbx-beam:checked" ).length;
-   document.getElementById("submit_num_runs").textContent = num_targets * num_degraders * num_beams;
+   // A level kept at its current setting counts once; all three kept is no run at all.
+   const current = currentLevels();
+   let runs = current.length === Object.keys(CURRENT_LEVELS).length ? 0 : 1;
+   Object.keys(CURRENT_LEVELS).forEach(function (level) {
+      if (current.indexOf(level) < 0) {
+         runs *= document.querySelectorAll(CURRENT_LEVELS[level].checkbox + ":checked").length;
+      }
+   });
+   document.getElementById("submit_num_runs").textContent = runs;
 }
 
 // ---------------------------------------------------------------------------
@@ -773,6 +820,9 @@ async function renderConfigurations() {
    document.querySelectorAll( ".config-ckbx-target, .config-ckbx-degrader, .config-ckbx-beam" ).forEach(function(checkbox) {
       checkbox.addEventListener("change", updateNumRuns);
    });
+   document.querySelectorAll(".config-ckbx-current").forEach(function (box) {
+      box.addEventListener("change", function () { currentToggled(box); });
+   });
 
    document.getElementById("submit_config").addEventListener("click", async function() {
       const selected = Array.from(
@@ -790,7 +840,8 @@ async function renderConfigurations() {
 
       // hard fail points, no recovery
       if (numRuns == "0") {
-         dlgAlert("Can't schedule 0 runs. Select at least one configuration from each category to fully specify your runs")
+         dlgAlert("Can't schedule 0 runs. In each table select at least one configuration or tick \"current setting\"; " +
+                  "at least one table must change.")
          return
       } else if (String(numRuns) != String(confirmedRuns)) {
          dlgAlert("Number of runs does not match confirmation.");
@@ -808,12 +859,18 @@ async function renderConfigurations() {
          dlgQuery("Confirm scheduling " + numRuns + " runs. Enter shifter password.</br></br> Password: ", "", async function(resp, param) {
             if (resp) {
                try {
-                  await R.call("generate_sequence", {
+                  const done = await R.call("generate_sequence", {
                      "config" : selected,
+                     "current" : currentLevels(),
                      "events" : numEv,
                      "operator" : operator,
                      "description" : description,
-                     "password" : resp})
+                     "password" : resp});
+                  if (!done || !done.ok) {
+                     dlgAlert("Scheduling failed: " + esc((done && done.error && done.error.message) || "no answer"));
+                  } else {
+                     dlgAlert("Scheduled " + ((done.data && done.data.runs) || []).length + " runs.");
+                  }
                } catch(err) {
                   console.error(err);
                }
