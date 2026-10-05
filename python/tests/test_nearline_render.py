@@ -215,7 +215,8 @@ def test_rendered_full_job_keeps_everything(job_env, capsys):
     assert job["musip"].mupixTotCut == 2
     out = capsys.readouterr().out
     assert "[nearline] light      off" in out
-    assert " PSM_MUPIX_TOT_CUT=2 PSM_SMA_WIDE_DT=" in out
+    assert " PSM_MUPIX_TOT_CUT=2 PSM_MUPIX_HIGH_TOT_MIN=13 PSM_SMA_WIDE_DT=" in out
+    assert job["mupix_monitor"].HighTotMin == 13
 
 
 def test_stale_first_frame_is_skipped_only_for_subrun_0(job_env):
@@ -668,6 +669,108 @@ def test_an_old_reco_keeps_every_mupix_tot(job_env, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "[nearline] WARNING    the installed PITMidasMusip has no mupixTotCut" in out
     assert " PSM_MUPIX_TOT_CUT=2 (not applied: old reco) " in out
+
+
+@pytest.mark.parametrize("new", ["32", "True", "1.5", "-2", '"13"'])
+def test_a_bad_mupix_high_tot_min_is_rejected(job_env, new):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text()
+    assert "PSM_MUPIX_HIGH_TOT_MIN = 13\n" in text
+    with pytest.raises(SystemExit, match="PSM_MUPIX_HIGH_TOT_MIN"):
+        _run(target, text.replace("PSM_MUPIX_HIGH_TOT_MIN = 13\n",
+                                  f"PSM_MUPIX_HIGH_TOT_MIN = {new}\n"))
+
+
+def test_an_old_reco_writes_no_high_tot_maps(job_env, monkeypatch, capsys):
+    # a reco_testbeam built before the high-ToT maps has no HighTotMin property on the
+    # monitor: setting it would stop gaudirun.py, so the job leaves it unset and says so
+    tmp_path, midas = job_env
+    conf = sys.modules["reco_testbeam.pi_psmalg_expConf"].PIPSMMuPixMonitor
+    monkeypatch.setattr(conf, "getDefaultProperties", classmethod(lambda cls: set()))
+    job = _run(render_job(midas, tmp_path / "run00790_00000.root", light=False))
+    assert "HighTotMin" not in job["mupix_monitor"].__dict__
+    out = capsys.readouterr().out
+    assert "[nearline] WARNING    the installed PIPSMMuPixMonitor has no HighTotMin" in out
+    assert " PSM_MUPIX_HIGH_TOT_MIN=13 (not applied: old reco) " in out
+
+
+def test_the_high_tot_min_can_be_switched_off(job_env, capsys):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text()
+    job = _run(target, text.replace("PSM_MUPIX_HIGH_TOT_MIN = 13\n",
+                                    "PSM_MUPIX_HIGH_TOT_MIN = -1\n"))
+    assert job["mupix_monitor"].HighTotMin == -1
+    assert " PSM_MUPIX_HIGH_TOT_MIN=-1 " in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("value", [0, 31])
+def test_the_high_tot_min_accepts_its_bounds(job_env, value):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    job = _run(target, target.read_text().replace("PSM_MUPIX_HIGH_TOT_MIN = 13\n",
+                                                  f"PSM_MUPIX_HIGH_TOT_MIN = {value}\n"))
+    assert job["mupix_monitor"].HighTotMin == value
+
+
+_COPIES_WARNING = "[nearline] WARNING    PSM_MUPIX_HIGH_TOT_MIN = "
+
+
+# The decoder drops ToT <= PSM_MUPIX_TOT_CUT (2), so every hit the monitor sees has
+# ToT >= 3: a threshold from 0 to 3 passes every pair and the maps are copies.
+@pytest.mark.parametrize("value, warns", [(-1, False), (0, True), (3, True), (4, False),
+                                          (13, False)])
+def test_a_high_tot_min_at_or_below_the_cut_warns(job_env, capsys, value, warns):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    job = _run(target, target.read_text().replace("PSM_MUPIX_HIGH_TOT_MIN = 13\n",
+                                                  f"PSM_MUPIX_HIGH_TOT_MIN = {value}\n"))
+    assert job["mupix_monitor"].HighTotMin == value     # a warning, never a refusal
+    out = capsys.readouterr().out
+    assert (_COPIES_WARNING in out) is warns
+    if warns:
+        assert "maps are copies of the originals" in out
+
+
+def test_a_high_tot_min_of_0_warns_with_no_tot_cut(job_env, capsys):
+    # with the cut off (-1) every ToT reaches the monitor, so only 0 selects everything
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text().replace("PSM_MUPIX_TOT_CUT = 2\n", "PSM_MUPIX_TOT_CUT = -1\n")
+    _run(target, text.replace("PSM_MUPIX_HIGH_TOT_MIN = 13\n", "PSM_MUPIX_HIGH_TOT_MIN = 1\n"))
+    assert _COPIES_WARNING not in capsys.readouterr().out
+    _run(target, text.replace("PSM_MUPIX_HIGH_TOT_MIN = 13\n", "PSM_MUPIX_HIGH_TOT_MIN = 0\n"))
+    assert _COPIES_WARNING in capsys.readouterr().out
+
+
+def test_an_old_reco_with_the_high_tot_maps_off_is_silent(job_env, monkeypatch, capsys):
+    # an old build writes no high-ToT maps, which is exactly what -1 asks for
+    tmp_path, midas = job_env
+    conf = sys.modules["reco_testbeam.pi_psmalg_expConf"].PIPSMMuPixMonitor
+    monkeypatch.setattr(conf, "getDefaultProperties", classmethod(lambda cls: set()))
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    job = _run(target, target.read_text().replace("PSM_MUPIX_HIGH_TOT_MIN = 13\n",
+                                                  "PSM_MUPIX_HIGH_TOT_MIN = -1\n"))
+    assert "HighTotMin" not in job["mupix_monitor"].__dict__
+    out = capsys.readouterr().out
+    assert "has no HighTotMin" not in out
+    assert " PSM_MUPIX_HIGH_TOT_MIN=-1 PSM_SMA_WIDE_DT=" in out
+
+
+def test_no_mupix_monitor_sets_no_high_tot_min(job_env, capsys):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text()
+    assert "PSM_MUPIX_MONITOR = True\n" in text
+    text = text.replace("PSM_MUPIX_MONITOR = True\n", "PSM_MUPIX_MONITOR = False\n")
+    job = _run(target, text)
+    assert "HighTotMin" not in getattr(job.get("mupix_monitor"), "__dict__", {})
+    out = capsys.readouterr().out
+    assert " PSM_MUPIX_HIGH_TOT_MIN=13 (no monitor) " in out
+    # no monitor, no maps, so no warning that they would be copies either
+    _run(target, text.replace("PSM_MUPIX_HIGH_TOT_MIN = 13\n", "PSM_MUPIX_HIGH_TOT_MIN = 3\n"))
+    assert _COPIES_WARNING not in capsys.readouterr().out
 
 
 # -- the conditions source ----------------------------------------------------
