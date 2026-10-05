@@ -28,9 +28,10 @@ class FakeView:
             raise self.raises
         return {"name": name, "args": kwargs}
 
-    def status(self, actions_allowed=False, actions_built=False):
+    def status(self, actions_allowed=False, actions_built=False, five_point_offered=False):
         return self._answer("status", actions_allowed=actions_allowed,
-                            actions_built=actions_built)
+                            actions_built=actions_built,
+                            five_point_offered=five_point_offered)
 
     def runlog(self, limit, before_id):
         return self._answer("runlog", limit=limit, before_id=before_id)
@@ -266,7 +267,31 @@ def test_action_arguments_are_checked_before_anything_is_armed():
 def test_status_is_told_about_the_gates():
     view = FakeView()
     call("status", view=view, actions=FakeActions(), allowed=True)
-    assert view.calls[-1][1] == {"actions_allowed": True, "actions_built": True}
+    # FakeActions has no `five_point_offered`, so the five-point button is not
+    # offered: not knowing means not offering.
+    assert view.calls[-1][1] == {"actions_allowed": True, "actions_built": True,
+                                 "five_point_offered": False}
+
+
+class OfferingActions(FakeActions):
+    """An action module that says whether its database would take a scan."""
+
+    def __init__(self, offered):
+        super().__init__()
+        self.offered = offered
+
+    def five_point_offered(self):
+        return self.offered
+
+
+def test_status_says_whether_five_point_is_offered():
+    """Built *and* writing to a scratch database; the module is asked which."""
+    for actions, expected in ((None, False),
+                              (OfferingActions(False), False),
+                              (OfferingActions(True), True)):
+        view = FakeView()
+        call("status", view=view, actions=actions)
+        assert view.calls[-1][1]["five_point_offered"] is expected
 
 
 def test_read_and_action_commands_are_separate():
@@ -287,3 +312,129 @@ def test_module_imports_neither_psycopg_nor_midas():
     result = subprocess.run([sys.executable, "-c", probe], capture_output=True,
                             text=True, env=env)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# --------------------------------------------------------------------------
+# clearing the queue
+# --------------------------------------------------------------------------
+
+class ClearingActions(FakeActions):
+    """Records what the two clear-queue commands were handed."""
+
+    def preview_clear_queue(self, **kwargs):
+        self.calls.append(("preview_clear_queue", kwargs))
+        return {"runs": []}
+
+    def clear_queue(self, **kwargs):
+        self.calls.append(("clear_queue", kwargs))
+        return {"cancelled": kwargs["run_ids"]}
+
+
+CLEAR = {"run_ids": [5, 6], "operator": "  A. Shifter  "}
+
+
+def test_clear_queue_is_an_action_and_its_preview_a_read():
+    assert "clear_queue" in commands.ACTION_COMMANDS
+    assert "preview_clear_queue" in commands.READ_COMMANDS
+    # Like the five-point preview, it needs the action module's connection, so
+    # the read command line does not offer it.
+    assert "preview_clear_queue" not in commands.CLI_COMMANDS
+
+
+def test_clear_queue_is_denied_without_both_gates():
+    actions = ClearingActions()
+    assert call("clear_queue", CLEAR, allowed=True)["error"]["kind"] == "denied"
+    assert call("clear_queue", CLEAR, actions=actions,
+                allowed=False)["error"]["kind"] == "denied"
+    assert actions.calls == []
+
+
+def test_clear_queue_arguments_and_the_server_side_extra():
+    """The operator is trimmed, the flag defaults to false, and the server's
+    `sequencer_running` is handed on beside what the caller sent."""
+    actions = ClearingActions()
+    envelope = json.loads(commands.dispatch(
+        FakeView(), actions, "clear_queue", CLEAR, actions_allowed=True,
+        server_args={"sequencer_running": False}))
+
+    assert envelope["ok"] is True, envelope
+    assert actions.calls == [("clear_queue", {
+        "run_ids": [5, 6], "include_holding": False, "operator": "A. Shifter",
+        "sequencer_running": False})]
+
+
+def test_a_caller_cannot_say_whether_the_sequencer_is_running():
+    """That is the server's to read from the ODB, never the page's to claim."""
+    actions = ClearingActions()
+    for cmd, args in (("clear_queue", {**CLEAR, "sequencer_running": False}),
+                      ("preview_clear_queue", {"sequencer_running": False})):
+        error = call(cmd, args, actions=actions, allowed=True)["error"]
+        assert error["kind"] == "usage"
+        assert "sequencer_running" in error["message"]
+    assert actions.calls == []
+
+
+def test_clear_queue_refuses_what_a_dialog_would_never_send():
+    actions = ClearingActions()
+    too_many = list(range(1, commands.MAX_CLEAR_IDS + 2))
+    for args in ({"operator": "me"},                                  # no ids
+                 {"run_ids": [], "operator": "me"},
+                 {"run_ids": too_many, "operator": "me"},
+                 {"run_ids": [1, "x"], "operator": "me"},
+                 {"run_ids": [1]},                                    # no operator
+                 {"run_ids": [1], "operator": "   "},
+                 {"run_ids": [1], "operator": "x" * (commands.MAX_TEXT_LENGTH + 1)},
+                 {"run_ids": [1], "operator": "two\nlines"},
+                 {"run_ids": [1], "operator": 42},
+                 {"run_ids": [1], "operator": "me", "include_holding": "false"},
+                 {"run_ids": [1], "operator": "me", "include_holding": 1}):
+        error = call("clear_queue", args, actions=actions, allowed=True)["error"]
+        assert error["kind"] == "usage", args
+    assert actions.calls == []
+
+    # The bounds are inclusive.
+    envelope = call("clear_queue",
+                    {"run_ids": too_many[:-1], "operator": "x" * commands.MAX_TEXT_LENGTH},
+                    actions=actions, allowed=True)
+    assert envelope["ok"] is True
+
+
+def test_the_clear_preview_needs_the_module_but_not_the_flag():
+    error = call("preview_clear_queue", {})["error"]
+    assert error["kind"] == "denied"
+    assert "--allow-actions" in error["hint"]
+
+    actions = ClearingActions()
+    envelope = call("preview_clear_queue", {"include_holding": True},
+                    actions=actions, allowed=False)
+    assert envelope["ok"] is True
+    assert actions.calls == [("preview_clear_queue", {"include_holding": True})]
+
+
+def test_status_is_not_armed_by_the_flag_alone():
+    """No module, nothing to carry an action out: the page must not show one."""
+    view = FakeView()
+    call("status", view=view, actions=None, allowed=True)
+    assert view.calls[-1][1]["actions_allowed"] is False
+
+
+def test_ids_with_a_fraction_are_refused_not_truncated():
+    actions = ClearingActions()
+    for args in ({"run_ids": [2.7], "operator": "me"},
+                 {"run_ids": [True], "operator": "me"}):
+        assert call("clear_queue", args, actions=actions,
+                    allowed=True)["error"]["kind"] == "usage"
+    assert call("run", {"id": 2.5})["error"]["kind"] == "usage"
+    # A float that is a whole number is still a whole number.
+    assert call("clear_queue", {"run_ids": [3.0], "operator": "me"},
+                actions=actions, allowed=True)["ok"] is True
+    assert actions.calls[-1][1]["run_ids"] == [3]
+
+
+def test_an_operator_must_be_printable():
+    actions = ClearingActions()
+    for name in ("tab\there", "zero​width", "bell\x07"):
+        assert call("clear_queue", {"run_ids": [1], "operator": name}, actions=actions,
+                    allowed=True)["error"]["kind"] == "usage"
+    assert call("clear_queue", {"run_ids": [1], "operator": "Jürgen Müller"},
+                actions=actions, allowed=True)["ok"] is True
