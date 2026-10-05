@@ -182,7 +182,7 @@ class NearlineDaemon:
         self.client.odb_link("/Experiment/Edit on Start/Operator",    "/Nearline/Info/Operator")
         self.client.odb_link("/Experiment/Edit on Start/Description", "/Nearline/Info/Description")
         self.client.odb_link("/Experiment/Edit on Start/Quality",     "/Nearline/Info/Quality")
-        self.client.odb_set("/Experiment/Edit on Start/Options Quality", ["Debug", "NL Test"])
+        self.client.odb_set("/Experiment/Edit on Start/Options Quality", ["Debug", "NL Test", "Production"])
 
         # keys of the tuning loop, created with their defaults when missing
         nl_tuning.ensure_odb_keys(self.client)
