@@ -96,7 +96,7 @@ const state = {
    queue: null,              // data of the last good `queue`
    sequences: null,          // rows of the last good `sequences`
    configuration_tables : {'target_positions' : [], 'degrader_positions' : [], 'beamline_settings' : []},
-   showRunplan: false,       // runplan configurations shown in the tables
+   showAuto: false,          // runplan + mystery configurations shown in the tables
    runs: {},                 // runlog rows by database id, newest first when sorted
    nextBeforeId: null,       // paging cursor from the last runlog reply
    haveRunlog: false,
@@ -281,25 +281,46 @@ function staleHtml(st) {
 // Configuration Table
 // ---------------------------------------------------------------------------
 
-// The runplan backend writes one configuration per plan step, with a comment
-// "runplan <plan> step <n> ...". They pile up quickly and are not meant to be
-// picked by hand, so the tables hide them until asked. The choice is kept per
-// browser; it is a convenience, so a browser without storage just hides them.
+// Two kinds of configuration are written by machines, not people, and are not
+// meant to be picked by hand:
+//  - the runplan backend writes one per plan step, with a comment
+//    "runplan <plan> step <n> ...";
+//  - scheduled sequences (five-point scans, the tuner) write theirs through
+//    add_new_configuration() without a comment, so they get its default
+//    "Mystery Configuration".
+// They pile up quickly and swamp the hand-made ones, so the tables hide them
+// until asked. The choice is kept per browser; it is a convenience, so a
+// browser without storage just hides them.
 const RUNPLAN_COMMENT = /^runplan\s/;
-const SHOW_RUNPLAN_KEY = "cfgdb.showRunplan";
+const MYSTERY_COMMENT = "Mystery Configuration";
+const SHOW_AUTO_KEY = "cfgdb.showAuto";
 
 function isRunplanConfig(row) {
    return RUNPLAN_COMMENT.test((row && row.comment) || "");
 }
 
-function runplanAttr(row) {
-   return isRunplanConfig(row) ? " data-runplan='1'" : "";
+function isMysteryConfig(row) {
+   return ((row && row.comment) || "").trim() === MYSTERY_COMMENT;
 }
 
-/** The show/hide line under a table; filled in by applyRunplanVisibility(). */
-function runplanToggleHtml(rows) {
-   const n = (rows || []).filter(isRunplanConfig).length;
-   return '<div class="rundb-note cfg-runplan-toggle" data-count="' + n + '"></div>';
+/** "runplan", "mystery", or "" for a configuration someone wrote by hand. */
+function autoKind(row) {
+   if (isRunplanConfig(row)) return "runplan";
+   if (isMysteryConfig(row)) return "mystery";
+   return "";
+}
+
+function autoAttr(row) {
+   const kind = autoKind(row);
+   return kind ? " data-auto='" + kind + "'" : "";
+}
+
+/** The show/hide line under a table; filled in by applyAutoVisibility(). */
+function autoToggleHtml(rows) {
+   const runplan = (rows || []).filter(isRunplanConfig).length;
+   const mystery = (rows || []).filter(isMysteryConfig).length;
+   return '<div class="rundb-note cfg-auto-toggle" data-runplan="' + runplan +
+          '" data-mystery="' + mystery + '"></div>';
 }
 
 function configTableHtml(configuration_tables) {
@@ -310,7 +331,7 @@ function configTableHtml(configuration_tables) {
    const target_body = configuration_tables.target_positions.map(function(row) {
       const do_not_use_cell = row.do_not_use
             ? " --- " : '<input type="checkbox" class="config-ckbx-target" value="' + row.config_type + ":" + row.config_id + '">';
-      return "<tr" + runplanAttr(row) + " id=cfg_row" + row.config_id + "' data-values='" +
+      return "<tr" + autoAttr(row) + " id=cfg_row" + row.config_id + "' data-values='" +
                   JSON.stringify(row.values || {}).replace(/'/g, "&#39;") +
                   "'>" +
               "<td>" + row.config_id + "</td>" +
@@ -328,7 +349,7 @@ function configTableHtml(configuration_tables) {
    const degrader_body = configuration_tables.degrader_positions.map(function(row) {
       const do_not_use_cell = row.do_not_use
             ? " --- " : '<input type="checkbox" class="config-ckbx-degrader"  value="' + row.config_type + ":" + row.config_id + '">';
-       return "<tr" + runplanAttr(row) + " id=cfg_row" + row.config_id +  "' data-values='" +
+       return "<tr" + autoAttr(row) + " id=cfg_row" + row.config_id +  "' data-values='" +
                   JSON.stringify(row.values || {}).replace(/'/g, "&#39;") +
                   "'>" +
               "<td>" + row.config_id + "</td>" +
@@ -344,7 +365,7 @@ function configTableHtml(configuration_tables) {
    const beamline_body   = configuration_tables.beamline_settings.map(function(row) {
       const do_not_use_cell = row.do_not_use
             ? " --- " : '<input type="checkbox" class="config-ckbx-beam"  value="' + row.config_type + ":" + row.config_id + '">';
-       return "<tr" + runplanAttr(row) + " id=cfg_row" + row.config_id + "' data-values='" +
+       return "<tr" + autoAttr(row) + " id=cfg_row" + row.config_id + "' data-values='" +
                   JSON.stringify(row.values || {}).replace(/'/g, "&#39;") +
                   "'>" +
               "<td>" + row.config_id + "</td>" +
@@ -370,7 +391,7 @@ function configTableHtml(configuration_tables) {
           target_header +
           target_body.join("") +
           "</table>" +
-          runplanToggleHtml(configuration_tables.target_positions) +
+          autoToggleHtml(configuration_tables.target_positions) +
           '<div id="target-add-line"></div>' +
 
          '<h3 class="rundb-h"><a href="http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FDegrader%2FVariables"> Degrader Positions </a></h3>'+
@@ -378,7 +399,7 @@ function configTableHtml(configuration_tables) {
          degrader_header +
          degrader_body.join("") +
          "</table>" +
-         runplanToggleHtml(configuration_tables.degrader_positions) +
+         autoToggleHtml(configuration_tables.degrader_positions) +
          '<div id="degrader-add-line"></div>' +
 
          '<h3 class="rundb-h"><a href="http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FEPICS">' + configuration_tables.beamline.name + ' Beamline </a></h3>'+
@@ -386,7 +407,7 @@ function configTableHtml(configuration_tables) {
          beamline_header +
          beamline_body.join("") +
          "</table>" +
-         runplanToggleHtml(configuration_tables.beamline_settings) +
+         autoToggleHtml(configuration_tables.beamline_settings) +
          '<div id="beam_add_line"></div>' +
 
          '<table class="mtable rundb-table">' +
@@ -518,36 +539,45 @@ function renderAlerts() {
    }
 }
 
-function readShowRunplan() {
-   try { return root.localStorage.getItem(SHOW_RUNPLAN_KEY) === "1"; }
+function readShowAuto() {
+   try { return root.localStorage.getItem(SHOW_AUTO_KEY) === "1"; }
    catch (err) { return false; }
 }
 
-function writeShowRunplan(show) {
-   try { root.localStorage.setItem(SHOW_RUNPLAN_KEY, show ? "1" : "0"); }
+function writeShowAuto(show) {
+   try { root.localStorage.setItem(SHOW_AUTO_KEY, show ? "1" : "0"); }
    catch (err) { /* no storage: the choice lasts until the page is reloaded */ }
 }
 
+/** "3 runplan + 12 mystery configurations", leaving out a kind with none. */
+function autoCountText(runplan, mystery) {
+   const parts = [];
+   if (runplan) parts.push(runplan + " runplan");
+   if (mystery) parts.push(mystery + " mystery");
+   return parts.join(" + ") + " configuration" + (runplan + mystery === 1 ? "" : "s");
+}
+
 /**
- * Show or hide the runplan rows and redo the lines under the tables. Hiding a
- * row also unticks it: a run count that includes rows nobody can see would be
- * a trap.
+ * Show or hide the runplan and mystery rows and redo the lines under the
+ * tables. Hiding a row also unticks it: a run count that includes rows nobody
+ * can see would be a trap.
  */
-function applyRunplanVisibility() {
-   const show = state.showRunplan;
-   document.querySelectorAll("#rundb-configs tr[data-runplan]").forEach(function (row) {
+function applyAutoVisibility() {
+   const show = state.showAuto;
+   document.querySelectorAll("#rundb-configs tr[data-auto]").forEach(function (row) {
       row.style.display = show ? "" : "none";
       if (!show) row.querySelectorAll("input[type=checkbox]:checked").forEach(function (box) {
          box.checked = false;
       });
    });
-   document.querySelectorAll("#rundb-configs .cfg-runplan-toggle").forEach(function (node) {
-      const n = Number(node.dataset.count) || 0;
-      const what = n + " runplan configuration" + (n === 1 ? "" : "s");
-      node.style.display = n ? "" : "none";
+   document.querySelectorAll("#rundb-configs .cfg-auto-toggle").forEach(function (node) {
+      const runplan = Number(node.dataset.runplan) || 0;
+      const mystery = Number(node.dataset.mystery) || 0;
+      const what = autoCountText(runplan, mystery);
+      node.style.display = runplan + mystery ? "" : "none";
       node.innerHTML = show
-         ? "Showing " + what + ' &mdash; <a href="#" class="cfg-runplan-switch">hide</a>'
-         : what + ' hidden &mdash; <a href="#" class="cfg-runplan-switch">show</a>';
+         ? "Showing " + what + ' &mdash; <a href="#" class="cfg-auto-switch">hide</a>'
+         : what + ' hidden &mdash; <a href="#" class="cfg-auto-switch">show</a>';
    });
    updateNumRuns();
 }
@@ -581,14 +611,14 @@ async function renderConfigurations() {
    };
    put("rundb-configs", configTableHtml(state.configuration_tables))
 
-   state.showRunplan = readShowRunplan();
-   applyRunplanVisibility();
+   state.showAuto = readShowAuto();
+   applyAutoVisibility();
    el("rundb-configs").addEventListener("click", function (e) {
-      if (!e.target.matches(".cfg-runplan-switch")) return;
+      if (!e.target.matches(".cfg-auto-switch")) return;
       e.preventDefault();
-      state.showRunplan = !state.showRunplan;
-      writeShowRunplan(state.showRunplan);
-      applyRunplanVisibility();
+      state.showAuto = !state.showAuto;
+      writeShowAuto(state.showAuto);
+      applyAutoVisibility();
    });
 
    document.querySelectorAll( ".config-ckbx-target, .config-ckbx-degrader, .config-ckbx-beam" ).forEach(function(checkbox) {
@@ -794,7 +824,7 @@ const CFGDB = {
    CONFIG_ROOT, DEFAULTS, ODB_PATHS,
    // pure builders, all testable without a browser or a database
    runStateWord, stripHtml, sequencerNoteHtml, staleHtml,
-   databaseError, note, init, isRunplanConfig,
+   databaseError, note, init, isRunplanConfig, isMysteryConfig, autoCountText,
    // loops, exported so a fixture page can drive them one step at a time
    pollOdb
 };
