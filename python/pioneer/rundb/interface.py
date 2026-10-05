@@ -502,41 +502,24 @@ class interface:
         conn = connect(self.user, self.password)
 
         try:
-            with conn.cursor() as cursor:
-                # Create the parent table entry first
-                table_ident = psycopg.sql.Identifier(table)
-                cursor.execute(
-                    "INSERT INTO config.configuration (config_type, comment) VALUES (%s, %s) RETURNING id",
-                    (table, comment)
-                )
-                values['id'] = cursor.fetchone()[0]
-
-                columns = list(values.keys())
-                value_list = [values[col] for col in columns]
-
-
-                columns_ident = psycopg.sql.SQL(', ').join(
-                    psycopg.sql.Identifier(col) for col in columns
-                )
-                placeholders = psycopg.sql.SQL(', ').join(
-                    psycopg.sql.Placeholder() for _ in columns
-                )
-
-
-                query = psycopg.sql.SQL(
-                    "INSERT INTO config.{table} ({columns}) VALUES ({values}) RETURNING id"
-                ).format(
-                    table=table_ident,
-                    columns=columns_ident,
-                    values=placeholders,
-                )
-                cursor.execute(query, value_list)
-                inserted_id = cursor.fetchone()[0]
-
+            inserted_id = insert_configuration(conn, table, values, comment)
             conn.commit()
         finally:
             conn.close()
         return inserted_id
+
+    def set_do_not_use(self, config_id : int, do_not_use : bool = True):
+        """Mark a configuration as not to be used (the shifter role may)."""
+        conn = connect(self.user, self.password)
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE config.configuration SET do_not_use = %s WHERE id = %s",
+                    (do_not_use, config_id)
+                )
+            conn.commit()
+        finally:
+            conn.close()
 
     def annotate_run_id(self, run_id : int, author : str, note : str):
         conn = connect(self.user, self.password)
@@ -920,3 +903,39 @@ class interface:
                 )
         conn.commit()
         conn.close()
+
+
+def insert_configuration(conn, table : str, values : dict, comment : str) -> int:
+    """The two inserts of `interface.add_new_configuration` on an open connection,
+    which the caller commits.  Sets values['id'] to the new id and returns it."""
+    with conn.cursor() as cursor:
+        # Create the parent table entry first
+        table_ident = psycopg.sql.Identifier(table)
+        cursor.execute(
+            "INSERT INTO config.configuration (config_type, comment) VALUES (%s, %s) RETURNING id",
+            (table, comment)
+        )
+        values['id'] = cursor.fetchone()[0]
+
+        columns = list(values.keys())
+        value_list = [values[col] for col in columns]
+
+
+        columns_ident = psycopg.sql.SQL(', ').join(
+            psycopg.sql.Identifier(col) for col in columns
+        )
+        placeholders = psycopg.sql.SQL(', ').join(
+            psycopg.sql.Placeholder() for _ in columns
+        )
+
+
+        query = psycopg.sql.SQL(
+            "INSERT INTO config.{table} ({columns}) VALUES ({values}) RETURNING id"
+        ).format(
+            table=table_ident,
+            columns=columns_ident,
+            values=placeholders,
+        )
+        cursor.execute(query, value_list)
+        inserted_id = cursor.fetchone()[0]
+    return inserted_id

@@ -25,6 +25,14 @@ the beam blocker (2) is never written.
     measured  the old Measured read-back
 The ODB Demand has been seen far from what the machine ran at (every magnet at 1.4x its
 Measured), which is why the default does not trust Demand blindly.
+
+The ConfigDB page's "restore beamline settings of run N" button runs the same planning and
+the same write (pioneer.rundb.restore, through prepare() and LiveODB.write_demand() here).
+By default it restores what this script restores with `--magnets-only --exclude SEP41`;
+its "restore slits", "restore SEP41" and "restore SEP41-HV" boxes add those channels back.
+This script's own defaults are unchanged: it restores every writeable channel.
+
+    python3 -m pioneer.sequencer.restore_epics 510 ...   # the same, from the repo
 """
 import argparse
 import fnmatch
@@ -118,9 +126,14 @@ def _table(names, types, thresholds, units, demand, measured):
 # ---------------------------------------------------------------- the live ODB
 
 class LiveODB:
-    def __init__(self):
-        import midas.client
-        self.client = midas.client.MidasClient("restore_epics")
+    def __init__(self, client=None):
+        """Wrap `client`, a connected midas.client.MidasClient (the RunDBView's, say), or
+        open a client of our own. disconnect() only closes a client opened here."""
+        self._own = client is None
+        if client is None:
+            import midas.client
+            client = midas.client.MidasClient("restore_epics")
+        self.client = client
 
     def get(self, path):
         return self.client.odb_get(path)
@@ -139,6 +152,10 @@ class LiveODB:
     def write_demand(self, targets):
         """targets: index -> value. Re-reads Demand right before writing so that a channel
         changed by someone else in the meantime is not reset."""
+        # The whole array in one odb_set, not one element per channel: that is how
+        # config_loader.load_beam_config (and so the sequencer) writes it, the only way the
+        # EPICS frontend has been seen to take a Demand change. Per-element writes would
+        # fire its hotlink once per channel, which has never been tried.
         demand = [float(x) for x in _as_list(self.get(EPICS_PATH + "/Variables/Demand"))]
         for i, val in targets.items():
             demand[i] = val
@@ -151,7 +168,8 @@ class LiveODB:
         self.client.msg(text)
 
     def disconnect(self):
-        self.client.disconnect()
+        if self._own:
+            self.client.disconnect()
 
 
 # ---------------------------------------------------------------- planning the change
@@ -167,11 +185,13 @@ def pick_value(old, source):
     return old["measured"], True
 
 
-def plan(old, cur, args):
-    """Rows for every selected channel, plus the names skipped for being absent on one side."""
-    types = (1,) if args.magnets_only else WRITEABLE_TYPES
-    pats = [p.strip() for p in args.channels.split(",")] if args.channels else None
-    excl = [p.strip() for p in args.exclude.split(",")] if args.exclude else []
+def plan(old, cur, source="auto", magnets_only=False, channels=None, exclude=None):
+    """Rows for every selected channel, plus the names skipped for being absent on one side.
+
+    channels and exclude are comma-separated CA names or glob patterns, as on the command line."""
+    types = (1,) if magnets_only else WRITEABLE_TYPES
+    pats = [p.strip() for p in channels.split(",")] if channels else None
+    excl = [p.strip() for p in exclude.split(",")] if exclude else []
 
     def selected(name, t):
         if t not in types:
@@ -190,7 +210,7 @@ def plan(old, cur, args):
             continue
         if c["type"] != o["type"]:
             raise RuntimeError(f"{name}: device type {o['type']} in the old run, {c['type']} now")
-        target, overruled = pick_value(o, args.source)
+        target, overruled = pick_value(o, source)
         rows.append(dict(name=name, index=c["index"], type=o["type"], unit=c["unit"],
                          old_demand=o["demand"], old_measured=o["measured"],
                          cur_demand=c["demand"], cur_measured=c["measured"],
@@ -203,6 +223,34 @@ def plan(old, cur, args):
             if not any(fnmatch.fnmatchcase(n, p) for n in list(old) + list(cur)):
                 raise RuntimeError(f"--channels pattern {p!r} matches no channel")
     return rows, only_old, only_cur
+
+
+def prepare(odb, run, source="auto", magnets_only=False, channels=None, exclude=None,
+            file=None, data_dir=None, at="bor", cur=None, note=None):
+    """Find and read run `run`'s ODB dump and plan the change against the current settings.
+
+    odb is a LiveODB, or None when `cur` (an epics_table) is given instead; the dump is
+    `file`, else looked up in data_dir, /Logger/Data dir of odb, or ~/online. note, if
+    given, is called with a line worth telling the user (an end-of-run dump used in place
+    of a start-of-run one). Returns (rows, only_old, only_cur, dump_desc)."""
+    if cur is None:
+        cur = odb.epics_table()
+    if file:
+        path = file
+    else:
+        data_dir = data_dir or (odb.get("/Logger/Data dir") if odb else None) \
+            or os.path.expanduser("~/online")
+        path = _find_dump(run, data_dir, at)
+    old_odb, dump_desc = _load_dump(path, at)
+    dump_run = old_odb.get("Runinfo", {}).get("Run number")
+    if dump_run is not None and int(dump_run) != run:
+        raise RuntimeError(f"{path} belongs to run {dump_run}, not {run}")
+    if at == "bor" and path.endswith(".json") and note:
+        note("Note: no readable .mid file (or no lz4 module), using the end-of-run .json dump.\n")
+
+    rows, only_old, only_cur = plan(epics_table(old_odb), cur, source=source,
+                                    magnets_only=magnets_only, channels=channels, exclude=exclude)
+    return rows, only_old, only_cur, dump_desc
 
 
 def changed(r):
@@ -294,20 +342,10 @@ def main(argv=None):
         cur_desc = "the live ODB"
 
     try:
-        if args.file:
-            path = args.file
-        else:
-            data_dir = args.data_dir or (odb.get("/Logger/Data dir") if odb else None) \
-                or os.path.expanduser("~/online")
-            path = _find_dump(args.run, data_dir, args.at)
-        old_odb, dump_desc = _load_dump(path, args.at)
-        dump_run = old_odb.get("Runinfo", {}).get("Run number")
-        if dump_run is not None and int(dump_run) != args.run:
-            raise RuntimeError(f"{path} belongs to run {dump_run}, not {args.run}")
-        if args.at == "bor" and path.endswith(".json"):
-            print("Note: no readable .mid file (or no lz4 module), using the end-of-run .json dump.\n")
-
-        rows, only_old, only_cur = plan(epics_table(old_odb), cur, args)
+        rows, only_old, only_cur, dump_desc = prepare(
+            odb, args.run, source=args.source, magnets_only=args.magnets_only,
+            channels=args.channels, exclude=args.exclude, file=args.file,
+            data_dir=args.data_dir, at=args.at, cur=cur, note=print)
         n = print_plan(rows, only_old, only_cur, args.run, dump_desc, args.source, cur_desc)
         if args.dry_run or n == 0:
             return 0

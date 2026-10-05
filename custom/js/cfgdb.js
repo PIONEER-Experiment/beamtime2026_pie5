@@ -288,12 +288,16 @@ function staleHtml(st) {
 //    "runplan <plan> step <n> ...";
 //  - scheduled sequences (five-point scans, the tuner) write theirs through
 //    add_new_configuration() without a comment, so they get its default
-//    "Mystery Configuration".
+//    "Mystery Configuration";
+//  - the beamline table's "settings from run N" row stores one each time it
+//    is scheduled, with the comment "from run N (<dump>, auto...)".
 // They pile up quickly and swamp the hand-made ones, so the tables hide them
 // until asked. The choice is kept per browser; it is a convenience, so a
 // browser without storage just hides them.
 const RUNPLAN_COMMENT = /^runplan\s/;
 const MYSTERY_COMMENT = "Mystery Configuration";
+// Must match the comment pioneer/rundb/restore.py config_values() writes.
+const FROM_RUN_COMMENT = /^from run \d+ \(/;
 const SHOW_AUTO_KEY = "cfgdb.showAuto";
 
 function isRunplanConfig(row) {
@@ -304,10 +308,15 @@ function isMysteryConfig(row) {
    return ((row && row.comment) || "").trim() === MYSTERY_COMMENT;
 }
 
-/** "runplan", "mystery", or "" for a configuration someone wrote by hand. */
+function isFromRunConfig(row) {
+   return FROM_RUN_COMMENT.test((row && row.comment) || "");
+}
+
+/** "runplan", "mystery", "fromrun", or "" for a configuration someone wrote by hand. */
 function autoKind(row) {
    if (isRunplanConfig(row)) return "runplan";
    if (isMysteryConfig(row)) return "mystery";
+   if (isFromRunConfig(row)) return "fromrun";
    return "";
 }
 
@@ -320,8 +329,9 @@ function autoAttr(row) {
 function autoToggleHtml(rows) {
    const runplan = (rows || []).filter(isRunplanConfig).length;
    const mystery = (rows || []).filter(isMysteryConfig).length;
+   const fromRun = (rows || []).filter(isFromRunConfig).length;
    return '<div class="rundb-note cfg-auto-toggle" data-runplan="' + runplan +
-          '" data-mystery="' + mystery + '"></div>';
+          '" data-mystery="' + mystery + '" data-fromrun="' + fromRun + '"></div>';
 }
 
 /** The "go to" button of one row; none for a row marked do_not_use. */
@@ -354,6 +364,95 @@ function currentRowHtml(level, columns) {
           CURRENT_LEVELS[level].name + ' in this sequence</td></tr>';
 }
 
+// ---------------------------------------------------------------------------
+// "Settings from run N": the beamline table's second special row
+// ---------------------------------------------------------------------------
+//
+// The run field and the three group boxes exist once, in the restore line
+// below the beamline table; this row only mirrors them. Ticked, it counts as
+// one more beamline selection. At schedule time the client turns it into an
+// ordinary beamline configuration (restore.config_values): the always-restored
+// magnets and the ticked groups from run N, every other channel at its Demand
+// as it is then. The run DB then records exactly what the sequencer loads.
+
+// The groups a restore may add to the magnets, in the order the boxes show them.
+const RESTORE_GROUPS = [
+   { key: "slits",    label: "slits" },
+   { key: "sep41",    label: "SEP41" },
+   { key: "sep41_hv", label: "SEP41-HV" }
+];
+
+function fromRunRowHtml(columns) {
+   return '<tr class="cfg-current-row" title="Scheduled as a new beamline configuration when you press ' +
+          'schedule: the magnets (and any ticked group) from run N; every other channel is frozen at its ' +
+          'Demand at that moment, not at the moment the run starts.">' +
+          '<td> --- </td>' +
+          '<td><input type="checkbox" class="config-ckbx-fromrun" autocomplete="off" disabled></td>' +
+          '<td colspan="' + (columns - 2) + '"><b>settings from run <span class="cfg-fromrun-n">N</span></b>' +
+          ' &mdash; <span class="cfg-fromrun-what"></span></td></tr>';
+}
+
+/** The restore line under the beamline table: run field, group boxes, button. */
+function restoreLineHtml() {
+   return '<div class="cfg-restore-line">' +
+          '<label>Restore beamline settings of run ' +
+          '<input type="number" id="cfg-restore-run" min="1" step="1" autocomplete="off"></label>' +
+          RESTORE_GROUPS.map(function (g) {
+             return '<label><input type="checkbox" class="cfg-restore-group" autocomplete="off" value="' +
+                    g.key + '"> restore ' + g.label + "</label>";
+          }).join("") +
+          '<button type="button" class="mbutton cfg-restore" title="Show what would change, then write the ' +
+          'Demand values now, without starting a run">restore now</button>' +
+          "</div>";
+}
+
+/** The run number in the restore line, or null. */
+function restoreRun() {
+   const node = el("cfg-restore-run");
+   const n = node ? Number(String(node.value).trim()) : NaN;
+   return node && String(node.value).trim() !== "" && Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/** Keys of the ticked group boxes, e.g. ["slits"]. */
+function restoreGroups() {
+   return Array.from(document.querySelectorAll(".cfg-restore-group:checked")).map(function (box) {
+      return box.value;
+   });
+}
+
+/** "magnets, slits" for the included groups; "SEP41/SEP41-HV" for the rest. */
+function restoreGroupText(include) {
+   const kept = RESTORE_GROUPS.filter(function (g) { return include.indexOf(g.key) < 0; });
+   const added = RESTORE_GROUPS.filter(function (g) { return include.indexOf(g.key) >= 0; });
+   return {
+      restored: ["magnets"].concat(added.map(function (g) { return g.label; })).join(", "),
+      kept: kept.map(function (g) { return g.label; }).join("/")
+   };
+}
+
+/**
+ * Mirror the restore line into the "settings from run N" row. The row cannot
+ * be ticked without a run number, nor while the beamline is "current setting".
+ */
+function syncFromRunRow() {
+   const run = restoreRun();
+   const text = restoreGroupText(restoreGroups());
+   document.querySelectorAll(".cfg-fromrun-n").forEach(function (node) {
+      node.textContent = run === null ? "N" : String(run);
+   });
+   document.querySelectorAll(".cfg-fromrun-what").forEach(function (node) {
+      node.textContent = run === null
+         ? "enter a run number in the restore line below the table"
+         : text.restored + " from run " + run + (text.kept ? "; " + text.kept + " kept as they are when scheduled" : "");
+   });
+   const current = document.querySelector('.config-ckbx-current[data-level="beamline"]');
+   document.querySelectorAll(".config-ckbx-fromrun").forEach(function (box) {
+      box.disabled = run === null || !!(current && current.checked);
+      if (box.disabled) box.checked = false;
+   });
+   updateNumRuns();
+}
+
 /** Levels ticked "current setting", e.g. ["degrader"]. */
 function currentLevels() {
    return Array.from(document.querySelectorAll(".config-ckbx-current:checked")).map(function (box) {
@@ -367,6 +466,7 @@ function currentToggled(box) {
       if (box.checked) cfg.checked = false;
       cfg.disabled = box.checked;
    });
+   if (box.dataset.level === "beamline") syncFromRunRow();
    updateNumRuns();
 }
 
@@ -461,10 +561,12 @@ function configTableHtml(configuration_tables) {
          '<table class="mtable rundb-table">' +
          beamline_header +
          currentRowHtml("beamline", 5) +
+         fromRunRowHtml(5) +
          beamline_body.join("") +
          "</table>" +
          autoToggleHtml(configuration_tables.beamline_settings) +
          '<div id="beam_add_line"></div>' +
+         restoreLineHtml() +
 
          '<table class="mtable rundb-table">' +
          '<h3 class="rundb-h"> Submit new Sequences </h3>'+
@@ -605,16 +707,18 @@ function writeShowAuto(show) {
    catch (err) { /* no storage: the choice lasts until the page is reloaded */ }
 }
 
-/** "3 runplan + 12 mystery configurations", leaving out a kind with none. */
-function autoCountText(runplan, mystery) {
+/** "3 runplan + 12 mystery + 2 from-run configurations", leaving out a kind with none. */
+function autoCountText(runplan, mystery, fromRun) {
+   fromRun = fromRun || 0;
    const parts = [];
    if (runplan) parts.push(runplan + " runplan");
    if (mystery) parts.push(mystery + " mystery");
-   return parts.join(" + ") + " configuration" + (runplan + mystery === 1 ? "" : "s");
+   if (fromRun) parts.push(fromRun + " from-run");
+   return parts.join(" + ") + " configuration" + (runplan + mystery + fromRun === 1 ? "" : "s");
 }
 
 /**
- * Show or hide the runplan and mystery rows and redo the lines under the
+ * Show or hide the runplan, mystery and from-run rows and redo the lines under the
  * tables. Hiding a row also unticks it: a run count that includes rows nobody
  * can see would be a trap.
  */
@@ -629,8 +733,9 @@ function applyAutoVisibility() {
    document.querySelectorAll("#rundb-configs .cfg-auto-toggle").forEach(function (node) {
       const runplan = Number(node.dataset.runplan) || 0;
       const mystery = Number(node.dataset.mystery) || 0;
-      const what = autoCountText(runplan, mystery);
-      node.style.display = runplan + mystery ? "" : "none";
+      const fromRun = Number(node.dataset.fromrun) || 0;
+      const what = autoCountText(runplan, mystery, fromRun);
+      node.style.display = runplan + mystery + fromRun ? "" : "none";
       node.innerHTML = show
          ? "Showing " + what + ' &mdash; <a href="#" class="cfg-auto-switch">hide</a>'
          : what + ' hidden &mdash; <a href="#" class="cfg-auto-switch">show</a>';
@@ -644,7 +749,9 @@ function updateNumRuns() {
    let runs = current.length === Object.keys(CURRENT_LEVELS).length ? 0 : 1;
    Object.keys(CURRENT_LEVELS).forEach(function (level) {
       if (current.indexOf(level) < 0) {
-         runs *= document.querySelectorAll(CURRENT_LEVELS[level].checkbox + ":checked").length;
+         let n = document.querySelectorAll(CURRENT_LEVELS[level].checkbox + ":checked").length;
+         if (level === "beamline") n += document.querySelectorAll(".config-ckbx-fromrun:checked").length;
+         runs *= n;
       }
    });
    document.getElementById("submit_num_runs").textContent = runs;
@@ -728,7 +835,8 @@ function gotoStatus(klass, html) {
 async function watchArrival(done) {
    const token = {};
    state.gotoWatch = token;
-   const what = "configuration " + Number(done.config_id) + " (" + esc(done.config_type) + ")";
+   const what = done.label ? esc(done.label)
+      : "configuration " + Number(done.config_id) + " (" + esc(done.config_type) + ")";
    const arrival = done.arrival || [];
    const bases = Array.from(new Set(arrival.map(function (r) { return splitIndex(r.path)[0]; })));
    const stableMs = (Number(done.stable_for) || 0) * 1000;
@@ -785,6 +893,128 @@ async function gotoClicked(configId) {
    });
 }
 
+// ---------------------------------------------------------------------------
+// Restore: put the beamline back the way it was in an earlier run
+// ---------------------------------------------------------------------------
+//
+// The same two-step shape as go to: restore_preview plans the change from the
+// run's ODB dump (restore_epics), the shifter confirms, restore_run writes the
+// Demand of the magnets and the ticked groups and returns the read-back
+// conditions in go to's format, which watchArrival follows. The dialog lists
+// every channel: what is restored first, changed rows marked, unchanged rows
+// dimmed; then the groups left out, so a difference there is seen, not hidden.
+
+function restoreRowHtml(r, klass, note) {
+   return '<tr class="' + klass + '"><td>' + esc(r.name) + "</td><td>" + esc(r.type_name || r.type) +
+          '</td><td class="rundb-num">' + gotoNumber(r.old_demand) +
+          '</td><td class="rundb-num">' + gotoNumber(r.old_measured) +
+          '</td><td class="rundb-num">' + gotoNumber(r.cur_demand) +
+          // a channel left out gets no new value: it stays at "now Demand"
+          '</td><td class="rundb-num cfg-rs-new">' + (r.included ? gotoNumber(r.target) : "&mdash;") +
+          '</td><td class="cfg-rs-note">' + note + "</td></tr>";
+}
+
+const RESTORE_HEAD = "<tr><th>channel</th><th>type</th><th>run Demand</th><th>run Meas.</th>" +
+                     "<th>now Demand</th><th>&rarr; new</th><th></th></tr>";
+
+/** The confirm dialog body for a restore_preview reply. */
+function restoreConfirmHtml(p) {
+   const rows = p.rows || [];
+   const included = rows.filter(function (r) { return r.included; });
+   const text = restoreGroupText(p.include || []);
+   let html = '<div class="cfg-restore-dlg"><b>Restore the beamline settings of run ' + Number(p.run) +
+              "?</b><br>Values from <b>" + esc(p.dump) + "</b>; new Demand from the run's <b>" +
+              esc(p.source) + "</b> value (its Demand, or its Measured where the two disagree)." +
+              "<br>Restoring: <b>" + esc(text.restored) + "</b>. No run is started.";
+   (p.warnings || []).forEach(function (w) {
+      html += '<div class="rundb-alert red" style="text-align:left">' +
+              '<span class="rundb-warnword">Warning:</span> ' + esc(w) + "</div>";
+   });
+   html += '<div class="cfg-rs-summary">' + Number(p.n_changed) + " of " + included.length +
+           " restored channel" + (included.length === 1 ? "" : "s") + " change" +
+           (included.length === 1 ? "s" : "") + "." +
+           (Number(p.n_changed) ? "" : " Every restored channel is already at run " + Number(p.run) + "'s value.") +
+           "</div>";
+   // The excluded groups sit at the end of a list that scrolls, so say up here
+   // whether they hold anything the shifter is leaving behind.
+   const leftText = RESTORE_GROUPS.map(function (g) {
+      const mine = rows.filter(function (r) { return !r.included && r.group === g.key; });
+      if (!mine.length) return null;
+      const differ = mine.filter(function (r) { return r.changes; }).length;
+      return esc(g.label) + " (" + (differ ? differ + " of " + mine.length + " differ" : "same as run") + ")";
+   }).filter(Boolean);
+   if (leftText.length) {
+      html += '<div class="cfg-rs-left">Not restored: ' + leftText.join(", ") +
+              "; listed at the end of the table.</div>";
+   }
+
+   html += '<div class="cfg-restore-scroll"><table class="mtable rundb-table cfg-restore-table">' + RESTORE_HEAD;
+   included.forEach(function (r) {
+      const note = r.overruled ? "run Demand off, using Measured" : (r.changes ? "" : "unchanged");
+      html += restoreRowHtml(r, r.changes ? "cfg-rs-changed" : "cfg-rs-same", esc(note));
+   });
+   html += "</table>";
+
+   const left = RESTORE_GROUPS.filter(function (g) {
+      return rows.some(function (r) { return !r.included && r.group === g.key; });
+   });
+   if (left.length) {
+      html += '<div class="cfg-rs-head">Not restored (tick &lsquo;restore &hellip;&rsquo; to include)</div>' +
+              '<table class="mtable rundb-table cfg-restore-table">' + RESTORE_HEAD;
+      left.forEach(function (g) {
+         html += '<tr class="cfg-rs-group"><td colspan="7">' + esc(g.label) +
+                 " &mdash; tick &lsquo;restore " + esc(g.label) + "&rsquo; to include</td></tr>";
+         rows.filter(function (r) { return !r.included && r.group === g.key; }).forEach(function (r) {
+            html += restoreRowHtml(r, "cfg-rs-excluded" + (r.changes ? " cfg-rs-differs" : ""),
+                                   r.changes ? "differs, kept as now" : "same as run");
+         });
+      });
+      html += "</table>";
+   }
+   html += "</div>";
+   if ((p.only_old || []).length) {
+      html += '<div class="rundb-note">In run ' + Number(p.run) + " but not in the ODB now, skipped: " +
+              esc(p.only_old.join(", ")) + "</div>";
+   }
+   if ((p.only_cur || []).length) {
+      html += '<div class="rundb-note">In the ODB now but not in run ' + Number(p.run) + ", left alone: " +
+              esc(p.only_cur.join(", ")) + "</div>";
+   }
+   return html + "</div>";
+}
+
+async function restoreClicked() {
+   const run = restoreRun();
+   if (run === null) {
+      dlgAlert("Enter the number of the run whose beamline settings to restore.");
+      return;
+   }
+   const include = restoreGroups();     // the same groups for the preview and the write
+   const pre = await R.call("restore_preview", { run: run, include: include }, maxBytes());
+   if (!pre || !pre.ok) {
+      dlgAlert("Cannot restore run " + run + ": " +
+               esc((pre && pre.error && pre.error.message) || "no answer"));
+      return;
+   }
+   dlgConfirm(restoreConfirmHtml(pre.data), async function (yes) {
+      if (!yes) return;
+      const done = await R.call("restore_run", { run: run, include: include }, maxBytes());
+      if (!done || !done.ok) {
+         state.gotoWatch = null;
+         gotoStatus("red", "Restoring the beamline settings of run " + run + " failed: " +
+                    esc((done && done.error && done.error.message) || "no answer"));
+         return;
+      }
+      if (!Number(done.data.n_changed)) {
+         state.gotoWatch = null;
+         gotoStatus("", "Nothing written: every restored channel was already at run " + run + "'s value.");
+         return;
+      }
+      pollOdb();
+      watchArrival(done.data);
+   });
+}
+
 // renderConfigurations is only called asyncronously upon loading the page.
 // Updates are going to be rare enough such that reloading the page is acceptable.
 async function renderConfigurations() {
@@ -812,6 +1042,7 @@ async function renderConfigurations() {
    el("rundb-configs").addEventListener("click", function (e) {
       const button = e.target.closest(".cfg-goto");
       if (button) { e.preventDefault(); gotoClicked(Number(button.dataset.config)); return; }
+      if (e.target.closest(".cfg-restore")) { e.preventDefault(); restoreClicked(); return; }
       if (!e.target.matches(".cfg-auto-switch")) return;
       e.preventDefault();
       state.showAuto = !state.showAuto;
@@ -825,6 +1056,14 @@ async function renderConfigurations() {
    document.querySelectorAll(".config-ckbx-current").forEach(function (box) {
       box.addEventListener("change", function () { currentToggled(box); });
    });
+   document.querySelectorAll(".config-ckbx-fromrun").forEach(function (box) {
+      box.addEventListener("change", updateNumRuns);
+   });
+   el("cfg-restore-run").addEventListener("input", syncFromRunRow);
+   document.querySelectorAll(".cfg-restore-group").forEach(function (box) {
+      box.addEventListener("change", syncFromRunRow);
+   });
+   syncFromRunRow();
 
    document.getElementById("5p_with_merge").addEventListener("change", function() {
       const enabled = this.checked;
@@ -873,6 +1112,10 @@ async function renderConfigurations() {
       const description = document.getElementById("submit_description").value;
       const numEv = document.getElementById("submit_events").value
       const merge = document.getElementById("5p_with_merge").value
+      const fromRunBox = document.querySelector(".config-ckbx-fromrun:checked");
+      const fromRun = fromRunBox && restoreRun() !== null
+         ? { run: restoreRun(), include: restoreGroups(), table: state.configuration_tables.beamline.table }
+         : null;
 
       // hard fail points, no recovery
       if (numRuns == "0") {
@@ -892,12 +1135,19 @@ async function renderConfigurations() {
          dlgAlert("Please provide a description")
          return;
       } else {
-         dlgQuery("Confirm scheduling " + numRuns + " runs. Enter shifter password.</br></br> Password: ", "", async function(resp, param) {
+         const fromRunText = fromRun ? (function () {
+            const t = restoreGroupText(fromRun.include);
+            return "<br>beamline: settings from run " + fromRun.run + " (" + esc(t.restored) +
+                   (t.kept ? "; " + esc(t.kept.split("/").join(", ")) + " kept as now" : "") + ")";
+         })() : "";
+         dlgQuery("Confirm scheduling " + numRuns + " runs." + fromRunText +
+                  "<br>Enter shifter password.</br></br> Password: ", "", async function(resp, param) {
             if (resp) {
                try {
                   const done = await R.call("generate_sequence", {
                      "config" : selected,
                      "current" : currentLevels(),
+                     "from_run" : fromRun,
                      "events" : numEv,
                      "operator" : operator,
                      "description" : description,
@@ -906,7 +1156,11 @@ async function renderConfigurations() {
                   if (!done || !done.ok) {
                      dlgAlert("Scheduling failed: " + esc((done && done.error && done.error.message) || "no answer"));
                   } else {
-                     dlgAlert("Scheduled " + ((done.data && done.data.runs) || []).length + " runs.");
+                     dlgAlert("Scheduled " + ((done.data && done.data.runs) || []).length + " runs." +
+                              (done.data && done.data.from_run_config
+                                 ? " The settings from run " + fromRun.run + " are stored as beamline configuration " +
+                                   Number(done.data.from_run_config) + "."
+                                 : ""));
                   }
                } catch(err) {
                   console.error(err);
@@ -1067,8 +1321,8 @@ const CFGDB = {
    CONFIG_ROOT, DEFAULTS, ODB_PATHS,
    // pure builders, all testable without a browser or a database
    runStateWord, stripHtml, sequencerNoteHtml, staleHtml,
-   databaseError, note, init, isRunplanConfig, isMysteryConfig, autoCountText,
-   gotoConfirmHtml, arrivalCount, splitIndex,
+   databaseError, note, init, isRunplanConfig, isMysteryConfig, isFromRunConfig, autoCountText,
+   gotoConfirmHtml, arrivalCount, splitIndex, restoreConfirmHtml, restoreGroupText,
    // loops, exported so a fixture page can drive them one step at a time
    pollOdb
 };

@@ -154,3 +154,33 @@ td.rundb-kept     { font-weight: 600; color: #1a7f37; }
    .rundb-modal-table th:nth-child(2), .rundb-modal-table td:nth-child(2),
    .rundb-modal-table th:nth-child(5), .rundb-modal-table td:nth-child(5) { display: none; }
 }
+
+/* --- Restore beamline settings of run N (ConfigDB page) ---------------- */
+
+.cfg-restore-line { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center;
+                    margin: 6px 0 12px 0; }
+.cfg-restore-line label { display: inline-flex; gap: 5px; align-items: center; white-space: nowrap; }
+.cfg-restore-line input[type=number] { width: 6em; }
+
+/* The dialog lists every EPICS channel (~30 writeable), so the tables scroll
+   inside it and the OK / Cancel buttons stay on screen. Left-aligned: MIDAS
+   centres dialog text, which makes a table of numbers hard to read. */
+.cfg-restore-dlg      { text-align: left; max-width: min(60em, calc(100vw - 90px)); }
+.cfg-rs-summary       { margin: 6px 0; font-weight: 600; }
+.cfg-rs-left          { margin: 0 0 6px 0; }
+.cfg-restore-scroll   { max-height: 50vh; overflow: auto; margin: 6px 0;
+                        border: 1px solid #ccc; }
+.cfg-rs-head          { margin: 10px 0 2px 4px; font-weight: 600; }
+table.cfg-restore-table              { margin: 0; width: 100%; }
+table.cfg-restore-table td,
+table.cfg-restore-table th           { white-space: nowrap; }
+table.cfg-restore-table th           { position: sticky; top: 0; background: #e8e8e8; color: #222; }
+/* Background and text set together, as everywhere in this file, so the rows
+   read the same whatever midas.css's striping or the browser does. */
+tr.cfg-rs-changed td  { background: #fff3c4; color: #222; }
+tr.cfg-rs-changed td.cfg-rs-new { font-weight: 700; }
+tr.cfg-rs-same td,
+tr.cfg-rs-excluded td { background: #f6f6f6; color: #6b6b6b; }
+tr.cfg-rs-excluded.cfg-rs-differs td.cfg-rs-note { color: #8a4b00; font-weight: 600; }
+tr.cfg-rs-group td    { background: #e8e8e8; color: #222; font-weight: 600; }
+td.cfg-rs-note        { font-size: 90%; }
