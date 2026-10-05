@@ -34,19 +34,27 @@ from datetime import datetime
 # writes nothing, so it is not behind the ODB flag.  It does need the action
 # module, because the database it reads is the one the client was told to write
 # and nothing else knows that connection string.
+#
+# `preview_clear_queue` is here for the same reason: it lists what "Clear
+# queue" would cancel and writes nothing, but it reads through the action
+# module's connection, because the queue it previews has to be the queue the
+# action would then write.
 READ_COMMANDS = ("status", "runlog", "queue", "run", "sequences", "config",
-                 "preview_five_point")
+                 "preview_five_point", "preview_clear_queue")
 
-# What `python -m pioneer.rundb.view` offers.  `preview_five_point` is left out
-# of it: that command needs a list of configuration ids and the action module's
-# connection string, neither of which the read command line has, and the manual
-# way to preview a scan is `python -m pioneer.rundb.actions five-point …`
-# without `--confirm`.
-CLI_COMMANDS = tuple(cmd for cmd in READ_COMMANDS if cmd != "preview_five_point")
+# The read commands that need the action module.  Neither is offered by
+# `python -m pioneer.rundb.view`: both need the action module's connection
+# string, which the read command line does not have.  The manual ways to run
+# them are `python -m pioneer.rundb.actions five-point ...` without `--confirm`
+# and `python -m pioneer.rundb.actions clear-queue ...` without `--yes`.
+PREVIEW_COMMANDS = ("preview_five_point", "preview_clear_queue")
+
+# What `python -m pioneer.rundb.view` offers.
+CLI_COMMANDS = tuple(cmd for cmd in READ_COMMANDS if cmd not in PREVIEW_COMMANDS)
 
 # Commands that write to the run database.  Behind two gates, see the module
 # docstring; the module that implements them is supplied separately.
-ACTION_COMMANDS = ("schedule_five_point",)
+ACTION_COMMANDS = ("schedule_five_point", "clear_queue")
 
 # The error kinds the JSON contract names.
 ERROR_KINDS = ("usage", "db", "too_large", "denied", "unknown_command", "internal")
@@ -58,6 +66,17 @@ MAX_ROWS = 200
 DEFAULT_RUNLOG_ROWS = 50
 DEFAULT_QUEUE_ROWS = 50
 DEFAULT_SEQUENCE_ROWS = 20
+
+# The most run ids one "Clear queue" may name, and so also the most runs its
+# preview lists.  A queue longer than this is not something a shifter reads
+# through in a dialog; the preview says it was cut short, and a second clear
+# takes the rest.  The action module uses the same number.
+MAX_CLEAR_IDS = 2000
+
+# The longest free text a caller may send (the operator name of a clear).  It
+# ends up in an annotation row and in a MIDAS message line, neither of which
+# is the place for a paragraph.
+MAX_TEXT_LENGTH = 64
 
 # What each command accepts: name -> (kind, default).  `required` has no
 # default and must be given.
@@ -77,6 +96,21 @@ _ARGUMENTS = {
     "preview_five_point": {
         "config_ids": ("required_id_list", None),
         "requested_events": ("events", 1_000_000),
+    },
+    # `sequencer_running` and `loaded_run_id` are deliberately not arguments
+    # of either: whether the sequencer is running, and which run it has
+    # loaded, are read by the server from the ODB on every call
+    # (`rpc_server.Server.serve`) and handed in as server-side extras.  A
+    # caller that sends them is refused like any other unknown key, so a page
+    # cannot talk the client into cancelling the run the sequencer is setting
+    # up.
+    "clear_queue": {
+        "run_ids": ("bounded_id_list", None),
+        "include_holding": ("flag", False),
+        "operator": ("text", None),
+    },
+    "preview_clear_queue": {
+        "include_holding": ("flag", False),
     },
     "generate_sequence" : {"config": ("", None), "events": ("events", 10000), "password": ("", None)},
 }
@@ -114,8 +148,17 @@ def safe_message(text: str) -> str:
 
 
 def _as_int(name: str, value) -> int:
+    """`value` as an int, or a usage error.
+
+    A float has to be exactly a whole number: `int(2.7)` is 2, and a run id or
+    a row count of 2.7 is a caller sending something it did not mean, not a
+    request for 2.  `True` is an int in Python and is refused for the same
+    reason.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         raise CommandError("usage", f"{name} must be a whole number")
+    if isinstance(value, float) and not value.is_integer():
+        raise CommandError("usage", f"{name} must be a whole number, not {value}")
     try:
         number = int(value)
     except (TypeError, ValueError):
@@ -189,6 +232,48 @@ def parse_args(cmd: str, args) -> dict:
             if not isinstance(value, (list, tuple)) or not value:
                 raise CommandError("usage", f"{name} must be a non-empty list of ids")
             out[name] = [_as_int(name, item) for item in value]
+        elif kind == "bounded_id_list":
+            # The same as `required_id_list`, with an upper bound: this list
+            # becomes an `id = ANY(...)` in one UPDATE, and a page that sends
+            # tens of thousands of ids is not sending what a dialog showed.
+            if value is None:
+                raise CommandError("usage", f"{cmd} needs {name}")
+            if not isinstance(value, (list, tuple)) or not value:
+                raise CommandError("usage", f"{name} must be a non-empty list of ids")
+            if len(value) > MAX_CLEAR_IDS:
+                raise CommandError(
+                    "usage",
+                    f"{name} has {len(value)} entries; at most {MAX_CLEAR_IDS} may be given",
+                    hint="clear the queue in more than one go",
+                )
+            out[name] = [_as_int(name, item) for item in value]
+        elif kind == "flag":
+            # JSON true or false and nothing else.  "false" as a string is
+            # true in Python, and 0/1 are a page sending something other than
+            # what the checkbox holds; either way the caller should hear about
+            # it rather than have it guessed.
+            if value is None:
+                out[name] = default
+            elif isinstance(value, bool):
+                out[name] = value
+            else:
+                raise CommandError("usage", f"{name} must be true or false")
+        elif kind == "text":
+            # A required, short, single line of text.  Trimmed here, so that
+            # what is checked is what is stored.
+            if value is None:
+                raise CommandError("usage", f"{cmd} needs {name}")
+            if not isinstance(value, str):
+                raise CommandError("usage", f"{name} must be a string")
+            text = value.strip()
+            if not text:
+                raise CommandError("usage", f"{name} must not be empty")
+            if len(text) > MAX_TEXT_LENGTH:
+                raise CommandError(
+                    "usage", f"{name} is {len(text)} characters; at most {MAX_TEXT_LENGTH}")
+            if not text.isprintable():
+                raise CommandError("usage", f"{name} must be one line of plain text")
+            out[name] = text
         elif kind == "events":
             out[name] = default if value is None else _as_int(name, value)
         else:
@@ -277,11 +362,39 @@ def encode_within(envelope: dict, max_len: int | None, text: str | None = None) 
     return text if fits(text, max_len) else _FLOOR
 
 
+def _five_point_offered(actions) -> bool:
+    """Whether "Schedule five-point scan" can work on this client at all.
+
+    Only when the action module is built and its write connection string
+    names a scratch database: the five-point action refuses every other
+    database (`actions.five_point_offered`), and a page that showed the button
+    on a client pointed at the experiment's own database would be offering
+    something that can only ever be refused.  The command layer does not parse
+    connection strings, so it asks the action module; a stand-in module
+    without that function offers nothing.
+    """
+    if actions is None:
+        return False
+    try:
+        offered = getattr(actions, "five_point_offered")
+    except AttributeError:
+        return False
+    try:
+        return bool(offered())
+    except Exception:  # noqa: BLE001 - not knowing means not offering
+        return False
+
+
 def _call(view, actions, cmd: str, args: dict, actions_allowed: bool):
     """Run one command against the view, or against the actions module."""
     if cmd == "status":
-        return view.status(actions_allowed=bool(actions_allowed),
-                           actions_built=actions is not None)
+        # "Allowed" means an action would actually be carried out: the ODB
+        # flag *and* a module to carry it out.  The flag alone, on a client
+        # started without --allow-actions, would show the page a button that
+        # can only ever be refused.
+        return view.status(actions_allowed=bool(actions_allowed) and actions is not None,
+                           actions_built=actions is not None,
+                           five_point_offered=_five_point_offered(actions))
     if cmd == "runlog":
         return view.runlog(limit=args["limit"], before_id=args["before_id"])
     if cmd == "queue":
@@ -296,17 +409,18 @@ def _call(view, actions, cmd: str, args: dict, actions_allowed: bool):
             return view.config(this_id)
         else:
             return view.config_list(this_id)
-    if cmd == "preview_five_point":
+    if cmd in PREVIEW_COMMANDS:
         # One gate, not two: this only reads, so the ODB flag does not come
         # into it.  What it needs is the action module, which is where the
         # connection string for the database it reads lives.
         if actions is None:
+            what = "a scan" if cmd == "preview_five_point" else "clearing the queue"
             raise CommandError(
                 "denied",
-                "this client cannot preview a scan",
+                f"this client cannot preview {what}",
                 hint="preview needs a client started with --allow-actions",
             )
-        return actions.preview_five_point(**args)
+        return getattr(actions, cmd)(**args)
     if cmd in ACTION_COMMANDS:
         if actions is None or not actions_allowed:
             raise CommandError(
@@ -320,13 +434,15 @@ def _call(view, actions, cmd: str, args: dict, actions_allowed: bool):
                        hint="known commands: " + ", ".join(known_commands()))
 
 def dispatch(view, actions, cmd: str, args=None, max_len: int | None = None,
-             actions_allowed: bool = False) -> str:
+             actions_allowed: bool = False, server_args: dict | None = None) -> str:
     """Answer one command.  Always returns a JSON string, never raises."""
-    return dispatch_envelope(view, actions, cmd, args, max_len, actions_allowed)[1]
+    return dispatch_envelope(view, actions, cmd, args, max_len, actions_allowed,
+                             server_args=server_args)[1]
 
 
 def dispatch_envelope(view, actions, cmd: str, args=None, max_len: int | None = None,
-                      actions_allowed: bool = False) -> tuple:
+                      actions_allowed: bool = False,
+                      server_args: dict | None = None) -> tuple:
     """Answer one command, giving back both the envelope and its text.
 
     `max_len` is the largest reply the caller can take; `None` means no limit,
@@ -338,10 +454,20 @@ def dispatch_envelope(view, actions, cmd: str, args=None, max_len: int | None = 
     The envelope is returned beside the text so that a caller which needs to
     know whether the command worked does not have to search a reply that may be
     hundreds of kilobytes long.
+
+    `server_args` are arguments the caller is not allowed to give, supplied by
+    whoever called this function -- today `sequencer_running` and
+    `loaded_run_id`, which the RPC server reads from the ODB for the two
+    clear-queue commands.  They are
+    merged in after the caller's arguments have been checked, and they win:
+    `parse_args` refuses them as unknown keys if a caller sends them, so there
+    is nothing of the caller's for them to overwrite.
     """
     cmd = str(cmd or "").strip()
     try:
         args = parse_args(cmd, args)
+        if server_args:
+            args.update(server_args)
         started = time.monotonic()
         data = _call(view, actions, cmd, args, actions_allowed)
         query_ms = int(round((time.monotonic() - started) * 1000))

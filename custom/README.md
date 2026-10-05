@@ -82,13 +82,15 @@ value with no `/` in it is rejected with an `add_custom_path` error.
 ## `rundb.html` — the 2026 run database
 
 Shifter page for the run database: what has been taken, what is queued and
-which scans those runs belong to. It is **read-only** — it starts no runs,
-changes no priorities and does not touch the sequencer. Four sections:
+which scans those runs belong to. It reads the run database; only on a client
+armed for actions (see [Actions](#actions)) can it also clear the queue and, on a
+scratch database, schedule a five-point scan. It never starts runs, changes no
+priorities and does not touch the sequencer. Four sections:
 
 | section | what it shows |
 | --- | --- |
 | live strip | run state and number, the database id of the run in progress, the sequencer, and whether the run database is answering. ODB only, once a second |
-| Queue | runs waiting to be taken, lowest priority first, with their configuration summary; the one that goes next is marked |
+| Queue | runs waiting to be taken, lowest priority first, with their configuration summary; the one that goes next is marked. On an armed client, a **Clear queue…** button in the heading |
 | Runlog | newest runs first, with start/stop/duration, files and nearline jobs; click a row for the full configuration values, the individual jobs and the other runs of its sequence; **Show older** pages back |
 | Sequences | one line per scan with its member runs counted by status ("9 runs: 4 DONE, 1 RUNNING, 4 PENDING") and the run-number span |
 
@@ -117,7 +119,7 @@ showing an empty cell.
 | source | how | when |
 | --- | --- | --- |
 | ODB | `mjsonrpc_db_get_values`, answered by mhttpd itself | 1 Hz |
-| `RunDBView` client | `mjsonrpc_call("jrpc", {client_name, cmd, args, max_reply_length})` | `status` + `queue` every `Poll seconds`; `runlog` + `sequences` every `Runlog refresh seconds`; `run` on a click; all four again on **Refresh now** |
+| `RunDBView` client | `mjsonrpc_call("jrpc", {client_name, cmd, args, max_reply_length})` | `status` + `queue` every `Poll seconds`; `runlog` + `sequences` every `Runlog refresh seconds`; `run` on a click; all four again on **Refresh now**; `preview_clear_queue` when the Clear queue dialog opens or its HOLDING box changes, `clear_queue` on its OK (then `queue` at once) |
 
 The ODB half keeps working when the client is stopped, which is the point of
 the split: the strip stays live and the page says in words which half is
@@ -160,12 +162,12 @@ python -m pioneer.rundb.view status|queue|runlog|sequences|run ID|config ID
 | file | what |
 | --- | --- |
 | `rundb.html` | the page: stock MIDAS resources, `mhttpd_init('RunDB')`, the section skeleton |
-| `js/rundb-rpc.js` | transport only — the `jrpc` envelope and its retry, the ODB read, the serialised visibility-aware poller, and the pure helpers (status words, durations, escaping) |
-| `js/rundb.js` | rendering only — the strip, the three tables, the expandable run detail, the stale messages, the action panel |
+| `js/rundb-rpc.js` | transport only — the `jrpc` envelope and its retry, the ODB read, the serialised visibility-aware poller, and the pure helpers (status words, durations, escaping, the Clear queue sentences and args) |
+| `js/rundb.js` | rendering only — the strip, the three tables, the expandable run detail, the stale messages, the action panel, the Clear queue button and dialog |
 | `css/rundb.css` | fills, borders and outlines from the `midas.css` custom properties (`--mred`, `--myellow`, `--mgreen`, `--mgray`, `--mblue`); text colours are literal, because those properties are *background* pastels (`midas.css:24-28`) and grey-on-white prose at 3 a.m. is not a colour scheme. No web fonts, no CDN |
 | `js/rundb-rpc.test.js` | `node --test` for the pure helpers, the envelope handling and the rendering. Node is **not** a dependency of this repo and must not become one — the page has no build step. Run it wherever node happens to exist, e.g. `docker run --rm --cpus=8 -v "$PWD/custom:/w" -w /w node:22-alpine node --test js/rundb-rpc.test.js` |
 
-The `?v=1` on the two scripts and the stylesheet is not decoration: mhttpd
+The `?v=3` on the two scripts and the stylesheet is not decoration: mhttpd
 stamps `Expires: +24h` on anything served as an asset, with no `ETag` and no
 `Last-Modified`, so without a version token an edit is invisible for a day.
 Bump it when you change a file. The page itself is exempt — its `/Custom` key
@@ -198,7 +200,7 @@ odbedit -c 'set "/Custom/rundb.css!" /home/pinky/bt2026/beamtime2026_pie5/custom
 ```
 
 mhttpd serves an asset under its **key name**, not under the path it points at,
-which is why the page asks for `rundb.css?v=1` and `rundb.js?v=1` and not for
+which is why the page asks for `rundb.css?v=3` and `rundb.js?v=3` and not for
 `css/rundb.css`. The paths above are the paths **as mhttpd sees them**: on this
 laptop mhttpd runs in the `testbeam-midas` container, where the workspace is
 mounted at `/workdir`, so they read `/workdir/beamtime2026_pie5/custom/...`.
@@ -231,10 +233,63 @@ Changing any of these takes effect on the next poll — no reload.
 Normally there are none, and the panel says so in one line. Writing to the run
 database needs the client to have been started with `--allow-actions` *and*
 `/RunDBView/Allow actions` to be true, both re-read by the client on every
-single call, and neither is the case on pinky.
+single call. Arming and disarming pinky is in `docs/DEPLOY-pinky-rundb.md`;
+setting `Allow actions` to n takes effect at once.
 
-When both are set the panel appears, and it schedules one thing: a five-point
-scan. There is a picker per configuration type, filled from the configurations
+When both are set the page offers two things, and the yellow line at the top
+of the Actions panel says which:
+
+* **Clear queue…**, in the Queue heading, on every armed client (below);
+* a five-point scan, in the Actions panel, only where the client says so
+  (`status.client.five_point_offered`, true on scratch databases only). Anywhere
+  else the panel says *Scheduling a five-point scan from this page is offered on
+  scratch databases only; use the ConfigDB page.*
+
+#### Clear queue
+
+The button appears only while the last queue read has a `PENDING` or `HOLDING`
+run. It opens a dialog (the page's own, not MIDAS `dlgConfirm`, because it needs
+a table, a checkbox and a text field) that first asks the client
+`preview_clear_queue {include_holding}` and lists exactly what it said: each
+run's DB id, run number, status as stored, priority and requested events, and
+what OK will do to it.
+
+* **also cancel HOLDING runs** is off every time the dialog opens; ticking it
+  asks the client again.
+* **Operator** is required (at most 64 characters). It is the author of the
+  annotation written beside every cancelled run and goes in the MIDAS message.
+* While the sequencer is running, every run it may be about to take is listed
+  as *kept — the sequencer may be about to take it*, and one line says to stop
+  the sequencer and clear again to remove it. The client decides which runs
+  those are; it is not only the lowest priority (`actions.py`).
+  Kept runs are not sent with OK, so they stay `PENDING` even if the sequencer
+  stops before OK is pressed.
+* If the list is cut at 2000 runs, the dialog says only those are cancelled.
+* **Cancel N runs** is dead until the client has answered, there is at least one
+  run to cancel and a name is typed. **Close**, Esc or a click outside the box
+  closes the dialog, except while the write is out.
+
+OK sends `clear_queue {run_ids, include_holding, operator}` with only the ids
+listed as going to `CANCELLED`, so a run scheduled after the dialog opened is
+never cancelled, and nor is a run the dialog said it would keep. The client
+re-checks every id under the row lock, keeps any the sequencer may have reached
+since (it reads that itself; a caller cannot send `sequencer_running`), and
+answers what it
+cancelled, what it kept and which ids it skipped because their status had moved
+on. That answer stays as a line under the queue table until dismissed, and the
+queue is re-read at once. Its failures split the same way as the five-point
+panel's (table below): a refusal says *Nothing was cancelled*; no answer says
+*The runs may still have been cancelled. Look at the queue before pressing
+again*. Like the five-point write, `clear_queue` is never sent twice.
+
+The command line does the same thing, previewing unless `--yes` is given:
+`python -m pioneer.rundb.actions clear-queue [--include-holding]
+[--include-head] --operator NAME --write-dsn … [--yes]`. `--include-head`
+stands in for the ODB read, since the command line may run without MIDAS.
+
+#### Five-point scan
+
+There is a picker per configuration type, filled from the configurations
 that have already appeared in the queue and the runlog — so opening the panel
 costs no extra round trips — plus an "other config id" field that looks up
 anything else with `config {id}`. `target_position` is not offered at all: the
