@@ -4,6 +4,8 @@ import json
 import argparse
 from pathlib import Path
 
+import ROOT
+
 from pioneer.nearline.miniTwinInterface import miniTwin_histograms
 
 header_paths = [
@@ -130,7 +132,7 @@ def normalise(runs : list[dict], names : list[str]) -> str | None:
     return source
 
 
-def sum_sub_runs(input_files : list[str]):
+def sum_sub_runs(input_files : list[str], extra_histo_paths : list[str] | None = None):
     """
     Sum the histograms of one run's subrun files; no normalisation.
     """
@@ -145,10 +147,14 @@ def sum_sub_runs(input_files : list[str]):
     if not first_file or first_file.IsZombie():
         raise OSError(f"Unable to read input file {input_files[0]}")
 
+    these_histo_paths = set(histo_paths)
+    if (extra_histo_paths is not None):
+        these_histo_paths.update(extra_histo_paths)
+
     # Load everything of interest:
     histos = dict()
     absent_first = set()
-    for path in histo_paths:
+    for path in these_histo_paths:
         obj = first_file.Get(path)
         if not obj and path in current_paths:
             absent_first.add(path)
@@ -204,12 +210,12 @@ def sum_sub_runs(input_files : list[str]):
     return headers, histos
 
 
-def combine_runs(runs : list[list[str]]):
+def combine_runs(runs : list[list[str]], extra_histo_paths : list[str] | None = None):
     """
     Sum each run's subruns, normalise all runs or none (see normalise), and
     add the runs together. Returns (headers, histos).
     """
-    summed = [sum_sub_runs(files) for files in runs]
+    summed = [sum_sub_runs(files, extra_histo_paths) for files in runs]
     used = normalise([h for _, h in summed], [files[0] for files in runs])
     # Only the source used stays in the result (normalised, one per run); the
     # other, which not every run may have, and every current histogram of a
@@ -238,16 +244,33 @@ def combine_runs(runs : list[list[str]]):
                 combined_histos[name].Add(histo)
     return combined_headers, combined_histos
 
+def detect_histograms(filename):
+    afile = ROOT.TFile.Open(filename)
+    histo_dir = afile.Get("histograms")
+    paths = []
+    for key in histo_dir.GetListOfKeys():
+        sub_dir = histo_dir.Get(key.GetName())
+        for skey in sub_dir.GetListOfKeys():
+            name = skey.GetName()
+            if (name.endswith('_w') or name.endswith('_mt')) and ROOT.TClass(skey.GetClassName()).InheritsFrom('TH1'):
+                paths.append(f"histograms/{key.GetName()}/{name}")
+    return paths
 
 def main():
     import ROOT
 
     parser = argparse.ArgumentParser(description="Combine nearline ROOT files.")
     parser.add_argument("config", type=Path, help="JSON merge configuration file")
+    parser.add_argument("--detect-histograms", action = "store_true")
     args = parser.parse_args()
 
     config = load_json_config(args.config)
-    combined_headers, combined_histos = combine_runs(list(config["runs"].values()))
+    extra_histo_paths = None
+    if args.detect_histograms:
+        print("trying to detect histograms")
+        extra_histo_paths = detect_histograms(list(config["runs"].values())[0][0])
+
+    combined_headers, combined_histos = combine_runs(list(config["runs"].values()), extra_histo_paths)
 
     output = ROOT.TFile.Open(config["output"], "RECREATE")
     if not output or output.IsZombie():
