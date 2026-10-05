@@ -147,10 +147,9 @@ def sum_sub_runs(input_files : list[str], extra_histo_paths : list[str] | None =
     if not first_file or first_file.IsZombie():
         raise OSError(f"Unable to read input file {input_files[0]}")
 
+    these_histo_paths = set(histo_paths)
     if (extra_histo_paths is not None):
-        these_histo_paths = set(histo_paths) + set(extra_histo_paths)
-    else:
-        these_histo_paths = set(histo_paths)
+        these_histo_paths.update(extra_histo_paths)
 
     # Load everything of interest:
     histos = dict()
@@ -262,7 +261,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Combine nearline ROOT files.")
     parser.add_argument("config", type=Path, help="JSON merge configuration file")
-    parser.add_argument("detect-histograms", action = "store_true")
+    parser.add_argument("--detect-histograms", action = "store_true")
     args = parser.parse_args()
 
     config = load_json_config(args.config)
