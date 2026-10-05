@@ -63,11 +63,14 @@ def schedule_configuration(config, iface = None):
     author = config.get("operator", "RPC Callback")
     desc   = config.get("description", "RPC Callback")
     quality = config.get("quality", "")
+    merge = config.get("merge", False)
 
     def label(name, level):
         return name + " (current)" if level in current else name
 
     mrs_target = midas_run_sequence(iface, num_ev = num_ev, author = author, description = label("XY", "target"), quality = quality)
+    if merge:
+        mrs_target.set_on_complete("merge")
     mrs_degrad = midas_run_sequence(iface, num_ev = num_ev, author = author, description = label("Degrader", "degrader"), quality = quality)
     mrs_beam = midas_run_sequence(iface, num_ev = num_ev, author = author, description = desc + "\nSequence: " + label("Beam", "beamline"), quality = quality)
 

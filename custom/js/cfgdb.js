@@ -377,7 +377,7 @@ function configTableHtml(configuration_tables) {
    const target_header = "<tr><th>config id</th><th>select</th><th>go to</th><th>seq_id</th><th>comment</th><th>xpos</th><th>ypos</th></tr>"
    const target_body = configuration_tables.target_positions.map(function(row) {
       const do_not_use_cell = row.do_not_use
-            ? " --- " : '<input type="checkbox" class="config-ckbx-target" value="' + row.config_type + ":" + row.config_id + '">';
+            ? " --- " : '<input type="checkbox" class="config-ckbx-target" value="' + row.config_type + ":" + row.config_id + '" id ="' + row.config_type + ":" + row.config_id + '">';
       return "<tr" + autoAttr(row) + " id=cfg_row" + row.config_id + " data-values='" +
                   JSON.stringify(row.values || {}).replace(/'/g, "&#39;") +
                   "'>" +
@@ -391,6 +391,7 @@ function configTableHtml(configuration_tables) {
               "</tr>"
 
    });
+   const target_5psequence = '<input type="checkbox" id = "5p_with_merge"> Run 5 point sequence with merging.'
 
    // Render target positions
    const degrader_header = '<tr><th>config id</th><th>select</th><th>go to</th><th>seq_id</th><th>comment</th><th>xpos</th></tr>'
@@ -429,7 +430,7 @@ function configTableHtml(configuration_tables) {
    // submit area
    const submit_area = '<table  class="mtable rundb-table">'+
          '<tr><td>Number of runs</td><td id="submit_num_runs">0</td></tr>'+
-         '<tr><td>Description</td><td><textarea id="submit_description" cols="100" rows="10"></textarea></td></tr>' + 
+         '<tr><td>Description</td><td><textarea id="submit_description" cols="100" rows="10"></textarea></td></tr>' +
          '<tr><td>Number of events</td><td><input type="text" id="submit_events"></td></tr>' +
          '<tr><td>Operator Name</td><td><input type="text" id= "submit_operator_name"></input></td></tr>' +
          '<tr><td>Confirm number of runs</td><td><input type="text" id="submit_confirm_runs"></td></tr>' +
@@ -438,6 +439,7 @@ function configTableHtml(configuration_tables) {
 
    return '<div id="cfg-goto-status"></div>' +
           '<h3 class="rundb-h"><a href="http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FXYTable%2FVariables"> Target Positions </a></h3>' +
+          target_5psequence +
           '<table class="mtable rundb-table">' +
           target_header +
           currentRowHtml("target", 7) +
@@ -824,6 +826,39 @@ async function renderConfigurations() {
       box.addEventListener("change", function () { currentToggled(box); });
    });
 
+   document.getElementById("5p_with_merge").addEventListener("change", function() {
+      const enabled = this.checked;
+      if (enabled) {
+         for (let index = 0; index < state.configuration_tables.target_positions.length; index++) {
+            const element = state.configuration_tables.target_positions[index];
+            let el = document.getElementById(element.config_type + ":" + element.config_id)
+            if (element.values.seq_id == 2) {
+               el.checked = true;
+            } else {
+               el.checked = false;
+            }
+         }
+         document.querySelectorAll(".config-ckbx-target").forEach(function (checkbox) {
+            checkbox.disabled = true;
+         });
+         document.querySelectorAll(".config-ckbx-current").forEach(function (box) {
+            if (box.dataset.level == 'target') {
+               box.disabled = true;
+               box.checked = false;
+            };
+         });
+      } else {
+         document.querySelectorAll(".config-ckbx-target").forEach(function (checkbox) {
+            checkbox.disabled = false;
+         });
+         document.querySelectorAll(".config-ckbx-current").forEach(function (box) {
+            if (box.dataset.level == 'target') {
+               box.disabled = false;
+            };
+         });
+      }
+   })
+
    document.getElementById("submit_config").addEventListener("click", async function() {
       const selected = Array.from(
          document.querySelectorAll(".config-ckbx-target:checked, .config-ckbx-degrader:checked, .config-ckbx-beam:checked")
@@ -837,6 +872,7 @@ async function renderConfigurations() {
       const operator = document.getElementById("submit_operator_name").value;
       const description = document.getElementById("submit_description").value;
       const numEv = document.getElementById("submit_events").value
+      const merge = document.getElementById("5p_with_merge").value
 
       // hard fail points, no recovery
       if (numRuns == "0") {
@@ -865,6 +901,7 @@ async function renderConfigurations() {
                      "events" : numEv,
                      "operator" : operator,
                      "description" : description,
+                     "merge" : merge,
                      "password" : resp});
                   if (!done || !done.ok) {
                      dlgAlert("Scheduling failed: " + esc((done && done.error && done.error.message) || "no answer"));
