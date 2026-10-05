@@ -1,4 +1,5 @@
-"""The one thing the run-database client may write: a five-point scan.
+"""The two things the run-database client may write: a five-point scan, and
+clearing the queue.
 
 Everything else in this package reads.  This module is the exception, and it is
 built so that it cannot be reached by accident:
@@ -9,11 +10,13 @@ built so that it cannot be reached by accident:
   `/RunDBView/Allow actions` is true as well, re-read on each call;
 * the connection string is bound by the process that started the client
   (`rpc_server.ActionAdapter`), never by the caller;
-* the command line here refuses any database that is not a scratch one, because
-  scheduling into the experiment's own queue is not something this version
-  offers.
+* the five-point action, and its preview, refuse any database that is not a
+  scratch one (`_require_scratch`), on the page and on the command line alike,
+  because scheduling into the experiment's own queue is not something this
+  version offers.  Clearing the queue has no such rule: it is meant for the
+  experiment's own database, and is described in its own section below.
 
-What the action does is exactly what a person would do at a python prompt:
+What the five-point action does is exactly what a person would do at a python prompt:
 `pioneer.nearline.run.five_point_sequence` on the run-database `interface`, the
 chosen settings applied on top of it, `schedule()`.  Nothing about the runs it
 creates is special, so the sequencer treats them like any other queued runs and
@@ -54,6 +57,15 @@ be told that nothing happened while five runs are waiting to be taken.
 read command: the page uses it to show what a button would do before the button
 is armed.  It still needs this module, because the connection string it reads
 belongs to the client, not to the caller.
+
+Clearing the queue (`clear_queue`, previewed by `preview_clear_queue`) sets the
+waiting runs to `CANCELLED`.  It does not go through `interface` at all: it is
+one UPDATE and a handful of INSERTs on the write connection, in one
+transaction, so it either happens completely or not at all.  It only ever
+touches runs that are `PENDING` (and `HOLDING`, if asked), and only the ids the
+caller names -- the ones its dialog showed -- so a run scheduled after the
+dialog opened is never cancelled.  While the sequencer is running, the run it
+is about to take is left alone; see `clear_queue` for why.
 """
 
 import re
@@ -63,6 +75,7 @@ import psycopg
 import psycopg.sql
 
 from pioneer.rundb import config
+from pioneer.rundb.commands import MAX_CLEAR_IDS, MAX_TEXT_LENGTH
 
 # The target-position sequence the five-point scan is made of.  Rows of
 # `config.target_position` carrying this `seq_id` are the five points; see
@@ -102,6 +115,47 @@ _CONFIG_LOCK = threading.Lock()
 
 # What the action calls itself in pg_stat_activity.
 APPLICATION_NAME = "rundb_actions"
+
+# How long a connection attempt may take, in seconds, when the write
+# connection string does not say.  Without it libpq waits as long as the
+# network does, and the client answers the page from one thread: a database
+# host that has gone away would freeze every poll behind the one call.
+CONNECT_TIMEOUT_S = 5
+
+# The statuses "Clear queue" may cancel.  `PENDING` always; `HOLDING` only when
+# the caller ticks the box.  `CLAIMED`, `RUNNING` and every finished status are
+# deliberately absent: a run that has been taken is the sequencer's and the
+# DAQ's, and cancelling it from here would leave the run database disagreeing
+# with what is actually being recorded.
+CLEAR_PENDING = ("PENDING",)
+CLEAR_WITH_HOLDING = ("PENDING", "HOLDING")
+
+# The bounds of a clear -- how many ids one call may name, and how long the
+# operator name may be -- are `MAX_CLEAR_IDS` and `MAX_TEXT_LENGTH`, imported
+# from the command layer, which checks them first.  The action checks them
+# again on its own, for callers that do not come through the command layer.
+
+# How long the clear may wait.  The UPDATE locks the rows it changes, and the
+# sequencer or the nearline daemon may hold one of them for a moment; waiting
+# a few seconds for that is fine, waiting for ever with a shifter in front of
+# a spinning dialog is not.  A timeout rolls the whole clear back.
+CLEAR_STATEMENT_TIMEOUT = "5s"
+CLEAR_LOCK_TIMEOUT = "3s"
+
+# Why runs were left PENDING while the sequencer is running.  One sentence,
+# shown in the dialog and in the reply.
+HEAD_REASON = ("The sequencer is running and may already be setting up the next run "
+               "in the queue, so that run is left PENDING; stop the sequencer and clear "
+               "the queue again to cancel it too.")
+
+# The note each cancelled run gets in logs.run_annotations: where the clear
+# came from, and, if the sequencer was running, which runs the clear left
+# PENDING because of it (see `_note`).
+CLEAR_NOTE = "cancelled from {origin} (Clear queue)"
+CLEAR_NOTE_RUNNING = "; sequencer running"
+CLEAR_NOTE_LEFT = ", next run(s) {ids} left PENDING"
+ORIGIN_PAGE = "the RunDB page"
+ORIGIN_CLI = "the command line"
 
 
 class ActionError(Exception):
@@ -190,6 +244,38 @@ def database_name(dsn: str) -> str:
         return ""
 
 
+def five_point_offered(write_dsn=None) -> bool:
+    """Whether the five-point action would accept this write connection string.
+
+    What the page's status reply calls `five_point_offered`: the button is
+    shown only where pressing it can work.  The same test `_require_scratch`
+    applies, so the two cannot disagree.
+    """
+    return bool(SCRATCH_DATABASES.match(database_name(write_dsn or "")))
+
+
+def _require_scratch(write_dsn) -> None:
+    """Refuse the five-point action on any database that is not a scratch one.
+
+    This used to be checked only on the command line.  It is checked here, in
+    the action and its preview, because arming the client for "Clear queue" on
+    the experiment's own database arms every action on that client at once,
+    and scheduling five-point scans into the real queue from this page is not
+    something this version offers.
+
+    A missing connection string is left to `_connect`, which reports it as the
+    client's own fault (`internal`) rather than as a refusal.
+    """
+    if not write_dsn or five_point_offered(write_dsn):
+        return
+    raise ActionError(
+        "denied",
+        "scheduling a five-point scan is not offered on this client's database",
+        hint="scheduling from this page is offered on scratch databases only; "
+             "use the ConfigDB page to schedule runs",
+    )
+
+
 # --------------------------------------------------------------------------
 # validation
 # --------------------------------------------------------------------------
@@ -252,19 +338,27 @@ def _check_ids(config_ids) -> list:
 def _connect(write_dsn: str) -> psycopg.Connection:
     """A connection to the database that will be written.
 
-    Autocommit, because everything done through it here is a single-statement
-    read: the validation before the write and the read-back afterwards, which
-    has to see rows the scheduling call committed.  The writes themselves go
-    through `interface`, which opens its own connections.
+    Autocommit, because for the five-point action everything done through it
+    is a single-statement read: the validation before the write and the
+    read-back afterwards, which has to see rows the scheduling call committed.
+    Those writes go through `interface`, which opens its own connections.  The
+    clear writes through this connection, inside an explicit
+    `conn.transaction()`.
+
+    A `connect_timeout` is added when the connection string has none
+    (`CONNECT_TIMEOUT_S`).
     """
     if not write_dsn:
         raise ActionError("internal", "this client has no write connection string",
                           hint="start it with --allow-actions and --write-dsn")
     if not database_name(write_dsn):
         raise ActionError("internal", "the write connection string names no database")
+    extra = {}
     try:
+        if "connect_timeout" not in psycopg.conninfo.conninfo_to_dict(write_dsn):
+            extra["connect_timeout"] = CONNECT_TIMEOUT_S
         return psycopg.connect(write_dsn, autocommit=True,
-                               application_name=APPLICATION_NAME)
+                               application_name=APPLICATION_NAME, **extra)
     except psycopg.Error as exc:
         raise ActionError("db",
                           f"cannot connect to the run database: {_scrub(exc, write_dsn)}",
@@ -446,6 +540,7 @@ def preview_five_point(config_ids=None, requested_events=None, write_dsn=None) -
     flag: it is how the page shows a shifter what a button would do, on a
     client where the button itself is refused.
     """
+    _require_scratch(write_dsn)
     events = _check_events(requested_events)
     ids = _check_ids(config_ids)
 
@@ -485,6 +580,7 @@ def schedule_five_point(config_ids=None, requested_events=None, write_dsn=None) 
     which ones, so that a shifter is never told "that failed" about a queue
     that has just grown.
     """
+    _require_scratch(write_dsn)
     events = _check_events(requested_events)
     ids = _check_ids(config_ids)
 
@@ -704,6 +800,357 @@ def _runs_created(conn, run_ids: list) -> list:
 
 
 # --------------------------------------------------------------------------
+# clearing the queue
+# --------------------------------------------------------------------------
+
+# The runs a clear leaves alone while the sequencer is running, as one query.
+#
+# First the head of the queue: every PENDING run at the lowest priority among
+# the PENDING runs, ordered exactly as `interface.find_next_run_config` orders
+# them (`ORDER BY priority ASC LIMIT 1`, so a NULL priority comes last and is
+# the head only when every PENDING run has one).  Ties are all the head,
+# because the sequencer's choice among equal priorities is whatever the
+# database returns first and cannot be predicted from here; `IS NOT DISTINCT
+# FROM`, so that a NULL head priority matches the NULL rows.  A HOLDING run at
+# the same priority is not the head: the sequencer never takes one.
+#
+# Then, by identity, the run the sequencer has already picked
+# (`/Nearline/Info/Run DB PK`, written by `sequencer/config_loader.py` when it
+# loads a run), if it is still PENDING.  The priority head alone is not
+# enough: the sequencer can sit over a loaded run for minutes (an operator
+# prompt, devices moving), and if a run with a lower priority number is
+# queued in that time the head moves, while the run actually being set up is
+# still the old one.
+_PROTECTED = """
+    WITH head AS (SELECT priority FROM state.midas_run
+                  WHERE status = 'PENDING' ORDER BY priority ASC LIMIT 1)
+    SELECT mr.id FROM state.midas_run AS mr
+    WHERE mr.status = 'PENDING'
+      AND (EXISTS (SELECT 1 FROM head WHERE head.priority IS NOT DISTINCT FROM mr.priority)
+           OR mr.id = %(loaded)s)
+    ORDER BY mr.id
+"""
+
+# How many of the runs left PENDING an annotation names before it says how
+# many more there are.
+NOTE_IDS_SHOWN = 20
+
+
+def _clear_statuses(include_holding) -> tuple:
+    """The statuses a clear may cancel: `PENDING`, and `HOLDING` if asked."""
+    if include_holding is None:
+        include_holding = False
+    if not isinstance(include_holding, bool):
+        raise ActionError("usage", "include_holding must be true or false")
+    return CLEAR_WITH_HOLDING if include_holding else CLEAR_PENDING
+
+
+def _is_running(sequencer_running) -> bool:
+    """Whether to treat the sequencer as running.
+
+    Anything other than an explicit `False` counts as running.  The value
+    comes from the RPC server's ODB read or from the command line's
+    `--include-head`, never from the page; if it is missing or odd, keeping the
+    head is the side to err on -- the cost is one run left in the queue, where
+    the other way round it is a run started with the wrong settings or refused.
+    """
+    return sequencer_running is not False
+
+
+def _loaded_run(loaded_run_id):
+    """The run id the sequencer says it has loaded, or None.
+
+    It comes from the ODB through the RPC server (or `--keep-run-id` on the
+    command line).  0 is what the nearline daemon leaves there between runs,
+    and anything that is not a positive whole number is treated the same way:
+    it protects nothing extra, and the priority head is still kept.
+    """
+    if isinstance(loaded_run_id, bool) or not isinstance(loaded_run_id, int):
+        return None
+    return loaded_run_id if loaded_run_id > 0 else None
+
+
+def _check_operator(operator) -> str:
+    """The operator name, trimmed: one short line of printable text, required.
+
+    It becomes the `author` of every annotation the clear writes and goes into
+    the MIDAS message line, so it has to be somebody, and it has to be short
+    and printable.
+    """
+    if operator is None:
+        raise ActionError("usage", "clear_queue needs operator",
+                          hint="say who is clearing the queue")
+    if not isinstance(operator, str):
+        raise ActionError("usage", "operator must be a string")
+    text = operator.strip()
+    if not text:
+        raise ActionError("usage", "operator must not be empty",
+                          hint="say who is clearing the queue")
+    if len(text) > MAX_TEXT_LENGTH:
+        raise ActionError("usage",
+                          f"operator is {len(text)} characters; at most {MAX_TEXT_LENGTH}")
+    if not text.isprintable():
+        raise ActionError("usage", "operator must be one line of plain text")
+    return text
+
+
+def _check_run_ids(run_ids) -> list:
+    """The ids to cancel, as sorted distinct whole numbers.
+
+    Bounded by `MAX_CLEAR_IDS`, which is also how many runs a preview lists.
+    A repeated id is harmless here -- cancelling a run twice in one statement
+    is cancelling it once -- so repeats are folded rather than refused.  A
+    number with a fraction is refused (`_whole_number`): 2.7 is not a run id
+    anybody meant, and truncating it would cancel run 2.
+    """
+    if run_ids is None:
+        raise ActionError("usage", "clear_queue needs run_ids")
+    if isinstance(run_ids, (str, bytes)) or not isinstance(run_ids, (list, tuple)):
+        raise ActionError("usage", "run_ids must be a list of run ids")
+    if not run_ids:
+        raise ActionError("usage", "run_ids must be a non-empty list of run ids")
+    if len(run_ids) > MAX_CLEAR_IDS:
+        raise ActionError("usage",
+                          f"run_ids has {len(run_ids)} entries; at most {MAX_CLEAR_IDS} "
+                          f"may be given",
+                          hint="clear the queue in more than one go")
+    return sorted({_whole_number(item, "run_ids") for item in run_ids})
+
+
+def _set_limits(cur) -> None:
+    """Bound how long this transaction may wait, on the transaction only.
+
+    `SET LOCAL` ends with the transaction, so nothing leaks into whatever the
+    connection is used for next (it is closed straight after anyway).
+    """
+    cur.execute(f"SET LOCAL statement_timeout = '{CLEAR_STATEMENT_TIMEOUT}'")
+    cur.execute(f"SET LOCAL lock_timeout = '{CLEAR_LOCK_TIMEOUT}'")
+
+
+def _protected(cur, running: bool, loaded) -> list:
+    """The PENDING runs the sequencer may be setting up; [] when it is stopped."""
+    if not running:
+        return []
+    cur.execute(_PROTECTED, {"loaded": loaded})
+    return [int(row[0]) for row in cur.fetchall()]
+
+
+def _note(origin: str, running: bool, left: list) -> str:
+    """The annotation every run of one clear gets.
+
+    The same text on every run of the batch, so it says only what is true of
+    the batch as a whole: where it came from, and, while the sequencer was
+    running, which runs this clear left PENDING for that reason.
+    """
+    note = CLEAR_NOTE.format(origin=origin)
+    if running:
+        note += CLEAR_NOTE_RUNNING
+        if left:
+            shown = ", ".join(str(item) for item in left[:NOTE_IDS_SHOWN])
+            if len(left) > NOTE_IDS_SHOWN:
+                shown += f" and {len(left) - NOTE_IDS_SHOWN} more"
+            note += CLEAR_NOTE_LEFT.format(ids=shown)
+    return note
+
+
+def preview_clear_queue(include_holding=False, sequencer_running=True,
+                        loaded_run_id=None, write_dsn=None) -> dict:
+    """What "Clear queue" would cancel, without cancelling it.
+
+    A read: the command layer answers it without the ODB flag, so the dialog
+    can show its list on a client where the button itself would be refused.
+    It reads through the write connection all the same, because what it lists
+    has to be the queue the action would then change.
+
+    Everything is read in one read-only, repeatable-read transaction, so the
+    list, the count and the kept runs are all the same moment of the queue.
+
+    The list is in the order the queue panel shows it (priority, then id) and
+    is cut at `MAX_CLEAR_IDS`, with `capped` saying so; `total` is always the
+    full count.  `kept_head` is every run the sequencer may be about to take
+    (see `_PROTECTED`), and is empty when the sequencer is stopped.
+    """
+    statuses = _clear_statuses(include_holding)
+    running = _is_running(sequencer_running)
+    loaded = _loaded_run(loaded_run_id)
+
+    conn = _connect(write_dsn)
+    try:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                _set_limits(cur)
+                cur.execute(
+                    "SELECT id, status, priority, midas_run_number, requested_events "
+                    "FROM state.midas_run WHERE status = ANY(%s) "
+                    "ORDER BY priority ASC, id ASC LIMIT %s",
+                    (list(statuses), MAX_CLEAR_IDS + 1),
+                )
+                rows = cur.fetchall()
+                cur.execute("SELECT count(*) FROM state.midas_run WHERE status = ANY(%s)",
+                            (list(statuses),))
+                total = int(cur.fetchone()[0])
+                kept = _protected(cur, running, loaded)
+    except psycopg.Error as exc:
+        raise ActionError("db", f"cannot read the queue: {_scrub(exc, write_dsn)}",
+                          hint="the database this client writes to did not answer"
+                          ) from exc
+    finally:
+        conn.close()
+
+    capped = len(rows) > MAX_CLEAR_IDS
+    rows = rows[:MAX_CLEAR_IDS]
+    runs = [{
+        "id": int(run_id),
+        "status": status,
+        "priority": priority,
+        "midas_run_number": number,
+        "requested_events": int(events) if events is not None else None,
+    } for run_id, status, priority, number, events in rows]
+
+    kept_set = set(kept)
+    return {
+        "statuses": list(statuses),
+        "sequencer_running": running,
+        "runs": runs,
+        "will_cancel": [run["id"] for run in runs if run["id"] not in kept_set],
+        "kept_head": kept,
+        "head_reason": HEAD_REASON if kept else None,
+        "total": total,
+        "capped": capped,
+    }
+
+
+def clear_queue(run_ids=None, include_holding=False, operator=None,
+                sequencer_running=True, loaded_run_id=None, write_dsn=None,
+                origin=ORIGIN_PAGE) -> dict:
+    """Cancel the waiting runs a caller names, in one transaction.
+
+    `run_ids` are the ids the dialog showed.  Only those are touched, so a run
+    scheduled after the dialog opened stays where it is; and each of them is
+    cancelled only if it is still in one of the chosen statuses when this
+    transaction locks its row, so a run that the sequencer took, or a person
+    put on hold, in the meantime is skipped rather than overwritten.
+    `CLAIMED`, `RUNNING` and finished runs are never in the chosen statuses.
+
+    While the sequencer is running, the run it is about to take is left
+    `PENDING`.  The sequencer never claims a run: it reads the lowest-priority
+    `PENDING` run, spends a while loading that run's settings into the ODB
+    (moving the devices, perhaps waiting at an operator prompt), and only then
+    starts it -- with the run still `PENDING` the whole time.  Cancelling it in
+    that window makes the nearline daemon see an invalid state transition at
+    run start, and the run is either recorded as a new, untracked one or
+    refused.  So every run `_PROTECTED` names -- the priority head, ties
+    included, and the run the ODB says is loaded -- is kept, and those of
+    `run_ids` among them are returned in `kept_head`; once the sequencer is
+    stopped, a second clear takes them too.  The priority rule is the one the
+    runplan backend's cancel uses (beam-tuning-client
+    `beamtune/backends/runplan/rundb.py`, `cancel`).
+
+    `sequencer_running` and `loaded_run_id` are not the caller's: the RPC
+    server reads both from the ODB, and the command line takes them from
+    `--include-head` and `--keep-run-id`.  `origin` says which of the two wrote
+    the annotation, and is not reachable over RPC either.
+
+    The steps, all in one transaction:
+
+    1. lock the named rows that are still in a chosen status
+       (`SELECT ... FOR UPDATE`), so nothing else can change them from here on;
+    2. work out the protected runs once, now that the candidates are fixed;
+    3. cancel the locked candidates that are not protected, by explicit id;
+    4. read the status of the named ids that were not candidates, for `skipped`;
+    5. write one `logs.run_annotations` row per cancelled run, with the
+       operator as author.
+
+    Kept and skipped are therefore computed from the same rows the UPDATE
+    changed.  If any step fails, nothing is cancelled.  A failure while
+    committing is the one case where the outcome is not known, and it is
+    reported as such.
+    """
+    ids = _check_run_ids(run_ids)
+    statuses = _clear_statuses(include_holding)
+    author = _check_operator(operator)
+    running = _is_running(sequencer_running)
+    loaded = _loaded_run(loaded_run_id)
+
+    conn = _connect(write_dsn)
+    committing = False
+    try:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                _set_limits(cur)
+                cur.execute(
+                    "SELECT id FROM state.midas_run "
+                    "WHERE id = ANY(%s) AND status = ANY(%s) ORDER BY id FOR UPDATE",
+                    (ids, list(statuses)),
+                )
+                candidates = [int(row[0]) for row in cur.fetchall()]
+
+                protected = _protected(cur, running, loaded)
+                protected_set = set(protected)
+                to_cancel = [run_id for run_id in candidates if run_id not in protected_set]
+                kept = [run_id for run_id in candidates if run_id in protected_set]
+
+                cancelled = []
+                if to_cancel:
+                    cur.execute(
+                        "UPDATE state.midas_run SET status = 'CANCELLED' "
+                        "WHERE id = ANY(%s) RETURNING id",
+                        (to_cancel,),
+                    )
+                    cancelled = sorted(int(row[0]) for row in cur.fetchall())
+
+                others = [run_id for run_id in ids if run_id not in set(candidates)]
+                found = {}
+                if others:
+                    cur.execute("SELECT id, status FROM state.midas_run WHERE id = ANY(%s)",
+                                (others,))
+                    found = {int(run_id): status for run_id, status in cur.fetchall()}
+                skipped = [{"id": run_id, "status": found.get(run_id)} for run_id in others]
+
+                if cancelled:
+                    note = _note(origin, running, protected)
+                    cur.executemany(
+                        "INSERT INTO logs.run_annotations (run_id, author, note) "
+                        "VALUES (%s, %s, %s)",
+                        [(run_id, author, note) for run_id in cancelled],
+                    )
+            # Leaving the block commits.  From here on an error means the
+            # database may or may not have kept the change.
+            committing = True
+    except psycopg.Error as exc:
+        if committing:
+            raise ActionError(
+                "internal",
+                f"the clear was sent but its commit failed, so whether the runs were "
+                f"cancelled is not known: {_scrub(exc, write_dsn)}",
+                hint="look at the queue before clearing again",
+            ) from exc
+        if isinstance(exc, psycopg.errors.LockNotAvailable):
+            raise ActionError("db", "the queue is busy: a run being cleared is locked by "
+                                    "another client; nothing was cancelled",
+                              hint="try again in a moment") from exc
+        if isinstance(exc, psycopg.errors.QueryCanceled):
+            raise ActionError("db", "clearing the queue took too long and was rolled "
+                                    "back; nothing was cancelled",
+                              hint="try again in a moment") from exc
+        raise ActionError("db",
+                          f"the run database refused the clear, nothing was cancelled: "
+                          f"{_scrub(exc, write_dsn)}") from exc
+    finally:
+        conn.close()
+
+    return {
+        "cancelled": cancelled,
+        "kept_head": kept,
+        "skipped": skipped,
+        "statuses": list(statuses),
+        "sequencer_running": running,
+        "operator": author,
+    }
+
+
+# --------------------------------------------------------------------------
 # the manual path
 # --------------------------------------------------------------------------
 
@@ -726,13 +1173,161 @@ def _print_result(result: dict) -> None:
               f"{run['status']}  x = {run['xpos']}  y = {run['ypos']}")
 
 
-def main(argv=None) -> int:
-    """Schedule a five-point scan from a shell.
+class _Bound:
+    """This module with a write connection string bound to it.
 
-    The same code the custom page reaches over RPC, so a scan can be queued,
-    and a refusal understood, with nothing running but a terminal.  Two things
-    stand in the way of doing it by accident: the database has to be a scratch
-    one, and `--confirm` has to be given.
+    What `rpc_server.ActionAdapter` is, for the command line: that one lives
+    beside the MIDAS client and imports `midas`, which a shell on a machine
+    without MIDAS does not have.  Only `origin` differs, so that the
+    annotations say where a clear came from.
+    """
+
+    def __init__(self, write_dsn: str):
+        self.write_dsn = write_dsn
+
+    def __getattr__(self, name):
+        import functools
+
+        function = globals().get(name)
+        if not callable(function) or name.startswith("_"):
+            raise AttributeError(name)
+        if name == "clear_queue":
+            return functools.partial(function, write_dsn=self.write_dsn, origin=ORIGIN_CLI)
+        return functools.partial(function, write_dsn=self.write_dsn)
+
+
+def _print_clear_preview(data: dict) -> None:
+    print(f"statuses cleared: {', '.join(data['statuses'])}; sequencer treated as "
+          f"{'running' if data['sequencer_running'] else 'stopped'}")
+    kept = set(data["kept_head"])
+    for run in data["runs"]:
+        what = "keep  " if run["id"] in kept else "cancel"
+        print(f"  {what} run id {run['id']:6d}  priority {run['priority']}  "
+              f"{run['status']}  {run['requested_events']} events")
+    print(f"would cancel {len(data['will_cancel'])} of {data['total']} run(s)")
+    if data["capped"]:
+        print(f"only the first {len(data['runs'])} are listed and would be cleared; "
+              f"run this again afterwards for the rest")
+    if data["head_reason"]:
+        print(data["head_reason"])
+
+
+def _print_clear_result(data: dict) -> None:
+    cancelled = data["cancelled"]
+    print(f"cancelled {len(cancelled)} run(s) as {data['operator']}: "
+          f"{', '.join(str(item) for item in cancelled) or 'none'}")
+    if data["kept_head"]:
+        print(f"left PENDING because the sequencer was treated as running: "
+              f"{', '.join(str(item) for item in data['kept_head'])} "
+              f"(add --include-head once it is stopped)")
+    for entry in data["skipped"]:
+        print(f"  skipped run id {entry['id']}: "
+              f"{entry['status'] or 'no such run'} (changed since the preview)")
+
+
+# What `clear-queue` exits with when it only previewed.  Not 2: argparse uses 2
+# for a command line it could not parse, and a script has to be able to tell
+# "nothing was written because you did not say --yes" from "that was not a
+# valid command".
+PREVIEW_EXIT = 3
+
+
+def _clear_queue_cli(args) -> int:
+    """`clear-queue`: the same two commands the page sends, through the same layer.
+
+    Both go through `commands.dispatch_envelope`, as they do from the RPC
+    server, so `--json` prints exactly what the page would receive -- the
+    argument checks included.  The sequencer state is the one thing that
+    differs: there may be no MIDAS here to ask, so it is taken from
+    `--include-head` (running unless that is given) and `--keep-run-id` (the
+    run the sequencer has loaded, if you know it) instead.
+
+    Without `--yes` this is the preview and nothing is written (exit
+    `PREVIEW_EXIT`).  With it, what is cleared is either exactly the ids given
+    with `--run-id` -- the list a preview showed, which is what pressing OK in
+    the dialog does -- or, without `--run-id`, the `will_cancel` list of a
+    fresh preview taken at that moment.
+    """
+    import sys
+
+    from pioneer.rundb import commands
+
+    bound = _Bound(args.write_dsn)
+    extra = {"sequencer_running": not args.include_head}
+    if args.keep_run_id is not None:
+        extra["loaded_run_id"] = args.keep_run_id
+
+    def run(cmd, payload):
+        return commands.dispatch_envelope(None, bound, cmd, payload, None,
+                                          actions_allowed=True, server_args=extra)
+
+    def failed(envelope) -> int:
+        error = envelope["error"]
+        print(f"error ({error['kind']}): {error['message']}", file=sys.stderr)
+        if error.get("hint"):
+            print(error["hint"], file=sys.stderr)
+        return 1
+
+    # The operator is checked before anything is read, so that a preview run
+    # without one says so straight away rather than after listing the queue.
+    try:
+        _check_operator(args.operator)
+    except ActionError as exc:
+        envelope = commands.error_envelope("clear_queue", exc.kind, exc.message, exc.hint)
+        if args.json:
+            print(commands.encode_within(envelope, None))
+        return failed(envelope)
+
+    if args.yes and args.run_ids:
+        run_ids = args.run_ids
+    else:
+        envelope, text = run("preview_clear_queue",
+                             {"include_holding": args.include_holding})
+        if not envelope.get("ok"):
+            if args.json:
+                print(text)
+            return failed(envelope)
+        preview = envelope["data"]
+
+        if not args.yes:
+            if args.json:
+                print(text)
+            else:
+                _print_clear_preview(preview)
+            print("nothing was written; add --yes to cancel these runs (and --run-id "
+                  "for each id to clear exactly this list)", file=sys.stderr)
+            return PREVIEW_EXIT
+
+        run_ids = preview["will_cancel"]
+        if not run_ids:
+            if args.json:
+                print(text)
+            else:
+                print("the queue holds nothing that would be cancelled")
+            return 0
+
+    envelope, text = run("clear_queue", {"run_ids": run_ids,
+                                         "include_holding": args.include_holding,
+                                         "operator": args.operator})
+    if args.json:
+        print(text)
+    if not envelope.get("ok"):
+        return failed(envelope)
+    if not args.json:
+        _print_clear_result(envelope["data"])
+    return 0
+
+
+def main(argv=None) -> int:
+    """Write to the run database from a shell: a five-point scan, or a clear.
+
+    The same code the custom page reaches over RPC, so either can be done, and
+    a refusal understood, with nothing running but a terminal.
+
+    `five-point` has two things standing in the way of doing it by accident:
+    the database has to be a scratch one, and `--confirm` has to be given.
+    `clear-queue` is meant for the experiment's own database and previews
+    unless `--yes` is given (exit `PREVIEW_EXIT`, 3).
     """
     import argparse
     import sys
@@ -755,7 +1350,39 @@ def main(argv=None) -> int:
                       help="libpq connection string of the database to write")
     five.add_argument("--confirm", action="store_true",
                       help="actually create the runs; without it nothing is written")
+
+    clear = sub.add_parser(
+        "clear-queue",
+        help="cancel the waiting runs, as the RunDB page's Clear queue does")
+    clear.add_argument("--include-holding", action="store_true",
+                       help="cancel HOLDING runs too, not only PENDING ones")
+    clear.add_argument("--include-head", action="store_true",
+                       help="treat the sequencer as stopped, so the run it would "
+                            "take next is cancelled too; without it that run is kept, "
+                            "since this command cannot see MIDAS")
+    clear.add_argument("--keep-run-id", type=int, default=None, metavar="ID",
+                       help="the run the sequencer has loaded (/Nearline/Info/Run DB "
+                            "PK), kept as well as the head of the queue; not with "
+                            "--include-head")
+    clear.add_argument("--run-id", type=int, action="append", default=[],
+                       dest="run_ids", metavar="ID",
+                       help="with --yes, clear exactly these ids (repeat for each; the "
+                            "list a preview showed) instead of a fresh preview's list")
+    clear.add_argument("--operator", required=True,
+                       help="who is clearing the queue; the author of the annotations")
+    clear.add_argument("--write-dsn", required=True,
+                       help="libpq connection string of the database to write")
+    clear.add_argument("--yes", action="store_true",
+                       help="actually cancel the runs; without it nothing is written")
+    clear.add_argument("--json", action="store_true",
+                       help="print the reply envelope the page would get")
     args = parser.parse_args(argv)
+
+    if args.action == "clear-queue":
+        if args.include_head and args.keep_run_id is not None:
+            parser.error("--keep-run-id keeps a run while the sequencer runs; "
+                         "--include-head says it is stopped")
+        return _clear_queue_cli(args)
 
     name = database_name(args.write_dsn)
     if not SCRATCH_DATABASES.match(name):

@@ -18,9 +18,9 @@
         serves a /Custom asset under its *key name*: the ODB keys are
         /Custom/rundb.css!, /Custom/rundb-rpc.js! and /Custom/rundb.js!, each
         pointing at the file wherever it actually lives. See custom/README.md. -->
-   <link rel="stylesheet" href="rundb.css?v=2">
-   <script src="rundb-rpc.js?v=2"></script>
-   <script src="rundb.js?v=2"></script>
+   <link rel="stylesheet" href="rundb.css?v=3">
+   <script src="rundb-rpc.js?v=3"></script>
+   <script src="rundb.js?v=3"></script>
 </head>
 
 <body class="mcss" onload="mhttpd_init('RunDB'); RUNDB.init();">
@@ -38,8 +38,14 @@
    <div id="rundb-alerts"></div>
 
    <div class="rundb-panel">
-      <h2 class="rundb-h">Queue <span class="rundb-sub">runs waiting to be taken, lowest priority first</span></h2>
+      <!-- rundb-queue-tools holds the Clear queue button, drawn only on a client
+           armed for actions while the queue has a PENDING or HOLDING run. The
+           result of a clear stays under the table, outside rundb-queue, which
+           every poll rewrites. -->
+      <h2 class="rundb-h">Queue <span class="rundb-sub">runs waiting to be taken, lowest priority first</span>
+         <span id="rundb-queue-tools" class="rundb-htools"></span></h2>
       <div id="rundb-queue" class="rundb-body"></div>
+      <div id="rundb-clear-result"></div>
    </div>
 
    <div class="rundb-panel">
@@ -62,5 +68,10 @@
    <div class="rundb-footnote" id="rundb-footer"></div>
 
 </div>
+
+<!-- The Clear queue dialog. Outside #mmain on purpose: midas.css gives #mmain
+     position:relative and z-index:0, which makes it a stacking context, and a
+     fixed overlay inside it would sit under the MIDAS header and side menu. -->
+<div id="rundb-clear-dialog"></div>
 </body>
 </html>

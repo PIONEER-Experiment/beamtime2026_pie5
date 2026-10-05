@@ -371,6 +371,51 @@ def test_the_command_line_refuses_a_database_that_is_not_scratch(write_db, write
     assert counts(write_db) == before
 
 
+# A connection string for a database that is not a scratch one.  Never
+# connected to: the refusal comes before any connection is made, which is what
+# these tests check (example.invalid cannot resolve anyway).
+NOT_SCRATCH = "host=example.invalid dbname=pioneer user=shifter"
+
+
+def test_the_five_point_action_itself_refuses_a_database_that_is_not_scratch(monkeypatch):
+    """Not only the command line: the action and its preview, so that arming
+    the client for Clear queue on the experiment's database does not arm this."""
+    def no_connecting(*args, **kwargs):
+        raise AssertionError("the refusal has to come before any connection")
+
+    monkeypatch.setattr(actions.psycopg, "connect", no_connecting)
+    for function in (actions.schedule_five_point, actions.preview_five_point):
+        with pytest.raises(actions.ActionError) as caught:
+            function(config_ids=[1], write_dsn=NOT_SCRATCH)
+        assert caught.value.kind == "denied"
+        assert "scratch databases only" in caught.value.hint
+        assert "ConfigDB" in caught.value.hint
+
+    for cmd in ("schedule_five_point", "preview_five_point"):
+        envelope = json.loads(commands.dispatch(
+            None, Armed(actions, NOT_SCRATCH), cmd, {"config_ids": [1]},
+            actions_allowed=True))
+        assert envelope["error"]["kind"] == "denied"
+        # What the page is shown does not name the database either.
+        assert "pioneer" not in envelope["error"]["message"]
+
+
+def test_five_point_is_offered_only_on_a_scratch_database():
+    assert actions.five_point_offered(NOT_SCRATCH) is False
+    assert actions.five_point_offered(None) is False
+    assert actions.five_point_offered("host=x dbname=pioneer_rundb_actions") is True
+    assert actions.five_point_offered("host=x dbname=pioneer_rundb_scratch") is True
+
+    class StatusView:
+        def status(self, **kwargs):
+            return kwargs
+
+    for dsn, expected in ((NOT_SCRATCH, False), ("dbname=pioneer_rundb_test", True)):
+        envelope = json.loads(commands.dispatch(StatusView(), Armed(actions, dsn), "status"))
+        assert envelope["data"]["five_point_offered"] is expected
+        assert envelope["data"]["actions_built"] is True
+
+
 def test_the_command_line_writes_nothing_without_confirm(write_db, write_seed, capsys):
     before = counts(write_db)
     code = actions.main(["five-point", "--config-id", str(write_seed["degrader_ids"][0]),

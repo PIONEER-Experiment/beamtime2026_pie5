@@ -12,9 +12,13 @@
 //           each into a python process.
 //   log     /RunDBView/Runlog refresh seconds (30 s): runlog + sequences.
 //
-// Nothing here writes anything, anywhere. The page reads the run database and
-// the ODB; it does not start runs, does not change the queue, and the action
-// panel is inert in this version (see actionPanelHtml).
+// The page reads the run database and the ODB. It writes to the run database
+// only through a client armed for actions (--allow-actions and /RunDBView/Allow
+// actions), and then only two things: the Clear queue dialog sets PENDING (and,
+// if asked, HOLDING) runs to CANCELLED, and the action panel schedules a
+// five-point scan where the client offers it (scratch databases only). It never
+// starts runs and never touches the sequencer. See clearDialogHtml and
+// actionPanelHtml.
 //
 // The HTML builders are pure functions of the data: they take an envelope's
 // `data` and give back a string. That is what makes them testable under
@@ -108,6 +112,14 @@ const state = {
       preview: {},           // preview_five_point: {key, pending, data, error}
       busy: false,           // a schedule call is in flight
       result: null           // the last reply, success or refusal
+   },
+   clear: {                  // the Clear queue dialog; only ever offered when armed
+      open: false,           // the dialog is on screen
+      includeHolding: false, // "also cancel HOLDING runs"; off at every opening (D1)
+      operator: "",          // kept across openings, so a shifter types it once
+      preview: {},           // preview_clear_queue: {key, pending, data, error}
+      busy: false,           // a clear_queue call is in flight
+      result: null           // the last clear_queue reply, shown under the queue
    },
    expandedId: null,         // the run whose detail row is open
    detail: null,             // data of the last good `run {id}`
@@ -364,7 +376,7 @@ function staleHtml(st) {
    if (st.clientError) {
       out.push('<div class="rundb-alert red">' +
          "<b>The " + esc(R.getClientName()) + " client is not answering.</b> " + when +
-         " Nothing is wrong with the run itself &mdash; this page only reads. " +
+         " Nothing is wrong with the run itself &mdash; the client is only how this page reads the run database. " +
          "Start the client again from the Programs page; the page will pick it up on its own, with no reload." +
          '<div class="rundb-detailtext">' + esc(st.clientError.message || "") + "</div></div>");
    }
@@ -760,7 +772,17 @@ function actionPanelHtml(statusData, ui) {
    const client = (statusData && statusData.client) || null;
    if (!client || !client.actions_allowed) {
       return '<div class="rundb-note">Actions are disabled on this client. ' +
-         "This page reads the run database; it does not schedule runs, start runs or touch the sequencer.</div>";
+         "This page reads the run database; it does not schedule runs, clear the queue, start runs " +
+         "or touch the sequencer.</div>";
+   }
+
+   // The client offers the five-point scan on scratch databases only
+   // (actions.py). An older client does not send the flag and offered it
+   // everywhere, so only an explicit false takes the form away.
+   if (client.five_point_offered === false) {
+      return armedBannerHtml(false) +
+         '<div class="rundb-note">Scheduling a five-point scan from this page is offered on scratch databases only; ' +
+         "use the ConfigDB page.</div>";
    }
 
    const view = ui || {};
@@ -804,11 +826,7 @@ function actionPanelHtml(statusData, ui) {
    const ready = actionReady(selection, events, view.preview) && !busy;
    const sentence = actionSummarySentence(selection, events, view.preview);
 
-   return '<div class="rundb-alert yellow"><b>This client is armed for actions.</b> ' +
-      "It was started with <code>--allow-actions</code> and <code>/RunDBView/Allow actions</code> is true, " +
-      "so the button below really does write to the run database. " +
-      "The same thing on the command line: " +
-      "<code>python -m pioneer.rundb.actions five-point --config-id ID --events N --write-dsn &hellip; --confirm</code></div>" +
+   return armedBannerHtml(true) +
       '<form class="rundb-actionform" onsubmit="return false;">' +
       pickers.join("") +
       '<label>other config id <input type="number" min="1" step="1" id="rundb-act-extra"' +
@@ -823,14 +841,27 @@ function actionPanelHtml(statusData, ui) {
       '<div id="rundb-act-result">' + actionResultHtml(view.result) + "</div>";
 }
 
-// Kinds that mean the client considered the request and turned it down before
-// writing anything. Anything else -- no answer, an answer we could not read, an
-// answer that did not fit -- says nothing about what happened at the far end.
-const REFUSED_KINDS = { usage: true, denied: true, db: true, unknown_command: true };
-
-function wasRefused(kind) {
-   return Object.prototype.hasOwnProperty.call(REFUSED_KINDS, kind);
+/**
+ * The yellow line that says this client writes. `fivePoint` says whether the
+ * five-point form is under it; Clear queue is always offered on an armed client.
+ */
+function armedBannerHtml(fivePoint) {
+   return '<div class="rundb-alert yellow"><b>This client is armed for actions.</b> ' +
+      "It was started with <code>--allow-actions</code> and <code>/RunDBView/Allow actions</code> is true, " +
+      "so the <b>Clear queue&hellip;</b> button in the Queue panel" +
+      (fivePoint ? " and the button below really do" : " really does") + " write to the run database. " +
+      "The same thing on the command line: " +
+      "<code>python -m pioneer.rundb.actions clear-queue --operator NAME --write-dsn &hellip; --yes</code>" +
+      (fivePoint
+         ? " and <code>python -m pioneer.rundb.actions five-point --config-id ID --events N --write-dsn &hellip; --confirm</code>"
+         : "") +
+      ".</div>";
 }
+
+// Which error kinds mean nothing was written lives in rundb-rpc.js, beside the
+// Clear queue sentences that use it too.
+const REFUSED_KINDS = R.REFUSED_KINDS;
+const wasRefused = R.wasRefused;
 
 /** What came back from schedule_five_point: what exists now, or why nothing does. */
 function actionResultHtml(env) {
@@ -894,6 +925,319 @@ function actionResultHtml(env) {
 function position(run) {
    if (!run || run.xpos === null || run.xpos === undefined) return NO;
    return "x=" + run.xpos + " y=" + (run.ypos === null || run.ypos === undefined ? "?" : run.ypos);
+}
+
+// ---------------------------------------------------------------------------
+// Clear queue
+// ---------------------------------------------------------------------------
+//
+// A button in the Queue header, a page-local dialog, and one line left under
+// the queue afterwards. Offered only on a client armed for actions, like the
+// action panel, and only while the queue has a PENDING or HOLDING run.
+//
+// The dialog asks the client first (`preview_clear_queue`, a read) and lists
+// exactly what it said. OK sends those ids and nothing else (`clear_queue`), so
+// a run scheduled after the dialog opened is never cancelled; the client checks
+// every id again under the row lock and reports any whose status moved on.
+//
+// While the sequencer is running, any run it may be about to take stays
+// PENDING: the sequencer loads a run's configuration into the ODB, moving
+// devices, while that run is still PENDING, and cancelling it then gives an
+// untracked run or a refused start. The client decides which runs those are
+// (not only the lowest priority); the dialog lists them as kept, does not send
+// them, and says so in one line.
+//
+// Not MIDAS dlgConfirm: that takes one string, and this needs a table, a
+// checkbox and a text field.
+
+/** The button in the Queue header, or "" when there is nothing it could do. */
+function clearButtonHtml(statusData, queue, ui) {
+   const client = (statusData && statusData.client) || null;
+   if (!R.clearQueueOffered(client, queue)) return "";
+   const view = ui || {};
+   const busy = Boolean(view.busy || view.open);
+   return '<button type="button" id="rundb-clear-open" class="rundb-hbutton"' + (busy ? " disabled" : "") +
+      ' title="set PENDING (and, if asked, HOLDING) runs to CANCELLED; the dialog lists them first">' +
+      (view.busy ? "clearing&hellip;" : "Clear queue&hellip;") + "</button>";
+}
+
+/** Is the dialog's OK button live? */
+function clearReady(ui) {
+   const view = ui || {};
+   return Boolean(view.open) && !view.busy && !R.clearQueueBlocked(view.preview, view.operator);
+}
+
+/**
+ * The whole dialog: the parts a shifter types into, and the body the preview
+ * fills. Drawn once when the dialog opens; after that only the body and the
+ * buttons are redrawn (clearDialogBodyHtml, updateClearControls), so a preview
+ * coming back cannot eat a name half typed into Operator.
+ */
+function clearDialogHtml(ui) {
+   const view = ui || {};
+   if (!view.open) return "";
+   const busy = Boolean(view.busy);
+   return '<div class="rundb-modal-back" id="rundb-clear-back">' +
+      '<div class="rundb-modal" role="dialog" aria-modal="true" aria-labelledby="rundb-clear-title">' +
+      '<div class="rundb-modal-h" id="rundb-clear-title">Clear the queue</div>' +
+      '<div class="rundb-modal-text">Sets the runs listed below to <b>CANCELLED</b> in the run database, ' +
+      "writes an annotation beside each one with your name, and puts one line in the MIDAS messages. " +
+      "Nothing is started or stopped.</div>" +
+      '<label class="rundb-modal-check"><input type="checkbox" id="rundb-clear-holding"' +
+      (view.includeHolding ? " checked" : "") + (busy ? " disabled" : "") + "> also cancel HOLDING runs</label>" +
+      '<div id="rundb-clear-body">' + clearDialogBodyHtml(view) + "</div>" +
+      '<label class="rundb-modal-field">Operator <input type="text" id="rundb-clear-operator" maxlength="' +
+      R.OPERATOR_MAX + '" autocomplete="off" spellcheck="false" placeholder="your name"' +
+      ' value="' + esc(view.operator || "") + '"' + (busy ? " disabled" : "") + "></label>" +
+      '<div class="rundb-modal-buttons">' +
+      '<button type="button" id="rundb-clear-go"' + (clearReady(view) ? "" : " disabled") + ">" +
+      clearGoLabel(view) + "</button>" +
+      '<button type="button" id="rundb-clear-close"' + (busy ? " disabled" : "") + ">Close</button>" +
+      "</div>" +
+      '<div class="rundb-modal-why" id="rundb-clear-why">' + esc(clearWhy(view)) + "</div>" +
+      "</div></div>";
+}
+
+function clearGoLabel(view) {
+   if (view.busy) return "cancelling&hellip;";
+   const data = view.preview && view.preview.data;
+   return esc(R.clearQueueButtonLabel(data ? (data.will_cancel || []).length : 0));
+}
+
+function clearWhy(view) {
+   if (view.busy) return "Waiting for the client to answer…";
+   return R.clearQueueBlocked(view.preview, view.operator);
+}
+
+/** What the preview said: loading, refused, or the runs and what happens to each. */
+function clearDialogBodyHtml(ui) {
+   const view = ui || {};
+   const preview = view.preview || {};
+   if (preview.pending) {
+      return '<div class="rundb-note">Asking the client which runs this would cancel&hellip;</div>';
+   }
+   if (preview.error) {
+      const err = preview.error;
+      let text;
+      if (err.kind === "denied") text = "This client is not armed for actions, so it will not cancel anything.";
+      else if (err.kind === "unknown_command") text = "This client is too old to clear the queue. Restart RunDBView from the current checkout.";
+      else text = "The client could not list the runs: " + (err.message || err.kind || "no detail given") + ".";
+      return '<div class="rundb-alert red">' + esc(text) +
+         (err.hint ? '<div class="rundb-detailtext">' + esc(err.hint) + "</div>" : "") + "</div>";
+   }
+   const data = preview.data;
+   if (!data) return '<div class="rundb-note">Asking the client which runs this would cancel&hellip;</div>';
+
+   const out = ['<div class="rundb-modal-summary">' + esc(R.clearQueueSummary(data)) + "</div>"];
+   const kept = R.clearQueueKeptSentence(data);
+   if (kept) {
+      // head_reason is the client's own sentence; it says the same thing at
+      // more length, so it is the tooltip here and on the kept row.
+      out.push('<div class="rundb-note yellow"' + (data.head_reason ? ' title="' + esc(data.head_reason) + '"' : "") +
+         ">" + esc(kept) + "</div>");
+   }
+   const capped = R.clearQueueCappedSentence(data);
+   if (capped) out.push('<div class="rundb-note yellow">' + esc(capped) + "</div>");
+
+   const will = (data.will_cancel || []).map(Number);
+   const keep = (data.kept_head || []).map(Number);
+   const runs = data.runs || [];
+   if (runs.length) {
+      const rows = runs.map(function (run) {
+         const id = Number(run.id);
+         let after;
+         if (keep.indexOf(id) >= 0) {
+            after = '<td class="rundb-kept" title="' + esc(data.head_reason || "the sequencer may be about to take this run") +
+               '">kept &mdash; the sequencer may be about to take it</td>';
+         } else if (will.indexOf(id) >= 0) {
+            after = "<td>" + statusInline("CANCELLED") + "</td>";
+         } else {
+            after = '<td><span class="rundb-none">not touched</span></td>';
+         }
+         return '<tr' + (keep.indexOf(id) >= 0 ? ' class="rundb-next"' : "") + ">" +
+            "<td>" + esc(run.id) + "</td>" +
+            "<td>" + (run.midas_run_number === null || run.midas_run_number === undefined
+               ? '<span class="rundb-none">not taken</span>' : esc(run.midas_run_number)) + "</td>" +
+            statusCellHtml(run.status) +
+            "<td>" + esc(run.priority === null || run.priority === undefined ? NO : run.priority) + "</td>" +
+            '<td class="rundb-num">' + esc(R.formatCount(run.requested_events)) + "</td>" +
+            after + "</tr>";
+      });
+      out.push('<div class="rundb-modal-table"><table class="mtable rundb-table"><tr>' +
+         "<th>DB id</th><th>run</th><th>status now</th><th>priority</th><th>requested events</th><th>after OK</th></tr>" +
+         rows.join("") + "</table></div>");
+   }
+   return out.join("");
+}
+
+/** The line left under the queue by the last clear_queue reply. */
+function clearResultHtml(env) {
+   const r = R.clearQueueResult(env);
+   if (!r) return "";
+   const klass = r.level === "ok" ? "yellow" : "red";
+   return '<div class="rundb-alert ' + klass + '"><b>' + esc(r.head) + "</b> " +
+      r.lines.map(function (line, i) {
+         return i === 0 && (r.level !== "unknown" || r.answered) ? esc(line)
+            : '<div class="rundb-detailtext">' + esc(line) + "</div>";
+      }).join(" ") +
+      ' <button type="button" id="rundb-clear-dismiss" class="rundb-hbutton">Dismiss</button></div>';
+}
+
+function renderClearButton() {
+   put("rundb-queue-tools", clearButtonHtml(state.status, state.queue, state.clear));
+   const open = el("rundb-clear-open");
+   if (open) open.onclick = openClearDialog;
+}
+
+function renderClearResult() {
+   put("rundb-clear-result", clearResultHtml(state.clear.result));
+   const dismiss = el("rundb-clear-dismiss");
+   if (dismiss) dismiss.onclick = function () { state.clear.result = null; renderClearResult(); };
+}
+
+/** Draw the whole dialog (or take it away) and hook it up. */
+function renderClearDialog() {
+   put("rundb-clear-dialog", clearDialogHtml(state.clear));
+   if (!state.clear.open) return;
+
+   const back = el("rundb-clear-back");
+   if (back) back.onclick = function (ev) { if (ev && ev.target === back) closeClearDialog(); };
+
+   const holding = el("rundb-clear-holding");
+   if (holding) holding.onchange = function () { setClearHolding(holding.checked); };
+
+   const operator = el("rundb-clear-operator");
+   if (operator) {
+      // Only the button and the line under it move while somebody types.
+      operator.oninput = function () { state.clear.operator = operator.value; updateClearControls(); };
+      operator.onkeydown = function (ev) {
+         if (ev && ev.key === "Enter" && clearReady(state.clear)) sendClear();
+      };
+      if (operator.focus) operator.focus();
+   }
+
+   const go = el("rundb-clear-go");
+   if (go) go.onclick = sendClear;
+   const close = el("rundb-clear-close");
+   if (close) close.onclick = closeClearDialog;
+}
+
+/** The preview came back: redraw the body and the buttons, not the fields. */
+function renderClearBody() {
+   if (!state.clear.open) return;
+   put("rundb-clear-body", clearDialogBodyHtml(state.clear));
+   updateClearControls();
+}
+
+function updateClearControls() {
+   const view = state.clear;
+   const go = el("rundb-clear-go");
+   if (go) { go.disabled = !clearReady(view); go.innerHTML = clearGoLabel(view); }
+   const why = el("rundb-clear-why");
+   if (why) why.textContent = clearWhy(view);
+   ["rundb-clear-holding", "rundb-clear-operator", "rundb-clear-close"].forEach(function (id) {
+      const node = el(id);
+      if (node) node.disabled = Boolean(view.busy);
+   });
+}
+
+function clientArmed() {
+   return Boolean(state.status && state.status.client && state.status.client.actions_allowed);
+}
+
+/** Open the dialog and ask the client what it would cancel. */
+function openClearDialog() {
+   if (state.clear.busy || state.clear.open) return;
+   if (!clientArmed()) return;          // the button is not drawn then; a stale one does nothing
+   state.clear.open = true;
+   state.clear.includeHolding = false;  // HOLDING is opted into each time (D1)
+   state.clear.preview = {};
+   renderClearDialog();
+   renderClearButton();
+   runClearPreview();
+}
+
+/** Close it. Not while clear_queue is in flight: its answer is still to come. */
+function closeClearDialog() {
+   if (state.clear.busy || !state.clear.open) return;
+   state.clear.open = false;
+   state.clear.preview = {};            // a late preview reply is dropped by its key
+   renderClearDialog();
+   renderClearButton();
+}
+
+function setClearHolding(flag) {
+   if (state.clear.busy) return;
+   state.clear.includeHolding = Boolean(flag);
+   runClearPreview();
+}
+
+// Every preview gets its own key, so the answer to an earlier one -- the box
+// was ticked again before it came back, or the dialog was closed and opened --
+// can never be the list OK sends.
+let clearPreviewSeq = 0;
+
+async function runClearPreview() {
+   const includeHolding = Boolean(state.clear.includeHolding);
+   const key = (++clearPreviewSeq) + (includeHolding ? "h" : "p");
+   state.clear.preview = { key: key, pending: true };
+   renderClearBody();
+   const env = await R.call("preview_clear_queue", { include_holding: includeHolding }, maxBytes());
+   if (!state.clear.open || state.clear.preview.key !== key) return;    // moved on
+   if (env.ok && env.data) state.clear.preview = { key: key, data: env.data, includeHolding: includeHolding };
+   else state.clear.preview = { key: key, error: env.error || { kind: "internal", message: "no reply" } };
+   renderClearBody();
+}
+
+/** Whether a Clear queue preview is in flight. For the tests. */
+function clearPreviewKey() { return state.clear.preview && state.clear.preview.key; }
+
+/**
+ * OK: send exactly what the dialog lists.
+ *
+ * The gate is checked again against the last status reply, as the five-point
+ * panel does, so a client disarmed since the dialog opened is not asked.
+ */
+async function sendClear() {
+   if (!clearReady(state.clear)) return;           // includes "already sending"
+   const preview = state.clear.preview;
+   if (!clientArmed()) {
+      state.clear.result = { ok: false, error: { kind: "denied",
+         message: "actions were switched off on this client since the dialog was opened" } };
+      state.clear.open = false;
+      renderClearDialog();
+      renderClearResult();
+      renderClearButton();
+      return;
+   }
+   const args = R.clearQueueArgs(preview.data, preview.includeHolding, state.clear.operator);
+
+   state.clear.busy = true;
+   state.clear.result = null;
+   updateClearControls();
+   renderClearResult();
+   renderClearButton();
+
+   const env = await R.call("clear_queue", args, maxBytes());
+   note(env, Boolean(env.ok));
+   state.clear.busy = false;
+   state.clear.result = env;
+   state.clear.open = false;
+   state.clear.preview = {};
+   renderClearDialog();
+   renderClearResult();
+   renderClearButton();
+   renderAlerts();
+
+   // Read the queue again now, whatever came back: after a write it has
+   // changed, after no answer it is the only way to know, and after a refusal
+   // it costs one read.
+   if (slowPoller) slowPoller.kick();
+}
+
+/** Esc closes the dialog, as the Close button does. */
+function onClearKey(ev) {
+   if (ev && (ev.key === "Escape" || ev.key === "Esc") && state.clear.open) closeClearDialog();
 }
 
 // ---------------------------------------------------------------------------
@@ -1019,7 +1363,10 @@ function renderAlerts() {
    }
 }
 
-function renderQueue() { put("rundb-queue", queueHtml(state.queue)); }
+function renderQueue() {
+   put("rundb-queue", queueHtml(state.queue));
+   renderClearButton();      // it depends on the queue and on the status gate
+}
 function renderSequences() { put("rundb-sequences", sequencesHtml(state.sequences)); }
 
 function sortedRuns() {
@@ -1074,13 +1421,15 @@ function renderActions() {
  * wrong thing. So the polls redraw it only when this changes.
  */
 function actionSignature() {
-   const allowed = Boolean(state.status && state.status.client && state.status.client.actions_allowed);
+   const client = (state.status && state.status.client) || {};
+   const allowed = Boolean(client.actions_allowed);
+   const fivePoint = client.five_point_offered === false ? "nofp" : "fp";
    const ids = configOptions([queueRuns(), sortedRuns()]).map(function (group) {
       return group.config_type + ":" + group.entries.map(function (e) {
          return e.config_id + (e.do_not_use ? "x" : "");
       }).join(",");
    }).join("|");
-   return (allowed ? "on" : "off") + " " + ids;
+   return (allowed ? "on" : "off") + " " + fivePoint + " " + ids;
 }
 
 /** The poll's version: leave a panel somebody is using alone. */
@@ -1324,8 +1673,10 @@ async function schedule() {
 function renderFooter() {
    const cfg = state.config;
    put("rundb-footer",
-      "Read-only view of the 2026 run database" + (cfg["Database"] ? " (" + esc(cfg["Database"]) + ")" : "") +
-      ", through the " + esc(R.getClientName()) + " MIDAS client. " +
+      (clientArmed() ? "View of the 2026 run database" : "Read-only view of the 2026 run database") +
+      (cfg["Database"] ? " (" + esc(cfg["Database"]) + ")" : "") +
+      ", through the " + esc(R.getClientName()) + " MIDAS client" +
+      (clientArmed() ? ", which is armed for actions. " : ". ") +
       "The same data on the command line: <code>python -m pioneer.rundb.view status|queue|runlog|sequences</code>.");
 }
 
@@ -1465,8 +1816,13 @@ function init() {
    renderFooter();
    renderActions();
    renderQueue();
+   renderClearResult();
    renderSequences();
    renderRunlog();
+
+   if (typeof document !== "undefined" && document.addEventListener) {
+      document.addEventListener("keydown", onClearKey);
+   }
 
    const log = el("rundb-runlog");
    if (log) {
@@ -1513,7 +1869,11 @@ const RUNDB = {
    configOptions, actionPanelHtml, actionSummarySentence, actionArgs, actionReady,
    actionResultHtml, eventsValid, typeLabel, confirmSchedule, schedule, lookupConfig,
    chooseConfig, findOption, schedulePreview, runPreview, cancelPreview, previewArmed, wasRefused,
-   TARGET_SEQ_ID, TARGET_CONFIG_TYPE, DEFAULT_ACTION_EVENTS, MAX_ACTION_EVENTS,
+   TARGET_SEQ_ID, TARGET_CONFIG_TYPE, DEFAULT_ACTION_EVENTS, MAX_ACTION_EVENTS, armedBannerHtml,
+   // the Clear queue dialog
+   clearButtonHtml, clearDialogHtml, clearDialogBodyHtml, clearResultHtml, clearReady,
+   openClearDialog, closeClearDialog, setClearHolding, runClearPreview, sendClear, onClearKey,
+   clearPreviewKey, renderClearButton,
    // loops, exported so a fixture page can drive them one step at a time
    pollOdb, pollSlow, pollLog
 };

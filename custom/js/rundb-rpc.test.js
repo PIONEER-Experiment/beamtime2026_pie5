@@ -1138,3 +1138,501 @@ test("the ODB paths are the ones the plan names", () => {
       assert.ok(RUNDB.ODB_PATHS.indexOf(p) >= 0, p + " is not read");
    });
 });
+
+// ---------------------------------------------------------------------------
+// Clear queue
+// ---------------------------------------------------------------------------
+
+// A preview as actions.py:preview_clear_queue sends it: the sequencer is
+// running, so the lowest-priority PENDING run is kept.
+const CLEAR_PREVIEW = {
+   statuses: ["PENDING", "HOLDING"], sequencer_running: true,
+   runs: [
+      { id: 81, status: "PENDING", priority: 1, midas_run_number: null, requested_events: 1000000 },
+      { id: 82, status: "PENDING", priority: 2, midas_run_number: null, requested_events: 1000000 },
+      { id: 83, status: "HOLDING", priority: 3, midas_run_number: null, requested_events: 500000 },
+      { id: 84, status: "PENDING", priority: 4, midas_run_number: 1201, requested_events: 2000 }
+   ],
+   will_cancel: [82, 83, 84], kept_head: [81],
+   head_reason: "The sequencer is running and may already be setting up the next run in the queue",
+   total: 4, capped: false
+};
+
+const PENDING_ONLY = {
+   statuses: ["PENDING"], sequencer_running: false,
+   runs: [{ id: 90, status: "PENDING", priority: 1, midas_run_number: null, requested_events: 10 }],
+   will_cancel: [90], kept_head: [], head_reason: null, total: 1, capped: false
+};
+
+function resetClear() {
+   Object.assign(RUNDB.state.clear, { open: false, includeHolding: false, operator: "",
+                                      preview: {}, busy: false, result: null });
+}
+
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+test("clear_queue is a writer and is never sent twice; its preview is a read", async () => {
+   assert.ok(R.isAction("clear_queue"));
+   assert.ok(!R.isAction("preview_clear_queue"));
+   const sent = [];
+   globalThis.mjsonrpc_call = async (method, params) => {
+      sent.push(params);
+      return { result: { status: 1, reply: JSON.stringify({ ok: false, cmd: params.cmd,
+         error: { kind: "too_large", message: "reply too long", needed: 900000 } }) } };
+   };
+   const env = await R.call("clear_queue", { run_ids: [1], include_holding: false, operator: "x" }, 4096);
+   assert.strictEqual(sent.length, 1, "one attempt only");
+   assert.strictEqual(env.error.kind, "too_large");
+});
+
+test("the refused kinds are one table, shared by both actions", () => {
+   assert.strictEqual(RUNDB.wasRefused, R.wasRefused);
+   ["usage", "denied", "db", "unknown_command"].forEach((k) => assert.ok(R.wasRefused(k), k));
+   ["timeout", "transport", "client_down", "bad_reply", "too_large", "internal"].forEach((k) =>
+      assert.ok(!R.wasRefused(k), k));
+});
+
+test("the button is offered only when armed and something is PENDING or HOLDING", () => {
+   const armed = { actions_allowed: true };
+   const q = (statuses) => ({ runs: statuses.map((s, i) => ({ id: i + 1, status: s })) });
+   assert.strictEqual(R.clearQueueOffered(null, q(["PENDING"])), false);
+   assert.strictEqual(R.clearQueueOffered({ actions_allowed: false }, q(["PENDING"])), false);
+   assert.strictEqual(R.clearQueueOffered(armed, q(["PENDING"])), true);
+   assert.strictEqual(R.clearQueueOffered(armed, q(["RUNNING", "HOLDING"])), true);
+   assert.strictEqual(R.clearQueueOffered(armed, q(["RUNNING", "CLAIMED", "DEPENDING"])), false,
+      "DEPENDING is pending too, and is not Clear queue's to touch");
+   assert.strictEqual(R.clearQueueOffered(armed, q([])), false);
+   assert.strictEqual(R.clearQueueOffered(armed, null), false);
+
+   assert.strictEqual(RUNDB.clearButtonHtml({ client: armed }, q(["RUNNING"]), {}), "");
+   assert.strictEqual(RUNDB.clearButtonHtml({ client: { actions_allowed: false } }, q(["PENDING"]), {}), "");
+   const live = RUNDB.clearButtonHtml({ client: armed }, q(["PENDING"]), {});
+   assert.match(live, /id="rundb-clear-open"/);
+   assert.match(live, /Clear queue&hellip;/);
+   assert.doesNotMatch(live, /disabled/);
+   assert.match(RUNDB.clearButtonHtml({ client: armed }, q(["PENDING"]), { busy: true }), /disabled/,
+      "dead while a clear is in flight");
+   assert.match(RUNDB.clearButtonHtml({ client: armed }, q(["PENDING"]), { open: true }), /disabled/);
+});
+
+test("the operator name is required, trimmed and short", () => {
+   assert.strictEqual(R.operatorName("  Josh  "), "Josh");
+   assert.strictEqual(R.operatorName(""), "");
+   assert.strictEqual(R.operatorName("   "), "");
+   assert.strictEqual(R.operatorName(null), "");
+   assert.strictEqual(R.operatorName("x".repeat(64)), "x".repeat(64));
+   assert.strictEqual(R.operatorName("x".repeat(65)), "");
+   assert.strictEqual(R.OPERATOR_MAX, 64);
+});
+
+test("the args are exactly the listed ids, and never the sequencer flag", () => {
+   const args = R.clearQueueArgs(CLEAR_PREVIEW, true, "  Josh ");
+   assert.deepStrictEqual(Object.keys(args).sort(), ["include_holding", "operator", "run_ids"]);
+   assert.deepStrictEqual(args.run_ids, [82, 83, 84],
+      "only what the dialog said would be cancelled: the kept run is not sent, so it stays PENDING " +
+      "even if the sequencer stops before OK");
+   assert.strictEqual(args.include_holding, true);
+   assert.strictEqual(args.operator, "Josh");
+   assert.deepStrictEqual(R.clearQueueArgs({ will_cancel: [5, 5, 6], kept_head: [7] }, 0, "a").run_ids, [5, 6]);
+   assert.deepStrictEqual(R.clearQueueArgs({ will_cancel: [], kept_head: [7] }, 0, "a").run_ids, []);
+   assert.strictEqual(R.clearQueueArgs(null, false, "a"), null);
+});
+
+test("the dialog says how many runs become CANCELLED, by their status as stored", () => {
+   assert.strictEqual(R.clearQueueSummary(CLEAR_PREVIEW),
+      "This will set 3 runs to CANCELLED (2 PENDING, 1 HOLDING). " +
+      "CLAIMED and RUNNING runs, and runs that have finished, are not touched.");
+   assert.match(R.clearQueueSummary(PENDING_ONLY), /^This will set 1 run to CANCELLED \(1 PENDING\)/);
+   assert.strictEqual(R.clearQueueSummary({ statuses: ["PENDING"], runs: [], will_cancel: [], kept_head: [] }),
+      "There are no PENDING runs in the queue, so there is nothing to cancel.");
+   assert.match(R.clearQueueSummary({ statuses: ["PENDING", "HOLDING"], runs: [], will_cancel: [], kept_head: [] }),
+      /no PENDING or HOLDING runs/);
+   assert.match(R.clearQueueSummary({ statuses: ["PENDING"], runs: [{ id: 1, status: "PENDING" }],
+      will_cancel: [], kept_head: [1] }), /^Nothing would be cancelled: .*sequencer may be about to take/);
+   assert.strictEqual(R.clearQueueButtonLabel(3), "Cancel 3 runs");
+   assert.strictEqual(R.clearQueueButtonLabel(1), "Cancel 1 run");
+   assert.strictEqual(R.clearQueueButtonLabel(0), "Cancel 0 runs");
+});
+
+test("the kept run is named, with what to do about it", () => {
+   assert.strictEqual(R.clearQueueKeptSentence(CLEAR_PREVIEW),
+      "The sequencer is running, so DB id 81 stays PENDING: the sequencer may be about to take it. " +
+      "Stop the sequencer and clear again to remove it.");
+   assert.match(R.clearQueueKeptSentence({ kept_head: [81, 85] }), /DB ids 81, 85 stay PENDING: the sequencer may be about to take one of them\. .*remove them\./);
+   assert.strictEqual(R.clearQueueKeptSentence(PENDING_ONLY), "", "sequencer stopped: nothing kept, nothing said");
+   assert.strictEqual(R.clearQueueCappedSentence(CLEAR_PREVIEW), "");
+   assert.strictEqual(R.clearQueueCappedSentence({ capped: true, total: 2400, runs: new Array(2000).fill({}) }),
+      "Only the first 2000 of 2400 matching runs are listed, and only those are cancelled. Clear again for the rest.");
+});
+
+test("the button says why it is dead", () => {
+   assert.match(R.clearQueueBlocked({ pending: true }, "Josh"), /Waiting for the client/);
+   assert.match(R.clearQueueBlocked({ error: { kind: "db" } }, "Josh"), /could not list the runs/);
+   assert.match(R.clearQueueBlocked({}, "Josh"), /Waiting/);
+   assert.match(R.clearQueueBlocked({ data: PENDING_ONLY }, ""), /Type your name in Operator/);
+   assert.match(R.clearQueueBlocked({ data: PENDING_ONLY }, "x".repeat(70)), /longer than 64/);
+   assert.match(R.clearQueueBlocked({ data: Object.assign({}, PENDING_ONLY, { will_cancel: [] }) }, "Josh"),
+      /nothing to cancel/);
+   assert.strictEqual(R.clearQueueBlocked({ data: PENDING_ONLY }, "Josh"), "");
+});
+
+test("the result says what was cancelled, what was kept and what moved on", () => {
+   const r = R.clearQueueResult({ ok: true, data: { cancelled: [82, 84], kept_head: [81],
+      skipped: [{ id: 83, status: "RUNNING" }, { id: 86, status: null }],
+      statuses: ["PENDING", "HOLDING"], sequencer_running: true, operator: "Josh" } });
+   assert.strictEqual(r.level, "ok");
+   assert.strictEqual(r.head, "Cancelled 2 runs.");
+   assert.strictEqual(r.lines[0], "DB ids 82, 84 are now CANCELLED, recorded as cancelled by Josh.");
+   assert.match(r.lines[1], /^Kept DB id 81 PENDING: the sequencer may be about to take it\. Stop the sequencer and clear again/);
+   assert.strictEqual(r.lines[2], "Skipped 2 runs whose status changed after the dialog listed them: " +
+      "83 (RUNNING), 86 (no longer in the database).");
+
+   const none = R.clearQueueResult({ ok: true, data: { cancelled: [], kept_head: [], skipped: [] } });
+   assert.strictEqual(none.head, "Nothing was cancelled.");
+   assert.deepStrictEqual(none.lines, []);
+
+   const many = R.clearQueueResult({ ok: true, data: { cancelled: Array.from({ length: 45 }, (_, i) => i + 1) } });
+   assert.match(many.lines[0], /^DB ids 1, 2, .* 40 and 5 more are now CANCELLED\.$/);
+   assert.strictEqual(R.clearQueueResult(null), null);
+});
+
+test("a refused clear says nothing was cancelled; an unanswered one says it may have been", () => {
+   ["usage", "denied", "db", "unknown_command"].forEach((kind) => {
+      const r = R.clearQueueResult({ ok: false, error: { kind: kind, message: "no", hint: "h" } });
+      assert.strictEqual(r.level, "refused", kind);
+      assert.strictEqual(r.head, "Nothing was cancelled.", kind);
+   });
+   assert.match(R.clearQueueResult({ ok: false, error: { kind: "denied", message: "off" } }).lines[0],
+      /not armed for actions/);
+   // No reply at all: the kinds the page makes up itself, and any envelope it
+   // built locally (too_large after the retries), or an error with no message.
+   const noReply = ["timeout", "transport", "client_down", "bad_reply"].map(
+      (kind) => ({ ok: false, error: { kind: kind, message: "gone" } }));
+   noReply.push({ ok: false, local: true, error: { kind: "too_large", message: "stayed too long" } });
+   noReply.push({ ok: false, error: { kind: "internal", message: "" } });
+   noReply.forEach((env) => {
+      const kind = env.error.kind + (env.local ? " (local)" : "");
+      const r = R.clearQueueResult(env);
+      assert.strictEqual(r.level, "unknown", kind);
+      assert.strictEqual(r.head, "The client did not answer.", kind);
+      assert.match(r.lines[0], /may still have been cancelled\. Look at the queue/, kind);
+      assert.notStrictEqual(r.head, "Nothing was cancelled.", kind + " must not claim nothing happened");
+   });
+   // The client answered, with an error it could not resolve: not "did not
+   // answer", but "could not confirm", with its message.
+   ["internal", "too_large"].forEach((kind) => {
+      const r = R.clearQueueResult({ ok: false, error: { kind: kind, message: "the commit failed." } });
+      assert.strictEqual(r.level, "unknown", kind);
+      assert.strictEqual(r.answered, true, kind);
+      assert.strictEqual(r.head, "The client could not confirm whether the runs were cancelled:", kind);
+      assert.deepStrictEqual(r.lines, ["the commit failed. Look at the queue before pressing again."], kind);
+   });
+   const html = RUNDB.clearResultHtml({ ok: false, error: { kind: "timeout", message: "<b>15 s</b>" } });
+   assert.match(html, /rundb-alert red/);
+   assert.match(html, /&lt;b&gt;15 s/, "escaped");
+   assert.strictEqual(RUNDB.clearResultHtml(null), "");
+});
+
+test("the dialog lists the runs with their statuses as stored, and marks the kept one", () => {
+   const html = RUNDB.clearDialogHtml({ open: true, includeHolding: true, operator: "",
+      preview: { key: "1h", data: CLEAR_PREVIEW, includeHolding: true } });
+   assert.match(html, /role="dialog"/);
+   assert.match(html, /<td class="rundb-st gray"[^>]*>PENDING<\/td>/);
+   assert.match(html, /<td class="rundb-st yellow"[^>]*>HOLDING<\/td>/, "HOLDING keeps its own name and colour");
+   assert.match(html, /<td class="rundb-kept" title="The sequencer is running[^"]*">kept &mdash; the sequencer may be about to take it<\/td>/);
+   assert.match(html, /<td>1201<\/td>/, "a run number where there is one");
+   assert.match(html, /DB id 81 stays PENDING/);
+   assert.match(html, /This will set 3 runs to CANCELLED/);
+   assert.match(html, /id="rundb-clear-holding" checked/);
+   assert.match(html, /maxlength="64"/);
+   assert.match(html, /<button type="button" id="rundb-clear-go" disabled>Cancel 3 runs<\/button>/,
+      "dead until somebody types a name");
+   assert.match(html, /Type your name in Operator/);
+
+   const ready = RUNDB.clearDialogHtml({ open: true, includeHolding: false, operator: "Josh",
+      preview: { key: "2p", data: PENDING_ONLY, includeHolding: false } });
+   assert.match(ready, /<button type="button" id="rundb-clear-go">Cancel 1 run<\/button>/);
+   assert.doesNotMatch(ready, /id="rundb-clear-holding" checked/, "HOLDING is off by default");
+   assert.doesNotMatch(ready, /stays PENDING/, "sequencer stopped: no kept line");
+
+   assert.strictEqual(RUNDB.clearDialogHtml({ open: false }), "");
+});
+
+test("the dialog's loading, error and sending states", () => {
+   const loading = RUNDB.clearDialogHtml({ open: true, operator: "Josh", preview: { key: "3p", pending: true } });
+   assert.match(loading, /Asking the client which runs/);
+   assert.match(loading, /id="rundb-clear-go" disabled/);
+
+   const denied = RUNDB.clearDialogBodyHtml({ preview: { error: { kind: "denied", message: "no" } } });
+   assert.match(denied, /not armed for actions/);
+   assert.match(RUNDB.clearDialogBodyHtml({ preview: { error: { kind: "unknown_command" } } }), /too old to clear the queue/);
+   assert.match(RUNDB.clearDialogBodyHtml({ preview: { error: { kind: "db", message: "cannot read the queue", hint: "<x>" } } }),
+      /cannot read the queue.*&lt;x&gt;/);
+
+   const sending = RUNDB.clearDialogHtml({ open: true, busy: true, operator: "Josh",
+      preview: { key: "4p", data: PENDING_ONLY, includeHolding: false } });
+   assert.match(sending, /id="rundb-clear-go" disabled>cancelling&hellip;/);
+   assert.match(sending, /id="rundb-clear-close" disabled/);
+   assert.match(sending, /id="rundb-clear-operator"[^>]* disabled/);
+});
+
+test("database text in the dialog is escaped", () => {
+   const evil = Object.assign({}, PENDING_ONLY, { runs: [{ id: 90, status: "<img src=x>", priority: "<i>",
+      midas_run_number: null, requested_events: 1 }], head_reason: '"><script>' });
+   const html = RUNDB.clearDialogHtml({ open: true, operator: '"><script>', preview: { data: evil } });
+   assert.doesNotMatch(html, /<img src=x>|<script>|<i>/);
+});
+
+test("opening asks for a preview, and the checkbox asks again with HOLDING", async () => {
+   resetClear();
+   const sent = [];
+   globalThis.mjsonrpc_call = async (method, params) => {
+      sent.push(params);
+      const holding = JSON.parse(params.args).include_holding;
+      return { result: { status: 1, reply: JSON.stringify({ ok: true, cmd: params.cmd,
+         data: holding ? CLEAR_PREVIEW : PENDING_ONLY }) } };
+   };
+   RUNDB.state.status = { client: { actions_allowed: true } };
+   RUNDB.openClearDialog();
+   assert.strictEqual(RUNDB.state.clear.open, true);
+   assert.ok(RUNDB.state.clear.preview.pending);
+   await flush(); await flush();
+   assert.strictEqual(sent.length, 1);
+   assert.strictEqual(sent[0].cmd, "preview_clear_queue");
+   assert.deepStrictEqual(JSON.parse(sent[0].args), { include_holding: false });
+   assert.deepStrictEqual(RUNDB.state.clear.preview.data.will_cancel, [90]);
+
+   RUNDB.setClearHolding(true);
+   await flush(); await flush();
+   assert.strictEqual(sent.length, 2);
+   assert.deepStrictEqual(JSON.parse(sent[1].args), { include_holding: true });
+   assert.deepStrictEqual(RUNDB.state.clear.preview.data.will_cancel, [82, 83, 84]);
+   assert.strictEqual(RUNDB.state.clear.preview.includeHolding, true);
+
+   RUNDB.openClearDialog();
+   assert.strictEqual(sent.length, 2, "a second open while open does nothing");
+   RUNDB.closeClearDialog();
+   assert.strictEqual(RUNDB.state.clear.open, false);
+
+   RUNDB.openClearDialog();
+   assert.strictEqual(RUNDB.state.clear.includeHolding, false, "HOLDING is off again at the next opening");
+   await flush(); await flush();
+   assert.deepStrictEqual(JSON.parse(sent[2].args), { include_holding: false });
+   RUNDB.closeClearDialog();
+   resetClear();
+});
+
+test("a preview answer for a box that was ticked again since is dropped", async () => {
+   resetClear();
+   const held = [];
+   globalThis.mjsonrpc_call = (method, params) => new Promise((resolve) => held.push({ params, resolve }));
+   const answer = (h, data) => h.resolve({ result: { status: 1, reply: JSON.stringify({ ok: true,
+      cmd: h.params.cmd, data: data }) } });
+   RUNDB.state.status = { client: { actions_allowed: true } };
+   RUNDB.openClearDialog();                 // asks with HOLDING off
+   await flush();
+   RUNDB.setClearHolding(true);             // asks again with it on
+   await flush();
+   assert.strictEqual(held.length, 2);
+   answer(held[1], CLEAR_PREVIEW);
+   await flush(); await flush();
+   answer(held[0], PENDING_ONLY);           // the late answer to the first question
+   await flush(); await flush();
+   assert.deepStrictEqual(RUNDB.state.clear.preview.data.will_cancel, [82, 83, 84],
+      "the list on screen is the answer to the box as it is now");
+   RUNDB.closeClearDialog();
+   resetClear();
+});
+
+test("OK sends exactly the listed ids with the operator, once, then re-reads the queue", async () => {
+   resetClear();
+   const sent = [];
+   globalThis.mjsonrpc_call = async (method, params) => {
+      sent.push(params);
+      return { result: { status: 1, reply: JSON.stringify({ ok: true, cmd: params.cmd, data: {
+         cancelled: [82, 83, 84], kept_head: [81], skipped: [], statuses: ["PENDING", "HOLDING"],
+         sequencer_running: true, operator: "Josh" } }) } };
+   };
+   let kicked = 0;
+   RUNDB.__setSlowPollerForTests({ kick: () => { kicked++; } });
+   RUNDB.state.status = { client: { actions_allowed: true } };
+   Object.assign(RUNDB.state.clear, { open: true, includeHolding: true, operator: " Josh ",
+      preview: { key: "9h", data: CLEAR_PREVIEW, includeHolding: true } });
+   assert.ok(RUNDB.clearReady(RUNDB.state.clear));
+
+   const p = RUNDB.sendClear();
+   assert.strictEqual(RUNDB.state.clear.busy, true, "frozen while the write is out");
+   assert.strictEqual(RUNDB.clearReady(RUNDB.state.clear), false);
+   RUNDB.sendClear();                       // a second press while busy
+   RUNDB.closeClearDialog();                // and Esc while busy
+   assert.strictEqual(RUNDB.state.clear.open, true, "the dialog waits for its answer");
+   await p;
+
+   assert.strictEqual(sent.length, 1, "one write");
+   assert.strictEqual(sent[0].cmd, "clear_queue");
+   assert.deepStrictEqual(JSON.parse(sent[0].args),
+      { run_ids: [82, 83, 84], include_holding: true, operator: "Josh" });
+   assert.strictEqual(RUNDB.state.clear.busy, false);
+   assert.strictEqual(RUNDB.state.clear.open, false, "the dialog goes; the result stays under the queue");
+   assert.strictEqual(RUNDB.state.clear.result.ok, true);
+   assert.match(RUNDB.clearResultHtml(RUNDB.state.clear.result), /Cancelled 3 runs\..*Kept DB id 81 PENDING/);
+   assert.strictEqual(kicked, 1, "the queue is re-read at once");
+   assert.strictEqual(RUNDB.state.clear.operator, " Josh ", "the name is kept for next time");
+   RUNDB.__setSlowPollerForTests(null);
+   resetClear();
+});
+
+test("an unanswered clear re-reads the queue and does not say nothing happened", async () => {
+   resetClear();
+   globalThis.mjsonrpc_call = async () => ({ result: { status: 503 } });     // client gone
+   let kicked = 0;
+   RUNDB.__setSlowPollerForTests({ kick: () => { kicked++; } });
+   RUNDB.state.status = { client: { actions_allowed: true } };
+   Object.assign(RUNDB.state.clear, { open: true, operator: "Josh",
+      preview: { key: "10p", data: PENDING_ONLY, includeHolding: false } });
+   await RUNDB.sendClear();
+   assert.strictEqual(RUNDB.state.clear.result.error.kind, "client_down");
+   const html = RUNDB.clearResultHtml(RUNDB.state.clear.result);
+   assert.match(html, /The client did not answer/);
+   assert.match(html, /may still have been cancelled/);
+   assert.doesNotMatch(html, /Nothing was cancelled/);
+   assert.strictEqual(kicked, 1);
+   RUNDB.__setSlowPollerForTests(null);
+   RUNDB.state.clientError = null;
+   RUNDB.state.otherError = null;
+   resetClear();
+});
+
+test("a client disarmed since the dialog opened is never asked to write", async () => {
+   resetClear();
+   let called = 0;
+   globalThis.mjsonrpc_call = async () => { called++; return { result: { status: 1, reply: '{"ok":true}' } }; };
+   RUNDB.state.status = { client: { actions_allowed: false } };
+   Object.assign(RUNDB.state.clear, { open: true, operator: "Josh",
+      preview: { key: "11p", data: PENDING_ONLY, includeHolding: false } });
+   await RUNDB.sendClear();
+   assert.strictEqual(called, 0);
+   assert.strictEqual(RUNDB.state.clear.result.error.kind, "denied");
+   assert.match(RUNDB.clearResultHtml(RUNDB.state.clear.result), /Nothing was cancelled\..*not armed/);
+   RUNDB.openClearDialog();
+   assert.strictEqual(RUNDB.state.clear.open, false, "and the dialog does not open on a disarmed client");
+   assert.strictEqual(called, 0);
+   resetClear();
+});
+
+test("nothing is sent without a name, or with nothing to cancel", async () => {
+   resetClear();
+   let called = 0;
+   globalThis.mjsonrpc_call = async () => { called++; return { result: { status: 1, reply: '{"ok":true}' } }; };
+   RUNDB.state.status = { client: { actions_allowed: true } };
+   Object.assign(RUNDB.state.clear, { open: true, operator: "  ",
+      preview: { key: "12p", data: PENDING_ONLY, includeHolding: false } });
+   await RUNDB.sendClear();
+   RUNDB.state.clear.operator = "Josh";
+   RUNDB.state.clear.preview = { key: "13p", data: Object.assign({}, PENDING_ONLY, { will_cancel: [], kept_head: [90] }) };
+   await RUNDB.sendClear();
+   RUNDB.state.clear.preview = { key: "14p", pending: true };
+   await RUNDB.sendClear();
+   assert.strictEqual(called, 0);
+   resetClear();
+});
+
+test("Esc closes the dialog", () => {
+   resetClear();
+   RUNDB.state.clear.open = true;
+   RUNDB.onClearKey({ key: "Enter" });
+   assert.strictEqual(RUNDB.state.clear.open, true);
+   RUNDB.onClearKey({ key: "Escape" });
+   assert.strictEqual(RUNDB.state.clear.open, false);
+   resetClear();
+});
+
+test("on a real database the five-point form gives way to a note", () => {
+   const html = RUNDB.actionPanelHtml({ client: { actions_allowed: true, five_point_offered: false } },
+      { options: RUNDB.configOptions([CONFIG_ROWS]) });
+   assert.match(html, /This client is armed for actions/);
+   assert.match(html, /Clear queue&hellip;<\/b> button in the Queue panel really does write/);
+   assert.match(html, /offered on scratch databases only; use the ConfigDB page/);
+   assert.doesNotMatch(html, /<button|<select|five-point --config-id/);
+
+   const scratch = RUNDB.actionPanelHtml({ client: { actions_allowed: true, five_point_offered: true } },
+      { options: RUNDB.configOptions([CONFIG_ROWS]) });
+   assert.match(scratch, /Clear queue&hellip;<\/b> button in the Queue panel and the button below really do write/);
+   assert.match(scratch, /Schedule five-point scan/);
+   assert.match(scratch, /clear-queue --operator NAME/);
+
+   const off = RUNDB.actionPanelHtml({ client: { actions_allowed: false } }, { options: [] });
+   assert.match(off, /does not schedule runs, clear the queue, start runs or touch the sequencer/);
+});
+
+test("the action panel is redrawn when five-point stops being offered", () => {
+   RUNDB.state.queue = { runs: [] };
+   RUNDB.state.runs = {};
+   RUNDB.state.status = { client: { actions_allowed: true, five_point_offered: true } };
+   const a = RUNDB.actionSignature();
+   RUNDB.state.status = { client: { actions_allowed: true, five_point_offered: false } };
+   assert.notStrictEqual(RUNDB.actionSignature(), a);
+   RUNDB.state.status = null;
+   RUNDB.state.queue = null;
+});
+
+test("a kept run need not be the lowest priority: the client says which, the page believes it", () => {
+   // e.g. the run the nearline daemon has attached, somewhere down the queue
+   const data = Object.assign({}, CLEAR_PREVIEW, { will_cancel: [81, 82, 83], kept_head: [84] });
+   const html = RUNDB.clearDialogBodyHtml({ preview: { data: data } });
+   const row84 = html.split("<tr").filter((r) => />84<\/td>/.test(r))[0];
+   const row81 = html.split("<tr").filter((r) => />81<\/td>/.test(r))[0];
+   assert.match(row84, /kept &mdash; the sequencer may be about to take it/);
+   assert.doesNotMatch(row81, /kept/);
+   assert.match(row81, /CANCELLED/);
+   assert.match(html, /DB id 84 stays PENDING/);
+   assert.deepStrictEqual(R.clearQueueArgs(data, true, "Josh").run_ids, [81, 82, 83]);
+   assert.doesNotMatch(html, /sequencer is loading/, "no claim beyond what is known");
+});
+
+test("a commit-time failure (internal) says the client could not confirm the outcome", async () => {
+   resetClear();
+   globalThis.mjsonrpc_call = async (method, params) => ({ result: { status: 1, reply: JSON.stringify({
+      ok: false, cmd: params.cmd, error: { kind: "internal", message: "the commit did not come back" } }) } });
+   let kicked = 0;
+   RUNDB.__setSlowPollerForTests({ kick: () => { kicked++; } });
+   RUNDB.state.status = { client: { actions_allowed: true } };
+   Object.assign(RUNDB.state.clear, { open: true, operator: "Josh",
+      preview: { key: "20p", data: PENDING_ONLY, includeHolding: false } });
+   await RUNDB.sendClear();
+   assert.strictEqual(RUNDB.state.clear.result.error.kind, "internal");
+   assert.strictEqual(R.clearQueueResult(RUNDB.state.clear.result).level, "unknown");
+   const html = RUNDB.clearResultHtml(RUNDB.state.clear.result);
+   assert.doesNotMatch(html, /did not answer/, "the client did answer, with an error");
+   assert.match(html, /<b>The client could not confirm whether the runs were cancelled:<\/b> the commit did not come back\. Look at the queue before pressing again\./);
+   assert.doesNotMatch(html, /Nothing was cancelled/);
+   assert.strictEqual(kicked, 1, "and the queue is re-read");
+   RUNDB.__setSlowPollerForTests(null);
+   RUNDB.state.clientError = null;
+   RUNDB.state.otherError = null;
+   resetClear();
+});
+
+test("an armed client with actions_allowed really true: banner, note or form, and the button", () => {
+   const q = { runs: [{ id: 1, status: "PENDING" }] };
+   const realDb = { client: { actions_allowed: true, five_point_offered: false }, database: { reachable: true } };
+   const scratch = { client: { actions_allowed: true, five_point_offered: true }, database: { reachable: true } };
+   const opts = { options: RUNDB.configOptions([CONFIG_ROWS]), selection: {}, events: 1000000 };
+
+   const a = RUNDB.actionPanelHtml(realDb, opts);
+   assert.match(a, /^<div class="rundb-alert yellow"><b>This client is armed for actions\.<\/b>/);
+   assert.match(a, /button in the Queue panel really does write to the run database/);
+   assert.match(a, /clear-queue --operator NAME --write-dsn &hellip; --yes/);
+   assert.doesNotMatch(a, /five-point --config-id|<form|<select|<button/);
+   assert.match(a, /offered on scratch databases only; use the ConfigDB page/);
+
+   const b = RUNDB.actionPanelHtml(scratch, opts);
+   assert.match(b, /button in the Queue panel and the button below really do write/);
+   assert.match(b, /five-point --config-id ID --events N/);
+   assert.match(b, /<form class="rundb-actionform"/);
+   assert.match(b, /id="rundb-act-go" disabled>Schedule five-point scan/, "dead until chosen, as before");
+   assert.doesNotMatch(b, /scratch databases only/);
+
+   assert.match(RUNDB.clearButtonHtml(realDb, q, {}), /Clear queue&hellip;/);
+   assert.match(RUNDB.clearButtonHtml(scratch, q, {}), /Clear queue&hellip;/);
+});
