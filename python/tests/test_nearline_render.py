@@ -235,7 +235,7 @@ def test_stale_first_frame_is_skipped_only_for_subrun_0(job_env):
         assert job["musip"].correctFineOffsets is True
 
 
-def test_rendered_light_job_switches_off_the_five(job_env, capsys):
+def test_rendered_light_job_switches_off_the_four(job_env, capsys):
     tmp_path, midas = job_env
     target = render_job(midas, tmp_path / "run00790_00000.root", light=True)
     job = _run(target)
@@ -260,8 +260,7 @@ def test_rendered_light_job_switches_off_the_five(job_env, capsys):
     assert job["twc"].applyTimewalkCorrection is True
     out = capsys.readouterr().out
     assert ("[nearline] light      on, switched off: "
-            "WRITE_NTUPLE PSM_TIMEWALK PSM_SMA_WIDE_DT PSM_SMA_DIAGNOSTICS "
-            "PSM_SMA_RF_LATTICE_RECO") in out
+            "WRITE_NTUPLE PSM_TIMEWALK PSM_SMA_WIDE_DT PSM_SMA_DIAGNOSTICS") in out
     assert "[nearline] rntuple    no RNTuple" in out
 
 
@@ -759,18 +758,19 @@ def test_the_rf_lattice_settings_reach_the_monitor_and_the_reco(job_env, capsys)
             "on in: PIPSMSMAMonitor, PIPSMAllTrackReco") in out
 
 
-def test_a_light_job_drops_the_reco_lattice_but_keeps_the_monitors(job_env, capsys):
-    # the six *_vs_s1latphase TH3F are the lattice's cost; the monitor's
-    # rf_lattice_* plots are cheap and stay in the light job
+def test_a_light_job_keeps_both_rf_lattices(job_env, capsys):
+    # the RF lattice is not a light switch: the monitor's rf_lattice_* and the
+    # reco's *_vs_s1latphase stay in the light job
     tmp_path, midas = job_env
     job = _run(render_job(midas, tmp_path / "run00790_00000.root", light=True))
-    assert job["PSM_SMA_RF_LATTICE"] is True and job["PSM_SMA_RF_LATTICE_RECO"] is False
+    assert job["PSM_SMA_RF_LATTICE"] is True and job["PSM_SMA_RF_LATTICE_RECO"] is True
     assert job["sma_monitor"].RFLattice is True
-    assert job["all_reco"].RFLattice is False
+    assert job["all_reco"].RFLattice is True
     assert job["all_reco"].RFTable == "sma_rf"
     out = capsys.readouterr().out
-    assert ("[nearline] sma rf     PSM_SMA_RF_LATTICE=True PSM_SMA_RF_LATTICE_RECO=False "
-            "PSM_SMA_RF_TABLE=sma_rf PSM_SMA_RF_TAG=(default) on in: PIPSMSMAMonitor") in out
+    assert ("[nearline] sma rf     PSM_SMA_RF_LATTICE=True PSM_SMA_RF_LATTICE_RECO=True "
+            "PSM_SMA_RF_TABLE=sma_rf PSM_SMA_RF_TAG=(default) "
+            "on in: PIPSMSMAMonitor, PIPSMAllTrackReco") in out
 
 
 def test_the_reco_lattice_can_be_switched_off_alone(job_env, capsys):

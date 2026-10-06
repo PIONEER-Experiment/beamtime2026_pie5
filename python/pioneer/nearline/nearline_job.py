@@ -140,8 +140,8 @@ _DEFAULT_CONDITIONS_DIR = os.path.join(os.environ.get("PIONEERSYS"), "reco_testb
 EVT_MAX = -1
 # The light job, about a third of the CPU of the full one: histograms only. Meant for
 # pinky once another host runs the full job (README, "Light mode"). On, it switches
-# off WRITE_NTUPLE, PSM_TIMEWALK, PSM_SMA_WIDE_DT, PSM_SMA_DIAGNOSTICS and
-# PSM_SMA_RF_LATTICE_RECO after everything else has been read, so it
+# off WRITE_NTUPLE, PSM_TIMEWALK, PSM_SMA_WIDE_DT and PSM_SMA_DIAGNOSTICS
+# after everything else has been read, so it
 # wins over the block below and over an overrides file. The MuPix timewalk
 # CORRECTION is not touched. The daemon's --light and process.py's --light render it
 # in; NL_LIGHT=1 in the environment sets it for an interactive run.
@@ -591,9 +591,9 @@ PSM_SMA_RF_TABLE = "sma_rf"
 PSM_SMA_RF_TAG = ""
 PSM_SMA_RF_LATTICE = True
 # The track reco's half of the RF lattice: with PSM_SMA_RF_LATTICE on, the six
-# *_vs_s1latphase TH3F (and s1latphase). They cost 0.4-1.4 ms a frame; the SMA
-# monitor's rf_lattice_* plots are cheap and stay with PSM_SMA_RF_LATTICE alone.
-# A light switch: LIGHT turns it off.
+# *_vs_s1latphase TH3F (and s1latphase). They cost 0.2-0.4 s of CPU a beam subrun;
+# kept in the light job too (an RF-phase view of the phase space is what pinky's
+# shifters need). The SMA monitor's rf_lattice_* follow PSM_SMA_RF_LATTICE alone.
 PSM_SMA_RF_LATTICE_RECO = True
 # --- PSM reco --------------------------------------------------------------
 # Container holding the data-side channel map the tracklet reco reads (json mode only).
@@ -846,8 +846,7 @@ PSM_SMA_HITS_NTUPLE = True
 # The spellings of LIGHT in a rendered file and in NL_LIGHT, and the settings light
 # mode switches off.
 _LIGHT_VALUES = {"1": True, "0": False}
-_LIGHT_SWITCHES = ("WRITE_NTUPLE", "PSM_TIMEWALK", "PSM_SMA_WIDE_DT", "PSM_SMA_DIAGNOSTICS",
-                   "PSM_SMA_RF_LATTICE_RECO")
+_LIGHT_SWITCHES = ("WRITE_NTUPLE", "PSM_TIMEWALK", "PSM_SMA_WIDE_DT", "PSM_SMA_DIAGNOSTICS")
 
 # Where the input, the output, the event limit, light mode, the conditions source and the
 # conditions directory come from. This runs before the container lists below, which
@@ -913,7 +912,6 @@ if LIGHT is True:
     PSM_TIMEWALK = False
     PSM_SMA_WIDE_DT = False
     PSM_SMA_DIAGNOSTICS = False
-    PSM_SMA_RF_LATTICE_RECO = False
 
 # The subrun of the input: the second number in the file name (run00790_00005 ->
 # 5), None when the name has just one. NL_MIDAS is the file the job reads in both
@@ -1885,7 +1883,7 @@ if PSM_RECO:
         # The same pulses folded onto the RF lattice give each tracklet's S1 hit
         # its lattice phase (s1latphase, transient) and fill the *_vs_s1latphase
         # twins; same table and rule as the SMA monitor's rf_lattice_*. Only with
-        # PSM_SMA_RF_LATTICE_RECO as well (off in a light job: the TH3F cost).
+        # PSM_SMA_RF_LATTICE_RECO as well.
         if "RFLattice" in PIPSMSimpleTrackReco.getDefaultProperties():
             all_reco.RFLattice = bool(PSM_SMA_RF_LATTICE and PSM_SMA_RF_LATTICE_RECO)
             all_reco.RFTable = str(PSM_SMA_RF_TABLE)
