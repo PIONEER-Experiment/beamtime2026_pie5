@@ -901,8 +901,9 @@ _CENTRAL_SLOPE_SUB_STEPS = 2
 # Pixels per position bin of {x,y}_vs_s1phase_stop_* (0.32 mm, the MuPix
 # monitor's track_xy_expanded bins).
 _STOP_PHASE_PIXELS_PER_BIN = 4
-# Lattice-phase bins over one RF cycle of {x,y}_vs_s1latphase_stop_*: the track
-# reco's nbinsS1LatPhase, which this job leaves at its default of 48.
+# Lattice-phase bins over one RF cycle of {x,y}_vs_s1latphase_stop_*, and of the
+# track reco's *_vs_s1latphase cubes (nbinsS1LatPhase, whose default is 48 too):
+# set on both from here, so the two cannot drift apart.
 _LAT_PHASE_BINS = 48
 
 # Where the input, the output, the event limit, light mode, the conditions source and the
@@ -2016,6 +2017,12 @@ if PSM_RECO:
             all_reco.RFLattice = bool(PSM_SMA_RF_LATTICE and PSM_SMA_RF_LATTICE_RECO)
             all_reco.RFTable = str(PSM_SMA_RF_TABLE)
             all_reco.RFTag = str(PSM_SMA_RF_TAG)
+            if "nbinsS1LatPhase" in PIPSMSimpleTrackReco.getDefaultProperties():
+                all_reco.nbinsS1LatPhase = int(_LAT_PHASE_BINS)
+            elif all_reco.RFLattice:
+                print("[nearline] WARNING    the installed PIPSMSimpleTrackReco has no "
+                      "nbinsS1LatPhase property: the *_vs_s1latphase cubes keep its default "
+                      "lattice-phase bins")
             if all_reco.RFLattice:
                 _SMA_LATTICE_TO.append("PIPSMAllTrackReco")
                 _RECO_LATTICE_ON = True
