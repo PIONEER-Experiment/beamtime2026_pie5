@@ -59,8 +59,8 @@ with `--db` (default `service=pioneer-conditions-admin`). They read the table,
 apply the edit, print a dry-run diff, and with `--write` load the complete
 table and refresh the snapshot. See the two sections below.
 
-**Any other table** (`sma_coarse_shift`, `wd_rf`, `wd_channel_map`, ...) uses the
-generic path. Export the table, edit the file, then load it back:
+**Any other table** (`sma_coarse_shift`, `sma_rf`, `wd_rf`, `wd_channel_map`, ...) uses
+the generic path. Export the table, edit the file, then load it back:
 
 ```bash
 C=service=pioneer-conditions-admin
