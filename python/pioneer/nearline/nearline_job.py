@@ -367,6 +367,17 @@ PSM_SMA_LAG_VIDS = [2021, 2023, 2024, 2025, 2026]
 # (the second number in the file name, run00790_00000); other subruns and a name
 # without a subrun are left alone. Changes the hits, so not a light switch.
 PSM_SMA_SKIP_STALE_FIRST_FRAME = True
+# After a run stop the readout writes a short burst of SMA frames whose clocks are
+# frozen, so one frame spans hundreds of seconds, and the pairing of its hits is
+# quadratic. The decoder drops a whole H000 bank (its SMA and MuPix hits alike) whose
+# SMA time span exceeds this many ms; the count is musip/sma_dropped_banks. A real
+# frame spans milliseconds. 0 switches the cut off. Changes the hits, so not a light
+# switch.
+PSM_SMA_MAX_FRAME_SPAN_MS = 1000.0
+# The same for a bank in which fewer than this share (0..1) of the SMA words have
+# a fine time consistent with their coarse field; a bank of garbage words fails it.
+# 0 switches the cut off. Changes the hits, so not a light switch.
+PSM_SMA_MIN_FINE_COARSE_SHARE = 0.0
 # Drop the MuPix pixel words of hot pixels: the run's interval of the
 # mupix_pixel_mask table in bt2026_psm_readout_map.json, counted per chip in
 # histograms/musip/mupix_masked_hits and per pixel in mupix_masked_hits_per_pixel.
@@ -559,6 +570,11 @@ PSM_SMA_MARKER_TOT_SHARE = 0.5
 # on a busy run it is not cheap. False leaves the histogram booked and empty, and
 # bin 2 of pattern_counters then counts every frame as left out of it.
 PSM_SMA_WIDE_DT = True
+# A frame whose S1 pairs within the narrow dt window would exceed this many is left
+# out of dt_to_s1 and dt_to_s1_wide, and counted in narrow_pairs_left_out: a bound
+# on the quadratic pairing of a frame with far too many hits. 0 means no limit. Not
+# a light switch.
+PSM_SMA_MAX_NARROW_PAIRS = 0
 # --- PSM reco --------------------------------------------------------------
 # Container holding the data-side channel map the tracklet reco reads (json mode only).
 PSM_CHANNEL_MAP_FILE = "bt2026_psm_channel_map.json"
@@ -1194,6 +1210,21 @@ def check():
         if not isinstance(value, bool):
             problems.append(f"{name} is {value!r}: it must be True or False (a string such as "
                             "'False' is true in Python and would switch it on).")
+    for name, value in (("PSM_SMA_MAX_FRAME_SPAN_MS", PSM_SMA_MAX_FRAME_SPAN_MS),
+                        ("PSM_SMA_MIN_FINE_COARSE_SHARE", PSM_SMA_MIN_FINE_COARSE_SHARE)):
+        if not (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value) and value >= 0):
+            problems.append(f"{name} is {value!r}: it must be a number of at least 0 "
+                            "(0 switches the cut off).")
+    if (isinstance(PSM_SMA_MIN_FINE_COARSE_SHARE, (int, float))
+            and not isinstance(PSM_SMA_MIN_FINE_COARSE_SHARE, bool)
+            and PSM_SMA_MIN_FINE_COARSE_SHARE > 1):
+        problems.append(f"PSM_SMA_MIN_FINE_COARSE_SHARE is {PSM_SMA_MIN_FINE_COARSE_SHARE!r}: "
+                        "it is a share of the bank's SMA words, so at most 1.")
+    if (not isinstance(PSM_SMA_MAX_NARROW_PAIRS, int) or isinstance(PSM_SMA_MAX_NARROW_PAIRS, bool)
+            or not 0 <= PSM_SMA_MAX_NARROW_PAIRS <= 2**32 - 1):
+        problems.append(f"PSM_SMA_MAX_NARROW_PAIRS is {PSM_SMA_MAX_NARROW_PAIRS!r}: it must be "
+                        "an integer from 0 to 4294967295 (0 means no limit).")
     try:
         tw_axis_ok = (float(PSM_TIMEWALK_DT_MAX) > float(PSM_TIMEWALK_DT_MIN)
                       and int(PSM_TIMEWALK_DT_BINS) == PSM_TIMEWALK_DT_BINS
@@ -1438,6 +1469,9 @@ services.append(audit)
 _TOT_CUT_NOTE = " (no decode)"
 # The same for PSM_MUPIX_HIGH_TOT_MIN: nothing once the monitor takes it.
 _HIGH_TOT_NOTE = " (no monitor)"
+# The same for the two SMA bank cuts and the monitor's narrow pair budget.
+_SMA_BANK_NOTE = " (no decode)"
+_SMA_PAIRS_NOTE = " (no monitor)"
 tools = [PITMidasWaveDream()] if WD_ENABLED else []
 if PSM_DECODE:
     musip = PITMidasMusip(quadPixelPitch=float(PSM_QUAD_PIXEL_PITCH),
@@ -1480,6 +1514,17 @@ if PSM_DECODE:
         print("[nearline] WARNING    the installed PITMidasMusip has no mupixTotCut "
               "property (reco_testbeam older than the MuPix ToT cut): every MuPix ToT "
               "is kept")
+    # The bank cuts, always set so the job states them; feature-detected the same way.
+    _musip_known = PITMidasMusip.getDefaultProperties()
+    if "smaMaxFrameSpanMs" in _musip_known and "smaMinFineCoarseShare" in _musip_known:
+        musip.smaMaxFrameSpanMs = float(PSM_SMA_MAX_FRAME_SPAN_MS)
+        musip.smaMinFineCoarseShare = float(PSM_SMA_MIN_FINE_COARSE_SHARE)
+        _SMA_BANK_NOTE = ""
+    else:
+        _SMA_BANK_NOTE = " (not applied: old reco)"
+        print("[nearline] WARNING    the installed PITMidasMusip has no smaMaxFrameSpanMs / "
+              "smaMinFineCoarseShare properties (reco_testbeam older than the bad-frame "
+              "cuts): no SMA bank is dropped")
     tools.append(musip)
 
 algorithms = [PIMidasDecoder(decoders=tools)]
@@ -1741,6 +1786,15 @@ if PSM_SMA_MONITOR:
     # stands otherwise.
     if not PSM_SMA_WIDE_DT:
         sma_monitor.MaxWidePairsPerFrame = 0
+    # The narrow pair budget, always set; feature-detected like the decoder's cuts.
+    if "MaxNarrowPairsPerFrame" in PIPSMSMAMonitor.getDefaultProperties():
+        sma_monitor.MaxNarrowPairsPerFrame = int(PSM_SMA_MAX_NARROW_PAIRS)
+        _SMA_PAIRS_NOTE = ""
+    else:
+        _SMA_PAIRS_NOTE = " (not applied: old reco)"
+        print("[nearline] WARNING    the installed PIPSMSMAMonitor has no MaxNarrowPairsPerFrame "
+              "property (reco_testbeam older than the bad-frame cuts): no frame is left out "
+              "for its narrow pairs")
     algorithms.append(Gaudi__Sequencer("PSMSMASeq", RequireObjects=[_TES_MUTRIG_CAL],
                                        Members=[sma_monitor]))
 
@@ -1897,4 +1951,7 @@ print(f"[nearline] sma fine   PSM_SMA_FINE_OFFSETS={PSM_SMA_FINE_OFFSETS}"
       f" PSM_SMA_LAG_VIDS={list(PSM_SMA_LAG_VIDS)}"
       f" PSM_SMA_NIM_NOMINAL_DELAY_NS={PSM_SMA_NIM_NOMINAL_DELAY_NS or 'none'}"
       f" PSM_SMA_SKIP_STALE_FIRST_FRAME={PSM_SMA_SKIP_STALE_FIRST_FRAME} subrun={_SUBRUN}")
+print(f"[nearline] sma frame  PSM_SMA_MAX_FRAME_SPAN_MS={PSM_SMA_MAX_FRAME_SPAN_MS}"
+      f" PSM_SMA_MIN_FINE_COARSE_SHARE={PSM_SMA_MIN_FINE_COARSE_SHARE}{_SMA_BANK_NOTE}"
+      f" PSM_SMA_MAX_NARROW_PAIRS={PSM_SMA_MAX_NARROW_PAIRS}{_SMA_PAIRS_NOTE}")
 print(f"[nearline] EvtMax     {EVT_MAX}")
