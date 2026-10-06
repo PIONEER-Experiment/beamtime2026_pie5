@@ -213,10 +213,15 @@ def test_rendered_full_job_keeps_everything(job_env, capsys):
     assert job["musip"].correctFineOffsets is True
     assert job["musip"].skipFirstBank is True      # run00790_00000 is subrun 0
     assert job["musip"].mupixTotCut == 2
+    assert job["musip"].smaMaxFrameSpanMs == 1000.0
+    assert job["musip"].smaMinFineCoarseShare == 0.0
+    assert job["sma_monitor"].MaxNarrowPairsPerFrame == 0
     out = capsys.readouterr().out
     assert "[nearline] light      off" in out
     assert " PSM_MUPIX_TOT_CUT=2 PSM_MUPIX_HIGH_TOT_MIN=13 PSM_SMA_WIDE_DT=" in out
     assert job["mupix_monitor"].HighTotMin == 13
+    assert (" PSM_SMA_MAX_FRAME_SPAN_MS=1000.0 PSM_SMA_MIN_FINE_COARSE_SHARE=0.0"
+            " PSM_SMA_MAX_NARROW_PAIRS=0") in out
 
 
 def test_stale_first_frame_is_skipped_only_for_subrun_0(job_env):
@@ -242,6 +247,10 @@ def test_rendered_light_job_switches_off_the_four(job_env, capsys):
     assert job["PSM_SMA_WIDE_DT"] is False
     assert job["sma_monitor"].MaxWidePairsPerFrame == 0
     assert job["PSM_SMA_DIAGNOSTICS"] is False and job["musip"].smaDiagnostics is False
+    # the bank cuts change the hits and the narrow budget is not a switch: set as is
+    assert job["musip"].smaMaxFrameSpanMs == 1000.0
+    assert job["musip"].smaMinFineCoarseShare == 0.0
+    assert job["sma_monitor"].MaxNarrowPairsPerFrame == 0
     # the SMA fine-time correction and the stale-frame skip change the hits, so
     # light mode leaves them on
     assert job["musip"].correctFineOffsets is True and job["musip"].skipFirstBank is True
@@ -680,6 +689,60 @@ def test_a_bad_mupix_high_tot_min_is_rejected(job_env, new):
     with pytest.raises(SystemExit, match="PSM_MUPIX_HIGH_TOT_MIN"):
         _run(target, text.replace("PSM_MUPIX_HIGH_TOT_MIN = 13\n",
                                   f"PSM_MUPIX_HIGH_TOT_MIN = {new}\n"))
+
+
+def test_an_old_reco_drops_no_sma_banks(job_env, monkeypatch, capsys):
+    # a reco_testbeam built before the bad-frame cuts lacks the decoder and monitor
+    # properties: setting them would stop gaudirun.py, so the job leaves them unset
+    tmp_path, midas = job_env
+    musip_conf = sys.modules["pi_midas.PIONEER_MIDAS_READERConf"].PITMidasMusip
+    monkeypatch.setattr(musip_conf, "getDefaultProperties", classmethod(lambda cls: set()))
+    mon_conf = sys.modules["reco_testbeam.pi_psmalg_expConf"].PIPSMSMAMonitor
+    monkeypatch.setattr(mon_conf, "getDefaultProperties", classmethod(lambda cls: set()))
+    job = _run(render_job(midas, tmp_path / "run00790_00000.root", light=False))
+    assert "smaMaxFrameSpanMs" not in job["musip"].__dict__
+    assert "smaMinFineCoarseShare" not in job["musip"].__dict__
+    assert "MaxNarrowPairsPerFrame" not in job["sma_monitor"].__dict__
+    out = capsys.readouterr().out
+    assert "[nearline] WARNING    the installed PITMidasMusip has no smaMaxFrameSpanMs" in out
+    assert "[nearline] WARNING    the installed PIPSMSMAMonitor has no MaxNarrowPairsPerFrame" in out
+    assert " PSM_SMA_MIN_FINE_COARSE_SHARE=0.0 (not applied: old reco) " in out
+    assert " PSM_SMA_MAX_NARROW_PAIRS=0 (not applied: old reco)" in out
+
+
+def test_the_sma_bank_cuts_can_be_set(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = (target.read_text()
+            .replace("PSM_SMA_MAX_FRAME_SPAN_MS = 1000.0\n", "PSM_SMA_MAX_FRAME_SPAN_MS = 250\n")
+            .replace("PSM_SMA_MIN_FINE_COARSE_SHARE = 0.0\n", "PSM_SMA_MIN_FINE_COARSE_SHARE = 0.5\n")
+            .replace("PSM_SMA_MAX_NARROW_PAIRS = 0\n", "PSM_SMA_MAX_NARROW_PAIRS = 5000\n"))
+    job = _run(target, text)
+    assert job["musip"].smaMaxFrameSpanMs == 250.0
+    assert job["musip"].smaMinFineCoarseShare == 0.5
+    assert job["sma_monitor"].MaxNarrowPairsPerFrame == 5000
+
+
+@pytest.mark.parametrize("name,old,new", [
+    ("PSM_SMA_MAX_FRAME_SPAN_MS", "1000.0", "'1000'"),
+    ("PSM_SMA_MAX_FRAME_SPAN_MS", "1000.0", "True"),
+    ("PSM_SMA_MAX_FRAME_SPAN_MS", "1000.0", "-1.0"),
+    ("PSM_SMA_MIN_FINE_COARSE_SHARE", "0.0", "'0.5'"),
+    ("PSM_SMA_MIN_FINE_COARSE_SHARE", "0.0", "-0.1"),
+    ("PSM_SMA_MIN_FINE_COARSE_SHARE", "0.0", "1.5"),
+    ("PSM_SMA_MAX_NARROW_PAIRS", "0", "1.5"),
+    ("PSM_SMA_MAX_NARROW_PAIRS", "0", "-1"),
+    ("PSM_SMA_MAX_NARROW_PAIRS", "0", "True"),
+    ("PSM_SMA_MAX_NARROW_PAIRS", "0", "2**32"),
+    ("PSM_SMA_MAX_NARROW_PAIRS", "0", "'100'"),
+])
+def test_a_bad_sma_bank_setting_is_rejected(job_env, name, old, new):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text()
+    assert f"{name} = {old}\n" in text
+    with pytest.raises(SystemExit, match=name):
+        _run(target, text.replace(f"{name} = {old}\n", f"{name} = {new}\n"))
 
 
 def test_an_old_reco_writes_no_high_tot_maps(job_env, monkeypatch, capsys):
