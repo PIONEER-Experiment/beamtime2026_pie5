@@ -619,6 +619,8 @@ run's map does not cable S1 the monitor says so at `initialize()` and books no
 RF histograms. On a run without an RF channel the RF histograms are booked and
 stay empty.
 
+Reading the RF-lattice phase plots. `rf_lattice_phase_vs_tot_<vid>` (SMA monitor) and `*_vs_s1latphase` (track reco, full job only) give the RF phase of every S1 hit in radians, [0, 2 pi), on an RF lattice fitted every 300 us from the second pulse of each S1-gated burst of three or more RF pulses. It needs no momentum setting. Look for narrow vertical bands in phase: in a bunched run the e+ band sits at about 0.59 rad, and the heavier species (mu+, pi+) form their own bands at positions set by the beam momentum (at 65-66 MeV/c: mu+ near 3.2-3.7 rad, pi+ near 5-5.6 rad). The phase is raw, with no offset, so the long timewalk tail of e+ wraps from 2 pi back to 0; that is expected. Surface mu+ runs (27.9 MeV/c) are flat, because the muons carry the 26 ns pion lifetime: flat is not a fault there. `rf_lattice_anchor_residual` is the health plot: one narrow peak (about 0.5-0.7 ns rms) is good; a broad or flat residual means the wrong RF frequency in the `sma_rf` conditions table or an SMA clock fault, so tell the experts. Do not read the RF period from `rf_period`, and treat the old `rf_phase_vs_tot_<vid>` (last pulse of the gate) with care, since its window edges make side peaks.
+
 ### PSM reco
 
 | setting | default | what goes wrong if it is wrong |
