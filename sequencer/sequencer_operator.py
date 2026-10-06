@@ -57,7 +57,7 @@ def sequence(seq: SequenceClient):
         if seq.get_param("waitBeforeRun"):
             run_id = seq.odb_get("/Nearline/Info/Run DB PK")
             wait_for_operator(seq, f"Run DB config {run_id} loaded. Press OK to start the run.")
-        wait_for_operator(seq, "Please check the PLL Lock is ok and click ok")
+        #wait_for_operator(seq, "Please check the PLL Lock is ok and click ok")
         run_successful = execute_run(seq)
         if not run_successful:
             break

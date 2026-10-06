@@ -353,7 +353,7 @@ PSM_SMA_NIM_LAG = True
 # {NIM copy id: nominal delay from S1 in ns} for the lag above; an id not listed is
 # 0. Empty: S4L's ch 10 copy is a logic output with several delays to S4 and stays
 # uncalibrated, and S3L sits within a few ns of S1.
-PSM_SMA_NIM_NOMINAL_DELAY_NS = {}
+PSM_SMA_NIM_NOMINAL_DELAY_NS = {2021: 25, 2023: 75, 2024: 15, 2025: 22, 2026: 21}
 # The detector ids the lag above is measured and removed for (the decoder's
 # fineOffsetLagVids): the NIM copies S1L..S5L. An id the run's map does not cable
 # is inactive. A TOT id may be added if its channel turns out to carry the same

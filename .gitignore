@@ -48,3 +48,6 @@ Thumbs.db
 
 *.pdf
 root_output_files
+
+# Slack webhook (secret, read by python/pioneer/nearline/jobs.py)
+slack_webhook_url

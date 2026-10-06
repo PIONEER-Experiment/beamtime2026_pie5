@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 import json
@@ -6,14 +7,29 @@ from pathlib import Path
 
 import requests
 
-WEBHOOK_URL = ""
+# The Slack webhook is a secret and is never committed. It is read from
+# SLACK_WEBHOOK_URL if set (as in scripts/send_to_slack.sh), else from the
+# gitignored file slack_webhook_url at the repository root. With neither,
+# messages are printed instead of sent.
+WEBHOOK_FILE = Path(__file__).resolve().parents[3] / "slack_webhook_url"
+
+def webhook_url() -> str:
+    url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
+    if not url and WEBHOOK_FILE.is_file():
+        url = WEBHOOK_FILE.read_text().strip()
+    return url
 
 def send_to_slack(message: str) -> None:
     if not message.strip():
         raise ValueError("empty message, nothing sent")
 
+    url = webhook_url()
+    if not url:
+        print(f"Slack webhook not configured, not sent: {message}", file=sys.stderr)
+        return
+
     response = requests.post(
-        WEBHOOK_URL,
+        url,
         json={"text": message},
         timeout=30,
     )
