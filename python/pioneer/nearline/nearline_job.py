@@ -744,6 +744,42 @@ PSM_PAIR_WINDOW_NS = (-1000.0, 500.0)
 # no valid phase) of every prompt with a prompt-channel hit, through-going ones
 # included, so the pion window and the RF sidebands can be chosen offline.
 PSM_STOP_PHASE_HIST = 1
+# The track reco's zoom on the beam core per S1 RF phase: xxp_central_vs_s1phase
+# and yyp_central_vs_s1phase (and, with the reco's RF lattice on, the
+# *_central_vs_s1latphase twins), unweighted. The same prompt tracklets as
+# xxp_vs_s1phase, on the MuPix monitor's central axes instead of the minitwin
+# window: position over +-PSM_MUPIX_EXPANDED_RANGE_MM in bins of
+# PSM_CENTRAL_PIXELS_PER_BIN pixels, slope over about
+# +-PSM_MUPIX_CENTRAL_SLOPE_MRAD in half slope steps (a slope step is one pixel
+# over the lever arm; a two-pixel cluster sits half a step off). About 29 MB of
+# histogram in memory.
+PSM_RECO_CENTRAL_PHASE_MAPS = True
+# Per-stop-layer phase space in the delayed coincidence: xy, xxp and yyp against
+# the stop layer (0-6) on the minitwin export grid (64 bins over the
+# PSM_PHASE_SPACE_* window) as {xy,xxp,yyp}_stop_{tag,sb,all}, and on the
+# central axes above as {xy,xxp,yyp}_central_stop_{tag,sb,all}. "tag" holds the
+# tagged prompts of every layer (PSM_TAGGED_STOP_LAYERS does not apply), "sb"
+# the prompts with a candidate in the mirrored sideband, "all" every prompt that
+# fills stop_phase, through-going ones included, as the denominator. Tag
+# fraction and accidental subtraction per layer then come from these.
+PSM_STOP_LAYER_MAPS = True
+# x and y at L1 against the S1 RF phase (the stop_phase axis) and the stop
+# layer, 0.32 mm bins over +-PSM_MUPIX_EXPANDED_RANGE_MM:
+# {x,y}_vs_s1phase_stop_{all,tag,sb}, the same three populations as above. With
+# the reco's RF lattice on (PSM_SMA_RF_LATTICE and PSM_SMA_RF_LATTICE_RECO) also
+# the lattice twins {x,y}_vs_s1latphase_stop_{all,tag,sb}. The lattice phase is
+# not written to the tracklets, so without the reco lattice the delayed
+# coincidence has none to fill them with, and the job leaves them off.
+PSM_STOP_PHASE_MAPS = True
+# The delayed candidate's summed ToT against the stop layer, for the signal
+# window (delayed_tot_stop) and the mirrored sideband (delayed_tot_stop_sb),
+# without the PSM_DELAYED_TOT_MIN/MAX band, so the band can be judged per layer.
+PSM_DELAYED_TOT_HIST = True
+# Pixels per position bin of the central maps above (the track reco's and the
+# delayed coincidence's *_central_* maps): 8 pixels = 0.64 mm, so
+# 2 x PSM_MUPIX_EXPANDED_RANGE_MM / 0.64 = 130 bins. check() requires the range
+# to be a whole number of these bins.
+PSM_CENTRAL_PIXELS_PER_BIN = 8
 # Require the PROMPT half of a coincidence to have a prompt-channel hit of its own.
 # Off, any tracklet in the window can play the prompt role -- including, in the
 # unseeded mode, a delayed pulse that formed its own tracklet -- and the tag then
@@ -796,6 +832,12 @@ PSM_WEIGHT_STRATEGY = 1
 # rejects a count that is not a positive multiple of 64 for exactly that reason.
 # The all-tracks TH3s keep their own 64 bins -- already the export grid -- since
 # a 320-bin TH3 would be ~3 MB each; only the tagged TH2Ds get the fine grid.
+# The delayed coincidence's per-stop-layer maps {xy,xxp,yyp}_stop_{tag,sb,all}
+# (PSM_STOP_LAYER_MAPS) use this window at 64 bins too, for the same reason
+# (_MINITWIN_EXPORT_BINS below). The *_central_* maps (PSM_RECO_CENTRAL_PHASE_MAPS,
+# PSM_STOP_LAYER_MAPS) and {x,y}_vs_s1phase_stop_* (PSM_STOP_PHASE_MAPS) are on
+# the MuPix monitor's central axes instead (PSM_MUPIX_EXPANDED_RANGE_MM,
+# PSM_MUPIX_CENTRAL_SLOPE_MRAD): a zoom on the beam core, not minitwin input.
 PSM_PHASE_SPACE_BINS = 320
 # Position axis half-width in mm: x and y at L1, GLOBAL coordinates. The 2.5 the
 # algorithm defaults to was a single-position zoom that put every off-axis track
@@ -847,6 +889,21 @@ PSM_SMA_HITS_NTUPLE = True
 # mode switches off.
 _LIGHT_VALUES = {"1": True, "0": False}
 _LIGHT_SWITCHES = ("WRITE_NTUPLE", "PSM_TIMEWALK", "PSM_SMA_WIDE_DT", "PSM_SMA_DIAGNOSTICS")
+
+# The minitwin export grid: the model reads [3, 64, 64] maps (NBINS_2D in
+# beamline-simulation/psm/psm_scan_config.py). PSM_PHASE_SPACE_BINS must be a
+# multiple of it, and the per-stop-layer maps are booked on it directly.
+_MINITWIN_EXPORT_BINS = 64
+# The central slope axes are in half slope steps: a two-pixel cluster's mean
+# position puts its slope half a step off the whole-step lattice, which a
+# one-step bin would put on a bin edge.
+_CENTRAL_SLOPE_SUB_STEPS = 2
+# Pixels per position bin of {x,y}_vs_s1phase_stop_* (0.32 mm, the MuPix
+# monitor's track_xy_expanded bins).
+_STOP_PHASE_PIXELS_PER_BIN = 4
+# Lattice-phase bins over one RF cycle of {x,y}_vs_s1latphase_stop_*: the track
+# reco's nbinsS1LatPhase, which this job leaves at its default of 48.
+_LAT_PHASE_BINS = 48
 
 # Where the input, the output, the event limit, light mode, the conditions source and the
 # conditions directory come from. This runs before the container lists below, which
@@ -1098,6 +1155,52 @@ if (PSM_RECO or _MUPIX_TIMEWALK or _TWC_TIMEWALK) and PSM_CHANNEL_MAP_FILE and _
 _ODB_TABLES = [_odb(f) for f in ODB_SPECS]
 
 
+def _central_maps_used():
+    """True when a map on the central axes is asked for (all of them are PSM_RECO's)."""
+    return any(v is True for v in (PSM_RECO_CENTRAL_PHASE_MAPS, PSM_STOP_LAYER_MAPS,
+                                   PSM_STOP_PHASE_MAPS))
+
+
+def _central_bins(pixels_per_bin):
+    """Position bins over +-PSM_MUPIX_EXPANDED_RANGE_MM at this many pixels a bin,
+    as a float: whole when the range is a whole number of such bins."""
+    return 2.0 * float(PSM_MUPIX_EXPANDED_RANGE_MM) / (pixels_per_bin * float(PSM_QUAD_PIXEL_PITCH))
+
+
+def _central_axes_problem():
+    """What is wrong with the central axes, or "" when nothing is. The position axis
+    is +-PSM_MUPIX_EXPANDED_RANGE_MM in bins of PSM_CENTRAL_PIXELS_PER_BIN pixels
+    (the central maps) and of _STOP_PHASE_PIXELS_PER_BIN pixels
+    ({x,y}_vs_s1phase_stop_*); a range that is not a whole number of either would
+    leave a bin of another width at the edge and break the scan merge."""
+    try:
+        rng = float(PSM_MUPIX_EXPANDED_RANGE_MM)
+        slope = float(PSM_MUPIX_CENTRAL_SLOPE_MRAD)
+        pitch = float(PSM_QUAD_PIXEL_PITCH)
+    except (TypeError, ValueError):
+        rng = slope = pitch = math.nan
+    ppb = PSM_CENTRAL_PIXELS_PER_BIN
+    if not (isinstance(ppb, int) and not isinstance(ppb, bool) and ppb >= 1):
+        return (f"PSM_CENTRAL_PIXELS_PER_BIN is {ppb!r}: it is how many pixels share one "
+                "position bin of the central maps, so it must be an integer of at least 1.")
+    if not (math.isfinite(rng) and rng > 0 and math.isfinite(slope) and slope > 0
+            and math.isfinite(pitch) and pitch > 0):
+        return (f"PSM_MUPIX_EXPANDED_RANGE_MM ({PSM_MUPIX_EXPANDED_RANGE_MM}), "
+                f"PSM_MUPIX_CENTRAL_SLOPE_MRAD ({PSM_MUPIX_CENTRAL_SLOPE_MRAD}) and "
+                f"PSM_QUAD_PIXEL_PITCH ({PSM_QUAD_PIXEL_PITCH}) set the central axes of "
+                "the track reco's and the delayed coincidence's central maps; all three "
+                "must be positive.")
+    for name, n_px in (("PSM_CENTRAL_PIXELS_PER_BIN", ppb),
+                       ("the grid of {x,y}_vs_s1phase_stop_*", _STOP_PHASE_PIXELS_PER_BIN)):
+        bins = _central_bins(n_px)
+        if abs(bins - round(bins)) > 1e-6 or round(bins) < 1:
+            return (f"PSM_MUPIX_EXPANDED_RANGE_MM ({PSM_MUPIX_EXPANDED_RANGE_MM}) is not a "
+                    f"whole number of {n_px}-pixel bins ({name}, {n_px} x "
+                    f"{PSM_QUAD_PIXEL_PITCH} mm): 2 x range / bin width is {bins:.4f}. "
+                    "Change the range or the pixels per bin so that it is whole.")
+    return ""
+
+
 def check():
     """Every way this configuration is impossible, reported in one message."""
     problems = []
@@ -1228,7 +1331,11 @@ def check():
                         ("PSM_SMA_NIM_PAIRING", PSM_SMA_NIM_PAIRING),
                         ("PSM_SMA_HITS_NTUPLE", PSM_SMA_HITS_NTUPLE),
                         ("PSM_SMA_RF_LATTICE", PSM_SMA_RF_LATTICE),
-                        ("PSM_SMA_RF_LATTICE_RECO", PSM_SMA_RF_LATTICE_RECO)):
+                        ("PSM_SMA_RF_LATTICE_RECO", PSM_SMA_RF_LATTICE_RECO),
+                        ("PSM_RECO_CENTRAL_PHASE_MAPS", PSM_RECO_CENTRAL_PHASE_MAPS),
+                        ("PSM_STOP_LAYER_MAPS", PSM_STOP_LAYER_MAPS),
+                        ("PSM_STOP_PHASE_MAPS", PSM_STOP_PHASE_MAPS),
+                        ("PSM_DELAYED_TOT_HIST", PSM_DELAYED_TOT_HIST)):
         if not isinstance(value, bool):
             problems.append(f"{name} is {value!r}: it must be True or False (a string such as "
                             "'False' is true in Python and would switch it on).")
@@ -1391,16 +1498,22 @@ def check():
         problems.append(f"WD_RF_REFINE is on but WD_RF_REFINE_POINTS is "
                         f"{WD_RF_REFINE_POINTS}; a scan needs at least 2 points.")
     _phase_space_used = PSM_RECO or PSM_MUPIX_MONITOR
-    if _phase_space_used and (int(PSM_PHASE_SPACE_BINS) <= 0 or int(PSM_PHASE_SPACE_BINS) % 64):
+    if _phase_space_used and (int(PSM_PHASE_SPACE_BINS) <= 0
+                              or int(PSM_PHASE_SPACE_BINS) % _MINITWIN_EXPORT_BINS):
         problems.append(f"PSM_PHASE_SPACE_BINS is {PSM_PHASE_SPACE_BINS}: it must be a "
-                        "positive multiple of 64, or the phase-space histograms do not "
-                        "rebin onto the 64-bin minitwin export exactly (320 = 5 x 64).")
+                        f"positive multiple of {_MINITWIN_EXPORT_BINS}, or the phase-space "
+                        f"histograms do not rebin onto the {_MINITWIN_EXPORT_BINS}-bin minitwin "
+                        "export exactly (320 = 5 x 64).")
     if _phase_space_used and (float(PSM_PHASE_SPACE_POS_RANGE_MM) <= 0
                      or float(PSM_PHASE_SPACE_SLOPE_RANGE_MRAD) <= 0):
         problems.append(f"PSM_PHASE_SPACE_POS_RANGE_MM ({PSM_PHASE_SPACE_POS_RANGE_MM}) and "
                         f"PSM_PHASE_SPACE_SLOPE_RANGE_MRAD "
                         f"({PSM_PHASE_SPACE_SLOPE_RANGE_MRAD}) are half-widths of a "
                         "symmetric axis, so both must be positive.")
+    if PSM_RECO and _central_maps_used():
+        _central_problem = _central_axes_problem()
+        if _central_problem:
+            problems.append(_central_problem)
     if PSM_RECO and not (float(PSM_L_WINDOW_AFTER_NS) > -float(PSM_L_WINDOW_BEFORE_NS)):
         problems.append(f"PSM_L_WINDOW_BEFORE_NS ({PSM_L_WINDOW_BEFORE_NS}) and "
                         f"PSM_L_WINDOW_AFTER_NS ({PSM_L_WINDOW_AFTER_NS}) make the L-hit window "
@@ -1503,6 +1616,9 @@ _SMA_BANK_NOTE = " (no decode)"
 _SMA_PAIRS_NOTE = " (no monitor)"
 # The algorithms the RF lattice is switched on in, for the banner.
 _SMA_LATTICE_TO = []
+# Whether the track reco ended up with its RF lattice on: the delayed coincidence's
+# lattice maps need the reco's (transient) s1latphase.
+_RECO_LATTICE_ON = False
 tools = [PITMidasWaveDream()] if WD_ENABLED else []
 if PSM_DECODE:
     musip = PITMidasMusip(quadPixelPitch=float(PSM_QUAD_PIXEL_PITCH),
@@ -1842,6 +1958,18 @@ if PSM_SMA_MONITOR:
                                        Members=[sma_monitor]))
 
 if PSM_RECO:
+    # The central axes, shared by the track reco's and the delayed coincidence's
+    # *_central_* maps: position over +-PSM_MUPIX_EXPANDED_RANGE_MM in
+    # PSM_CENTRAL_PIXELS_PER_BIN-pixel bins, slope over about
+    # +-PSM_MUPIX_CENTRAL_SLOPE_MRAD in half slope steps (the algorithms round it up
+    # to whole steps around the lattice offset).
+    # check() has vetted them whenever a central map is on; with none on they are
+    # not needed.
+    _central_reco_axes = dict(
+        CentralPosRange=float(PSM_MUPIX_EXPANDED_RANGE_MM),
+        CentralPosBins=int(round(_central_bins(PSM_CENTRAL_PIXELS_PER_BIN))),
+        CentralSlopeRange=float(PSM_MUPIX_CENTRAL_SLOPE_MRAD),
+        CentralSlopeSubSteps=int(_CENTRAL_SLOPE_SUB_STEPS)) if _central_maps_used() else {}
     all_reco = PIPSMSimpleTrackReco(
         "PIPSMAllTrackReco", L_hits=_TES_MUQUAD_TWC, S_hits=_TES_MUTRIG_CAL,
         output=_TES_PSM_TRACKS, ConditionsTable=PSM_CHANNEL_MAP_TABLE,
@@ -1890,10 +2018,30 @@ if PSM_RECO:
             all_reco.RFTag = str(PSM_SMA_RF_TAG)
             if all_reco.RFLattice:
                 _SMA_LATTICE_TO.append("PIPSMAllTrackReco")
+                _RECO_LATTICE_ON = True
         elif PSM_SMA_RF_LATTICE and PSM_SMA_RF_LATTICE_RECO:
             print("[nearline] WARNING    the installed PIPSMSimpleTrackReco has no RFLattice "
                   "property (reco_testbeam older than the RF lattice): no *_vs_s1latphase "
                   "histograms")
+        # The beam core per S1 RF phase on the central axes (PSM_RECO_CENTRAL_PHASE_MAPS):
+        # xxp/yyp_central_vs_s1phase, and *_central_vs_s1latphase with the lattice on.
+        # Feature-detected like the lattice.
+        _reco_known = PIPSMSimpleTrackReco.getDefaultProperties()
+        if "CentralPhaseMaps" in _reco_known:
+            all_reco.CentralPhaseMaps = bool(PSM_RECO_CENTRAL_PHASE_MAPS)
+            if all_reco.CentralPhaseMaps:
+                _missing = [k for k in _central_reco_axes if k not in _reco_known]
+                for _k, _v in _central_reco_axes.items():
+                    if _k in _reco_known:
+                        setattr(all_reco, _k, _v)
+                if _missing:
+                    print("[nearline] WARNING    the installed PIPSMSimpleTrackReco has no "
+                          f"{', '.join(_missing)} property: the central maps keep its "
+                          "default axes")
+        elif PSM_RECO_CENTRAL_PHASE_MAPS:
+            print("[nearline] WARNING    the installed PIPSMSimpleTrackReco has no "
+                  "CentralPhaseMaps property (reco_testbeam older than the central RF maps): "
+                  "no xxp/yyp_central_vs_s1phase or _vs_s1latphase histograms")
         # The calibration layer's sidecar (index-parallel to S_hits) gives each
         # tracklet nimMask / incompleteMask, a bit per counter S1..S5.
         all_reco.ScintHitsInput = _TES_SMA_HITS
@@ -1931,6 +2079,47 @@ if PSM_RECO:
     if PSM_PAIR_WINDOW_NS is not None:
         tag_reco.PairWindowMin = float(PSM_PAIR_WINDOW_NS[0])
         tag_reco.PairWindowMax = float(PSM_PAIR_WINDOW_NS[1])
+    # The per-stop-layer maps (PSM_STOP_LAYER_MAPS, PSM_STOP_PHASE_MAPS,
+    # PSM_DELAYED_TOT_HIST). Feature-detected like the reco's lattice: a
+    # reco_testbeam built before them would die at option parsing. The lattice
+    # maps read the reco's transient s1latphase, so they go on only where the reco
+    # lattice did.
+    _tag_known = PIPSMDelayedCoincidence.getDefaultProperties()
+    _tag_maps = (
+        ("StopLayerMaps", PSM_STOP_LAYER_MAPS,
+         "{xy,xxp,yyp}_stop_* and {xy,xxp,yyp}_central_stop_*"),
+        ("StopPhaseMaps", PSM_STOP_PHASE_MAPS, "{x,y}_vs_s1phase_stop_*"),
+        ("StopLatPhaseMaps", PSM_STOP_PHASE_MAPS and _RECO_LATTICE_ON,
+         "{x,y}_vs_s1latphase_stop_*"),
+        ("DelayedTotHist", PSM_DELAYED_TOT_HIST, "delayed_tot_stop, delayed_tot_stop_sb"))
+    _tag_maps_on = False
+    for _prop, _on, _names in _tag_maps:
+        if _prop in _tag_known:
+            setattr(tag_reco, _prop, int(bool(_on)))
+            _tag_maps_on = _tag_maps_on or bool(_on)
+        elif _on:
+            print(f"[nearline] WARNING    the installed PIPSMDelayedCoincidence has no {_prop} "
+                  "property (reco_testbeam older than the per-stop-layer maps): no "
+                  f"{_names} histograms")
+    if _tag_maps_on:
+        _tag_axes = dict(
+            _central_reco_axes,
+            PixelPitch=float(PSM_QUAD_PIXEL_PITCH),
+            StopLayerMapBins=int(_MINITWIN_EXPORT_BINS),
+            StopPhasePosBins=int(round(_central_bins(_STOP_PHASE_PIXELS_PER_BIN))),
+            LatPhaseBins=int(_LAT_PHASE_BINS))
+        if PSM_DECODE and PSM_GEOMETRY_BASE:
+            # The L1/L2 plane placement for the slope lattice offset of the central
+            # axes, set under the same condition as the reco's.
+            _tag_axes["GeometrySvc"] = "PIGeometrySvc"
+        _missing = [k for k in _tag_axes if k not in _tag_known]
+        for _k, _v in _tag_axes.items():
+            if _k in _tag_known:
+                setattr(tag_reco, _k, _v)
+        if _missing:
+            print("[nearline] WARNING    the installed PIPSMDelayedCoincidence has no "
+                  f"{', '.join(_missing)} property: the per-stop-layer maps keep its "
+                  "default axes")
     algorithms.append(Gaudi__Sequencer(
         "PSMRecoSeq", RequireObjects=[_TES_MUTRIG_CAL],
         Members=[all_reco, PIPSMPatternReco(input=all_reco.output), weight_reco, tag_reco]))

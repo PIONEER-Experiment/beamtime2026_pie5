@@ -843,6 +843,113 @@ def test_a_bad_rf_lattice_setting_is_rejected(job_env, name, old, new):
         _run(target, text.replace(f"{name} = {old}\n", f"{name} = {new}\n"))
 
 
+_CENTRAL_AXES = {"CentralPosRange": 41.6, "CentralPosBins": 130, "CentralSlopeRange": 100.0,
+                 "CentralSlopeSubSteps": 2}
+_STOP_MAPS = ("StopLayerMaps", "StopPhaseMaps", "StopLatPhaseMaps", "DelayedTotHist")
+
+
+@pytest.mark.parametrize("light", [False, True])
+def test_the_central_rf_and_stop_layer_maps_are_on(job_env, capsys, light):
+    # not light switches: the light job keeps them too
+    tmp_path, midas = job_env
+    job = _run(render_job(midas, tmp_path / "run00790_00000.root", light=light))
+    reco, tag = job["all_reco"], job["tag_reco"]
+    assert reco.CentralPhaseMaps is True
+    for prop, value in _CENTRAL_AXES.items():
+        assert getattr(reco, prop) == value and getattr(tag, prop) == value, prop
+    for prop in _STOP_MAPS:
+        assert getattr(tag, prop) == 1, prop
+    assert tag.StopLayerMapBins == 64
+    assert tag.StopPhasePosBins == 260
+    assert tag.LatPhaseBins == 48
+    assert tag.PixelPitch == 0.08
+    assert tag.GeometrySvc == reco.GeometrySvc == "PIGeometrySvc"
+    assert "PIPSMDelayedCoincidence has no" not in capsys.readouterr().out
+
+
+def test_the_stop_lattice_maps_follow_the_reco_lattice(job_env):
+    # s1latphase is transient: without the reco's lattice there is nothing to fill them with
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    job = _run(target, target.read_text().replace("PSM_SMA_RF_LATTICE_RECO = True\n",
+                                                  "PSM_SMA_RF_LATTICE_RECO = False\n"))
+    assert job["all_reco"].RFLattice is False
+    assert job["tag_reco"].StopLatPhaseMaps == 0
+    assert job["tag_reco"].StopPhaseMaps == 1
+
+
+def test_the_central_rf_and_stop_layer_maps_can_be_switched_off(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text()
+    for name in ("PSM_RECO_CENTRAL_PHASE_MAPS", "PSM_STOP_LAYER_MAPS", "PSM_STOP_PHASE_MAPS",
+                 "PSM_DELAYED_TOT_HIST"):
+        text = text.replace(f"{name} = True\n", f"{name} = False\n")
+    job = _run(target, text)
+    reco, tag = job["all_reco"], job["tag_reco"]
+    assert reco.CentralPhaseMaps is False
+    for prop in _STOP_MAPS:
+        assert getattr(tag, prop) == 0, prop
+    # the axes are not set when no map is booked
+    for prop in list(_CENTRAL_AXES) + ["StopLayerMapBins", "StopPhasePosBins", "LatPhaseBins"]:
+        assert prop not in reco.__dict__ and prop not in tag.__dict__, prop
+    assert "GeometrySvc" not in tag.__dict__
+
+
+def test_an_old_reco_gets_no_central_rf_or_stop_layer_maps(job_env, monkeypatch, capsys):
+    # a reco_testbeam built before these maps would die at option parsing on the
+    # unknown properties, so the job leaves them unset and says so
+    tmp_path, midas = job_env
+    conf = sys.modules["reco_testbeam.pi_psmalg_expConf"]
+    known = {"RFLattice", "RFTable", "RFTag"}
+    for cls in (conf.PIPSMSimpleTrackReco, conf.PIPSMDelayedCoincidence):
+        monkeypatch.setattr(cls, "getDefaultProperties", classmethod(lambda cls: known))
+    job = _run(render_job(midas, tmp_path / "run00790_00000.root", light=False))
+    reco, tag = job["all_reco"], job["tag_reco"]
+    assert reco.RFLattice is True
+    for prop in ["CentralPhaseMaps"] + list(_CENTRAL_AXES):
+        assert prop not in reco.__dict__, prop
+    for prop in list(_STOP_MAPS) + list(_CENTRAL_AXES) + ["GeometrySvc", "PixelPitch"]:
+        assert prop not in tag.__dict__, prop
+    out = capsys.readouterr().out
+    assert ("[nearline] WARNING    the installed PIPSMSimpleTrackReco has no CentralPhaseMaps "
+            "property") in out
+    for prop in _STOP_MAPS:
+        assert f"[nearline] WARNING    the installed PIPSMDelayedCoincidence has no {prop} " in out
+
+
+@pytest.mark.parametrize("name,old,new", [
+    ("PSM_RECO_CENTRAL_PHASE_MAPS", "True", "'False'"),
+    ("PSM_STOP_LAYER_MAPS", "True", "1"),
+    ("PSM_STOP_PHASE_MAPS", "True", "'True'"),
+    ("PSM_DELAYED_TOT_HIST", "True", "0"),
+    ("PSM_CENTRAL_PIXELS_PER_BIN", "8", "0"),
+    ("PSM_CENTRAL_PIXELS_PER_BIN", "8", "True"),
+    ("PSM_CENTRAL_PIXELS_PER_BIN", "8", "8.0"),
+    # 2 x 41.6 / (7 x 0.08) = 148.6: not a whole number of bins
+    ("PSM_CENTRAL_PIXELS_PER_BIN", "8", "7"),
+    ("PSM_MUPIX_EXPANDED_RANGE_MM", "41.6", "41.7"),
+    ("PSM_MUPIX_EXPANDED_RANGE_MM", "41.6", "-41.6"),
+    ("PSM_MUPIX_CENTRAL_SLOPE_MRAD", "100.0", "0.0"),
+])
+def test_a_bad_central_map_setting_is_rejected(job_env, name, old, new):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text()
+    assert f"{name} = {old}\n" in text
+    with pytest.raises(SystemExit, match=name):
+        _run(target, text.replace(f"{name} = {old}\n", f"{name} = {new}\n"))
+
+
+def test_a_whole_central_grid_at_other_pixels_per_bin_is_accepted(job_env):
+    # 2 x 41.6 / (4 x 0.08) = 260
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    job = _run(target, target.read_text().replace("PSM_CENTRAL_PIXELS_PER_BIN = 8\n",
+                                                  "PSM_CENTRAL_PIXELS_PER_BIN = 4\n"))
+    assert job["all_reco"].CentralPosBins == 260 and job["tag_reco"].CentralPosBins == 260
+
+
 def test_an_old_reco_writes_no_high_tot_maps(job_env, monkeypatch, capsys):
     # a reco_testbeam built before the high-ToT maps has no HighTotMin property on the
     # monitor: setting it would stop gaudirun.py, so the job leaves it unset and says so
