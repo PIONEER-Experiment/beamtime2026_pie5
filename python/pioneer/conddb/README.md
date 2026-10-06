@@ -118,6 +118,37 @@ written and the exit code is 3. The snapshot job runs with `--strict`. When you
 add a table, add it to `pg2json.CONTAINERS`. What an export does and does not
 carry over is described below (**Export**).
 
+## Deploying `sma_rf`
+
+`pg2json.CONTAINERS` names `sma_rf` (the RF frequency on the SMA clock) in
+`bt2026_psm_readout_map.json`, and `pg2json` refuses a database that lacks a
+table it names: nothing is written (`export_all`, "no table sma_rf"). Every
+snapshot runs `pg2json`, hourly and after every conditions write, so on a host
+whose database has no `sma_rf` every snapshot fails once this code is pulled,
+and the nearline job in db mode logs the missing table from the SMA monitor and
+the track reco (only their RF lattice is off) until it is loaded. So on pinky
+and on piana load the table **before** pulling this change to `pg2json.py`:
+
+```bash
+C=service=pioneer-conditions-admin
+# 1. back up first: a verified dump off the host (a snapshot copies its dump
+#    to the backup disk; check it with sha256sum -c MANIFEST there)
+python3 -m pioneer.conddb.snapshot --force
+# 2. the sma_rf table alone, from a reco_testbeam that has it (a whole container
+#    would reload every table in it)
+python3 -c 'import json, sys; d = json.load(open(sys.argv[1])); json.dump({"sma_rf": d["sma_rf"]}, open(sys.argv[2], "w"), indent=1)' \
+    $PIONEERSYS/reco_testbeam/conditions/bt2026_psm_readout_map.json /tmp/sma_rf.json
+python3 json2pg.py $C /tmp/sma_rf.json
+# 3. check that the frequency resolves (FrequencyHz ~50633280)
+python3 condtool.py --conninfo $C resolve sma_rf --run <a recent run>
+# 4. pull this change, then check that the containers export and reload
+python3 pg2json.py service=pioneer-conditions --out-dir /tmp/sma_rf_check --check
+```
+
+Pull without delay after the load: until then the old `pg2json` does not know
+the table, so its `--check` fails on it and `snapshot.py`'s `--strict` export
+fails (the reason is in `cron.log`).
+
 ## Tools
 
 ```bash

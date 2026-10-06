@@ -235,7 +235,7 @@ def test_stale_first_frame_is_skipped_only_for_subrun_0(job_env):
         assert job["musip"].correctFineOffsets is True
 
 
-def test_rendered_light_job_switches_off_the_four(job_env, capsys):
+def test_rendered_light_job_switches_off_the_five(job_env, capsys):
     tmp_path, midas = job_env
     target = render_job(midas, tmp_path / "run00790_00000.root", light=True)
     job = _run(target)
@@ -260,7 +260,8 @@ def test_rendered_light_job_switches_off_the_four(job_env, capsys):
     assert job["twc"].applyTimewalkCorrection is True
     out = capsys.readouterr().out
     assert ("[nearline] light      on, switched off: "
-            "WRITE_NTUPLE PSM_TIMEWALK PSM_SMA_WIDE_DT PSM_SMA_DIAGNOSTICS") in out
+            "WRITE_NTUPLE PSM_TIMEWALK PSM_SMA_WIDE_DT PSM_SMA_DIAGNOSTICS "
+            "PSM_SMA_RF_LATTICE_RECO") in out
     assert "[nearline] rntuple    no RNTuple" in out
 
 
@@ -753,8 +754,46 @@ def test_the_rf_lattice_settings_reach_the_monitor_and_the_reco(job_env, capsys)
         assert job[alg].RFTable == "sma_rf"
         assert job[alg].RFTag == ""
     out = capsys.readouterr().out
-    assert ("[nearline] sma rf     PSM_SMA_RF_LATTICE=True PSM_SMA_RF_TABLE=sma_rf "
-            "PSM_SMA_RF_TAG=(default) set on: PIPSMSMAMonitor, PIPSMAllTrackReco") in out
+    assert ("[nearline] sma rf     PSM_SMA_RF_LATTICE=True PSM_SMA_RF_LATTICE_RECO=True "
+            "PSM_SMA_RF_TABLE=sma_rf PSM_SMA_RF_TAG=(default) "
+            "on in: PIPSMSMAMonitor, PIPSMAllTrackReco") in out
+
+
+def test_a_light_job_drops_the_reco_lattice_but_keeps_the_monitors(job_env, capsys):
+    # the six *_vs_s1latphase TH3F are the lattice's cost; the monitor's
+    # rf_lattice_* plots are cheap and stay in the light job
+    tmp_path, midas = job_env
+    job = _run(render_job(midas, tmp_path / "run00790_00000.root", light=True))
+    assert job["PSM_SMA_RF_LATTICE"] is True and job["PSM_SMA_RF_LATTICE_RECO"] is False
+    assert job["sma_monitor"].RFLattice is True
+    assert job["all_reco"].RFLattice is False
+    assert job["all_reco"].RFTable == "sma_rf"
+    out = capsys.readouterr().out
+    assert ("[nearline] sma rf     PSM_SMA_RF_LATTICE=True PSM_SMA_RF_LATTICE_RECO=False "
+            "PSM_SMA_RF_TABLE=sma_rf PSM_SMA_RF_TAG=(default) on in: PIPSMSMAMonitor") in out
+
+
+def test_the_reco_lattice_can_be_switched_off_alone(job_env, capsys):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text().replace("PSM_SMA_RF_LATTICE_RECO = True\n",
+                                      "PSM_SMA_RF_LATTICE_RECO = False\n")
+    job = _run(target, text)
+    assert job["LIGHT"] is False
+    assert job["sma_monitor"].RFLattice is True
+    assert job["all_reco"].RFLattice is False
+    assert " on in: PIPSMSMAMonitor\n" in capsys.readouterr().out
+
+
+def test_the_lattice_switch_also_switches_off_the_reco_lattice(job_env, capsys):
+    # PSM_SMA_RF_LATTICE_RECO only narrows PSM_SMA_RF_LATTICE, never widens it
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text().replace("PSM_SMA_RF_LATTICE = True\n", "PSM_SMA_RF_LATTICE = False\n")
+    job = _run(target, text)
+    assert job["PSM_SMA_RF_LATTICE_RECO"] is True
+    assert job["sma_monitor"].RFLattice is False and job["all_reco"].RFLattice is False
+    assert " on in: none\n" in capsys.readouterr().out
 
 
 def test_the_rf_lattice_can_be_switched_off_and_pinned_to_a_tag(job_env):
@@ -783,12 +822,14 @@ def test_an_old_reco_gets_no_rf_lattice_settings(job_env, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "[nearline] WARNING    the installed PIPSMSMAMonitor has no RFLattice property" in out
     assert "[nearline] WARNING    the installed PIPSMSimpleTrackReco has no RFLattice" in out
-    assert " set on: none" in out
+    assert " on in: none" in out
 
 
 @pytest.mark.parametrize("name,old,new", [
     ("PSM_SMA_RF_LATTICE", "True", "'False'"),
     ("PSM_SMA_RF_LATTICE", "True", "1"),
+    ("PSM_SMA_RF_LATTICE_RECO", "True", "'False'"),
+    ("PSM_SMA_RF_LATTICE_RECO", "True", "0"),
     ("PSM_SMA_RF_TABLE", '"sma_rf"', '""'),
     ("PSM_SMA_RF_TABLE", '"sma_rf"', "None"),
     ("PSM_SMA_RF_TAG", '""', "None"),
