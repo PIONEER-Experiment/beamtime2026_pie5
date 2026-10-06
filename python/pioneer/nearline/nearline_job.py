@@ -575,6 +575,21 @@ PSM_SMA_WIDE_DT = True
 # on the quadratic pairing of a frame with far too many hits. 0 means no limit. Not
 # a light switch.
 PSM_SMA_MAX_NARROW_PAIRS = 0
+# The RF lattice. With the RF channel decoded, the SMA monitor folds every hit of
+# every cabled counter onto the frame's RF lattice (rf_lattice_phase_vs_tot_<vid>,
+# rf_lattice_anchor_residual, rf_lattice_counters) and the track reco every
+# tracklet's S1 hit (the *_vs_s1latphase histograms and their _w twins): the phase
+# in rad over one RF cycle, with no gate, no veto and no species or momentum input.
+# The lattice is fitted per 100 us block from the 2nd pulse of every S1-gated RF
+# burst of >= 3 pulses, with the run's RF frequency on the SMA clock from the
+# conditions table PSM_SMA_RF_TABLE (sma_rf, in bt2026_psm_readout_map.json);
+# PSM_SMA_RF_TAG "" takes the table's default tag. A table the conditions do not
+# supply for the run switches only the lattice off, with an error line in the log;
+# the gate-rule RF histograms and the rest of the job run as before. False books
+# no lattice histogram. Feature-detected: an older reco_testbeam leaves them unset.
+PSM_SMA_RF_TABLE = "sma_rf"
+PSM_SMA_RF_TAG = ""
+PSM_SMA_RF_LATTICE = True
 # --- PSM reco --------------------------------------------------------------
 # Container holding the data-side channel map the tracklet reco reads (json mode only).
 PSM_CHANNEL_MAP_FILE = "bt2026_psm_channel_map.json"
@@ -1206,7 +1221,8 @@ def check():
                         ("PSM_SMA_NIM_LAG", PSM_SMA_NIM_LAG),
                         ("PSM_SMA_SKIP_STALE_FIRST_FRAME", PSM_SMA_SKIP_STALE_FIRST_FRAME),
                         ("PSM_SMA_NIM_PAIRING", PSM_SMA_NIM_PAIRING),
-                        ("PSM_SMA_HITS_NTUPLE", PSM_SMA_HITS_NTUPLE)):
+                        ("PSM_SMA_HITS_NTUPLE", PSM_SMA_HITS_NTUPLE),
+                        ("PSM_SMA_RF_LATTICE", PSM_SMA_RF_LATTICE)):
         if not isinstance(value, bool):
             problems.append(f"{name} is {value!r}: it must be True or False (a string such as "
                             "'False' is true in Python and would switch it on).")
@@ -1244,6 +1260,13 @@ def check():
         problems.append(f"PSM_SMA_PAIR_WINDOW_NS is {PSM_SMA_PAIR_WINDOW_NS!r}: it must be a "
                         "number of ns above 0 and at most 1000 (the largest aligned "
                         "|t_NIM - t_TOT| of a pair; the RF period is about 20 ns).")
+    if not (isinstance(PSM_SMA_RF_TABLE, str) and PSM_SMA_RF_TABLE):
+        problems.append(f"PSM_SMA_RF_TABLE is {PSM_SMA_RF_TABLE!r}: it must be the name of the "
+                        "conditions table holding the RF frequency on the SMA clock (\"sma_rf\"); "
+                        "to switch the RF lattice off set PSM_SMA_RF_LATTICE = False.")
+    if not isinstance(PSM_SMA_RF_TAG, str):
+        problems.append(f"PSM_SMA_RF_TAG is {PSM_SMA_RF_TAG!r}: it must be a string, \"\" for "
+                        "the table's default tag.")
     if PSM_SMA_TIME_SOURCE not in ("tot", "nim"):
         problems.append(f"PSM_SMA_TIME_SOURCE is {PSM_SMA_TIME_SOURCE!r}: it must be 'tot' (the "
                         "TOT word's time) or 'nim' (the NIM copy's).")
@@ -1472,6 +1495,8 @@ _HIGH_TOT_NOTE = " (no monitor)"
 # The same for the two SMA bank cuts and the monitor's narrow pair budget.
 _SMA_BANK_NOTE = " (no decode)"
 _SMA_PAIRS_NOTE = " (no monitor)"
+# The algorithms the RF lattice settings reached, for the banner.
+_SMA_LATTICE_TO = []
 tools = [PITMidasWaveDream()] if WD_ENABLED else []
 if PSM_DECODE:
     musip = PITMidasMusip(quadPixelPitch=float(PSM_QUAD_PIXEL_PITCH),
@@ -1795,6 +1820,17 @@ if PSM_SMA_MONITOR:
         print("[nearline] WARNING    the installed PIPSMSMAMonitor has no MaxNarrowPairsPerFrame "
               "property (reco_testbeam older than the bad-frame cuts): no frame is left out "
               "for its narrow pairs")
+    # The RF lattice: the frequency from the sma_rf conditions table; a table the
+    # conditions do not supply switches only the lattice off (an error line).
+    # Feature-detected like the narrow pair budget.
+    if "RFLattice" in PIPSMSMAMonitor.getDefaultProperties():
+        sma_monitor.RFLattice = bool(PSM_SMA_RF_LATTICE)
+        sma_monitor.RFTable = str(PSM_SMA_RF_TABLE)
+        sma_monitor.RFTag = str(PSM_SMA_RF_TAG)
+        _SMA_LATTICE_TO.append("PIPSMSMAMonitor")
+    elif PSM_SMA_RF_LATTICE:
+        print("[nearline] WARNING    the installed PIPSMSMAMonitor has no RFLattice property "
+              "(reco_testbeam older than the RF lattice): no rf_lattice_* histograms")
     algorithms.append(Gaudi__Sequencer("PSMSMASeq", RequireObjects=[_TES_MUTRIG_CAL],
                                        Members=[sma_monitor]))
 
@@ -1837,6 +1873,18 @@ if PSM_RECO:
         # phase window is a projection of them. /Event/rf is optional per
         # frame, as there.
         all_reco.RFInput = _TES_RF
+        # The same pulses folded onto the RF lattice give each tracklet's S1 hit
+        # its lattice phase (s1latphase, transient) and fill the *_vs_s1latphase
+        # twins; same table and rule as the SMA monitor's rf_lattice_*.
+        if "RFLattice" in PIPSMSimpleTrackReco.getDefaultProperties():
+            all_reco.RFLattice = bool(PSM_SMA_RF_LATTICE)
+            all_reco.RFTable = str(PSM_SMA_RF_TABLE)
+            all_reco.RFTag = str(PSM_SMA_RF_TAG)
+            _SMA_LATTICE_TO.append("PIPSMAllTrackReco")
+        elif PSM_SMA_RF_LATTICE:
+            print("[nearline] WARNING    the installed PIPSMSimpleTrackReco has no RFLattice "
+                  "property (reco_testbeam older than the RF lattice): no *_vs_s1latphase "
+                  "histograms")
         # The calibration layer's sidecar (index-parallel to S_hits) gives each
         # tracklet nimMask / incompleteMask, a bit per counter S1..S5.
         all_reco.ScintHitsInput = _TES_SMA_HITS
@@ -1954,4 +2002,7 @@ print(f"[nearline] sma fine   PSM_SMA_FINE_OFFSETS={PSM_SMA_FINE_OFFSETS}"
 print(f"[nearline] sma frame  PSM_SMA_MAX_FRAME_SPAN_MS={PSM_SMA_MAX_FRAME_SPAN_MS}"
       f" PSM_SMA_MIN_FINE_COARSE_SHARE={PSM_SMA_MIN_FINE_COARSE_SHARE}{_SMA_BANK_NOTE}"
       f" PSM_SMA_MAX_NARROW_PAIRS={PSM_SMA_MAX_NARROW_PAIRS}{_SMA_PAIRS_NOTE}")
+print(f"[nearline] sma rf     PSM_SMA_RF_LATTICE={PSM_SMA_RF_LATTICE}"
+      f" PSM_SMA_RF_TABLE={PSM_SMA_RF_TABLE} PSM_SMA_RF_TAG={PSM_SMA_RF_TAG or '(default)'}"
+      f" set on: {', '.join(_SMA_LATTICE_TO) or 'none'}")
 print(f"[nearline] EvtMax     {EVT_MAX}")

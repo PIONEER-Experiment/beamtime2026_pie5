@@ -745,6 +745,63 @@ def test_a_bad_sma_bank_setting_is_rejected(job_env, name, old, new):
         _run(target, text.replace(f"{name} = {old}\n", f"{name} = {new}\n"))
 
 
+def test_the_rf_lattice_settings_reach_the_monitor_and_the_reco(job_env, capsys):
+    tmp_path, midas = job_env
+    job = _run(render_job(midas, tmp_path / "run00790_00000.root", light=False))
+    for alg in ("sma_monitor", "all_reco"):
+        assert job[alg].RFLattice is True
+        assert job[alg].RFTable == "sma_rf"
+        assert job[alg].RFTag == ""
+    out = capsys.readouterr().out
+    assert ("[nearline] sma rf     PSM_SMA_RF_LATTICE=True PSM_SMA_RF_TABLE=sma_rf "
+            "PSM_SMA_RF_TAG=(default) set on: PIPSMSMAMonitor, PIPSMAllTrackReco") in out
+
+
+def test_the_rf_lattice_can_be_switched_off_and_pinned_to_a_tag(job_env):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = (target.read_text()
+            .replace("PSM_SMA_RF_LATTICE = True\n", "PSM_SMA_RF_LATTICE = False\n")
+            .replace('PSM_SMA_RF_TAG = ""\n', 'PSM_SMA_RF_TAG = "bt2026-measured"\n'))
+    job = _run(target, text)
+    for alg in ("sma_monitor", "all_reco"):
+        assert job[alg].RFLattice is False
+        assert job[alg].RFTag == "bt2026-measured"
+
+
+def test_an_old_reco_gets_no_rf_lattice_settings(job_env, monkeypatch, capsys):
+    # a reco_testbeam built before the RF lattice has no RFLattice/RFTable/RFTag:
+    # setting them would stop gaudirun.py, so the job leaves them unset and says so
+    tmp_path, midas = job_env
+    conf = sys.modules["reco_testbeam.pi_psmalg_expConf"]
+    for cls in (conf.PIPSMSMAMonitor, conf.PIPSMSimpleTrackReco):
+        monkeypatch.setattr(cls, "getDefaultProperties", classmethod(lambda cls: set()))
+    job = _run(render_job(midas, tmp_path / "run00790_00000.root", light=False))
+    for alg in ("sma_monitor", "all_reco"):
+        for prop in ("RFLattice", "RFTable", "RFTag"):
+            assert prop not in job[alg].__dict__
+    out = capsys.readouterr().out
+    assert "[nearline] WARNING    the installed PIPSMSMAMonitor has no RFLattice property" in out
+    assert "[nearline] WARNING    the installed PIPSMSimpleTrackReco has no RFLattice" in out
+    assert " set on: none" in out
+
+
+@pytest.mark.parametrize("name,old,new", [
+    ("PSM_SMA_RF_LATTICE", "True", "'False'"),
+    ("PSM_SMA_RF_LATTICE", "True", "1"),
+    ("PSM_SMA_RF_TABLE", '"sma_rf"', '""'),
+    ("PSM_SMA_RF_TABLE", '"sma_rf"', "None"),
+    ("PSM_SMA_RF_TAG", '""', "None"),
+])
+def test_a_bad_rf_lattice_setting_is_rejected(job_env, name, old, new):
+    tmp_path, midas = job_env
+    target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
+    text = target.read_text()
+    assert f"{name} = {old}\n" in text
+    with pytest.raises(SystemExit, match=name):
+        _run(target, text.replace(f"{name} = {old}\n", f"{name} = {new}\n"))
+
+
 def test_an_old_reco_writes_no_high_tot_maps(job_env, monkeypatch, capsys):
     # a reco_testbeam built before the high-ToT maps has no HighTotMin property on the
     # monitor: setting it would stop gaudirun.py, so the job leaves it unset and says so
