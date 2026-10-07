@@ -13,7 +13,9 @@ The views are:
     queue       everything pending or running, in the order the sequencer takes it
     run         one run in full: configurations with values, files, jobs, sequence
     sequences   one line per scan with the state of its member runs
-    config      one configuration row with its typed values
+    config      one configuration row with its typed values, or every row of
+                one configuration table (optionally without the machine-written
+                ones, or without the values -- see `config_list`)
 
 Two things are cached for the life of the process: the start and stop time of
 runs that have finished (they cannot change, and the BOR/EOR lookup is a scan
@@ -28,6 +30,7 @@ which is not something a page refreshing every few seconds may do.
 
 import argparse
 import json
+import re
 import sys
 import time
 from collections import OrderedDict
@@ -56,6 +59,45 @@ UNFINISHED_TIME_TTL_S = 30.0
 # Shown instead of a configuration list for runs that predate the run database
 # holding their settings.
 NO_CONFIG_NOTE = "no configuration recorded for this run"
+
+# ------------------------------------------------------------- machine-written
+#
+# Some configurations are written by machines, not people, and are not meant
+# to be picked by hand:
+#  - the runplan backend writes one per plan step, with a comment
+#    "runplan <plan> step <n> ...";
+#  - scheduled sequences (five-point scans, the tuner) write theirs through
+#    `RunDBInterface.add_new_configuration` without a comment, so they get its
+#    default "Mystery Configuration".
+# They outnumber the hand-made ones many times over, so the ConfigDB page
+# leaves them out unless asked (`config_list(auto="hide")`).
+#
+# The same rules are in custom/js/cfgdb.js (AUTO_KINDS), which classifies the
+# rows it is sent; custom/js/cfgdb-auto-kinds.json holds examples that both
+# test suites check, so the two cannot drift apart.  "Whitespace" is spelled out
+# as the six ASCII characters on both sides, because Python's and JavaScript's
+# own ideas of Unicode whitespace differ.  A new kind is one more line here and
+# one more line in AUTO_KINDS in cfgdb.js; the first rule that matches wins.
+_ASCII_SPACE = " \t\n\r\f\v"
+_RUNPLAN_COMMENT = re.compile(r"runplan[ \t\n\r\f\v]")
+MYSTERY_COMMENT = "Mystery Configuration"
+
+AUTO_KINDS = (
+    ("runplan", lambda comment: _RUNPLAN_COMMENT.match(comment) is not None),
+    ("mystery", lambda comment: comment.strip(_ASCII_SPACE) == MYSTERY_COMMENT),
+)
+
+# What `config_list` may be asked for besides every row.
+AUTO_CHOICES = ("hide", "only")
+
+
+def auto_kind(comment) -> str:
+    """The kind of machine that wrote a configuration with this comment, or ""."""
+    text = comment if isinstance(comment, str) else ""
+    for kind, matches in AUTO_KINDS:
+        if matches(text):
+            return kind
+    return ""
 
 
 class ViewError(Exception):
@@ -480,12 +522,15 @@ class RunDbView:
             self._columns[config_type] = [row["column_name"] for row in cur.fetchall()]
         return self._columns[config_type]
 
-    def _config_values(self, cur, wanted: list) -> dict:
+    def _config_values(self, cur, wanted: list, only: tuple | None = None) -> dict:
         """Values of the given (config_type, config_id) pairs.
 
         A type with no table of its own -- a typo, or a device added to the
         database but not to this schema -- yields no entry, and the caller
         reports `values: null` for it rather than failing the whole view.
+
+        `only` names the columns to read, when not all of them are wanted;
+        `id` is always read.
         """
         known = self._config_tables(cur)
         by_type: dict = {}
@@ -496,6 +541,8 @@ class RunDbView:
         out: dict = {}
         for config_type, ids in by_type.items():
             columns = self._config_column_names(cur, config_type)
+            if only is not None:
+                columns = [name for name in columns if name == "id" or name in only]
             if not columns:
                 continue
             query = sql.SQL("SELECT {cols} FROM {table} WHERE id = ANY(%s)").format(
@@ -773,13 +820,29 @@ class RunDbView:
             }
         )
 
-    def config_list(self, config_type: str) -> dict:
-        """One line per configuration of the given type, newest first.
+    def config_list(self, config_type: str, auto: str | None = None,
+                    values: bool = True):
+        """One line per configuration of the given type, oldest first.
 
         The `config_type` must be a table in schema `config`, and the rows are
         shown with their values.  The page shows the same columns as psql does,
         and the full values are one click away.
+
+        With no other argument the reply is a plain list of every row, which is
+        what it has always been.  Two opt-in arguments keep it small, which is
+        what the ConfigDB page needs once a table holds thousands of rows written
+        by the runplan backend and by scheduled scans (see AUTO_KINDS):
+
+        * `auto="hide"` leaves those rows out, and `auto="only"` gives nothing
+          else.  Either way the reply becomes an object, whose `auto_counts`
+          says how many rows of each kind the table holds -- the rows that were
+          left out, or the rows that were sent.
+        * `values=False` drops `values` from every row and keeps `seq_id`,
+          which is all a list needs; one configuration's values are then read
+          with `config(id)`.  A row of a type with no table gets `seq_id: null`.
         """
+        if auto is not None and auto not in AUTO_CHOICES:
+            raise ViewError("usage", f"auto must be one of {', '.join(AUTO_CHOICES)}")
         with self._cursor() as cur:
             cur.execute(
                 "SELECT id, config_type, do_not_use, comment FROM config.configuration "
@@ -787,15 +850,36 @@ class RunDbView:
                 (config_type,)
             )
             results = cur.fetchall()
-            vals = self._config_values(cur, [(config_type, r['id']) for r in results])
-            values = [ {
-                "config_id": row["id"],
-                "config_type": row["config_type"],
-                "do_not_use": bool(row["do_not_use"]),
-                "comment": row["comment"],
-                "values": vals.get((row["config_type"], row["id"]))
-            } for row in results]
-        return jsonable(values)
+            counts = {kind: 0 for kind, _ in AUTO_KINDS}
+            if auto is not None:
+                kept = []
+                for row in results:
+                    kind = auto_kind(row["comment"])
+                    if kind:
+                        counts[kind] += 1
+                    if bool(kind) == (auto == "only"):
+                        kept.append(row)
+                results = kept
+            wanted = [(config_type, r["id"]) for r in results]
+            vals = self._config_values(cur, wanted, only=None if values else ("seq_id",))
+            rows = []
+            for row in results:
+                item = {
+                    "config_id": row["id"],
+                    "config_type": row["config_type"],
+                    "do_not_use": bool(row["do_not_use"]),
+                    "comment": row["comment"],
+                }
+                found = vals.get((row["config_type"], row["id"]))
+                if values:
+                    item["values"] = found
+                else:
+                    item["seq_id"] = None if found is None else found.get("seq_id")
+                rows.append(item)
+        if auto is None:
+            return jsonable(rows)
+        return jsonable({"config_type": config_type, "auto": auto, "values": bool(values),
+                         "rows": rows, "auto_counts": counts})
 
 
 # ------------------------------------------------------------------ command line
@@ -858,6 +942,10 @@ def _print_status(data: dict) -> None:
 def _print_config(item: dict) -> None:
     print(f"configuration {item['config_id']} ({item['config_type']}), "
           f"do not use: {item['do_not_use']}")
+    if "values" not in item:
+        # values=false: the list carries the comment and seq_id only.
+        print(f"  seq_id {item.get('seq_id')}, comment {item.get('comment')!r}")
+        return
     if item["values"] is None:
         print("no table for this configuration type")
         return
@@ -942,6 +1030,12 @@ def _print_data(cmd: str, data: dict) -> None:
         if isinstance(data, list):
             for item in data:
                 _print_config(item)
+        elif "rows" in data:
+            for item in data["rows"]:
+                _print_config(item)
+            counts = ", ".join(f"{n} {kind}" for kind, n in data["auto_counts"].items())
+            print(f"\nmachine-written rows in {data['config_type']}: {counts}"
+                  + (" (left out)" if data["auto"] == "hide" else ""))
         else:
             _print_config(data['config'])
 
@@ -966,6 +1060,11 @@ def main(argv=None) -> int:
                         help="how many rows (runlog, queue, sequences)")
     parser.add_argument("--before-id", type=int, default=None,
                         help="runlog: show runs older than this database id")
+    parser.add_argument("--auto", choices=AUTO_CHOICES, default=None,
+                        help="config TABLE: leave out (hide) or keep only (only) the "
+                             "runplan and mystery configurations")
+    parser.add_argument("--no-values", action="store_true",
+                        help="config TABLE: leave out each row's values (seq_id is kept)")
     parser.add_argument("--dsn", default=None,
                         help=f"libpq connection string; default ${pg.DSN_ENV} "
                              "or the readonly role on the configured host")
@@ -984,6 +1083,10 @@ def main(argv=None) -> int:
         payload["limit"] = args.limit
     if args.before_id is not None:
         payload["before_id"] = args.before_id
+    if args.auto is not None:
+        payload["auto"] = args.auto
+    if args.no_values:
+        payload["values"] = False
 
     view = RunDbView(dsn=args.dsn, timeout_ms=args.timeout_ms)
     try:

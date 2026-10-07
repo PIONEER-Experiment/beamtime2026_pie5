@@ -1,0 +1,29 @@
+{
+  "_comment": "Comments and the kind of configuration they mark. Checked against autoKind() in cfgdb.js (cfgdb.test.js) and auto_kind() in pioneer/rundb/view.py (python/tests/test_config_list.py), so the page and the RunDBView client sort rows the same way. Not served to the page.",
+  "cases": [
+    {"comment": "runplan asm12-ramp step 3 ASM12=40.0", "kind": "runplan"},
+    {"comment": "runplan big_optimisation_tpe step 112", "kind": "runplan"},
+    {"comment": "runplan\tq step 1", "kind": "runplan"},
+    {"comment": "runplan\nstep 1", "kind": "runplan"},
+    {"comment": "runplan ", "kind": "runplan"},
+    {"comment": "runplan", "kind": ""},
+    {"comment": "runplanX step 1", "kind": ""},
+    {"comment": " runplan step 1", "kind": ""},
+    {"comment": "Runplan step 1", "kind": ""},
+    {"comment": "runplan step 1", "kind": ""},
+    {"comment": " runplan step 1", "kind": ""},
+    {"comment": "Mystery Configuration", "kind": "mystery"},
+    {"comment": "  Mystery Configuration \n", "kind": "mystery"},
+    {"comment": "\tMystery Configuration\r\f\u000b", "kind": "mystery"},
+    {"comment": "Mystery Configuration ", "kind": ""},
+    {"comment": "﻿Mystery Configuration", "kind": ""},
+    {"comment": "mystery configuration", "kind": ""},
+    {"comment": "Mystery Configuration 2", "kind": ""},
+    {"comment": "Mystery  Configuration", "kind": ""},
+    {"comment": "PSM 4 mm", "kind": ""},
+    {"comment": "PI65_good_22: PIONEER 2022 65 MeV/c pi+", "kind": ""},
+    {"comment": "from run 1569 (run01569.json (end of run), auto)", "kind": ""},
+    {"comment": "", "kind": ""},
+    {"comment": null, "kind": ""}
+  ]
+}

@@ -96,6 +96,8 @@ const state = {
    queue: null,              // data of the last good `queue`
    sequences: null,          // rows of the last good `sequences`
    configuration_tables : {'target_positions' : [], 'degrader_positions' : [], 'beamline_settings' : []},
+   tables: {},               // per table (target, degrader, beamline): read error, machine-written
+                             // counts, and whether those rows have been read (see tableState)
    showAuto: false,          // runplan + mystery configurations shown in the tables
    gotoWatch: null,          // token of the go-to arrival watch in progress, if any
    runs: {},                 // runlog rows by database id, newest first when sorted
@@ -282,46 +284,65 @@ function staleHtml(st) {
 // Configuration Table
 // ---------------------------------------------------------------------------
 
-// Two kinds of configuration are written by machines, not people, and are not
-// meant to be picked by hand:
+// Some configurations are written by machines, not people, and are not meant
+// to be picked by hand:
 //  - the runplan backend writes one per plan step, with a comment
 //    "runplan <plan> step <n> ...";
 //  - scheduled sequences (five-point scans, the tuner) write theirs through
 //    add_new_configuration() without a comment, so they get its default
 //    "Mystery Configuration".
-// They pile up quickly and swamp the hand-made ones, so the tables hide them
-// until asked. The choice is kept per browser; it is a convenience, so a
-// browser without storage just hides them.
-const RUNPLAN_COMMENT = /^runplan\s/;
+// They outnumber the hand-made ones many times over (pie5_epics: 1363 of 1403
+// rows in October 2026), so the page asks the client to leave them out
+// (`config` with auto: "hide"), shows how many there are, and fetches them only
+// when someone asks to see them (auto: "only"). The choice is kept per
+// browser; it is a convenience, so a browser without storage just hides them.
+//
+// The client sorts rows with the same rules (pioneer/rundb/view.py,
+// AUTO_KINDS), and cfgdb-auto-kinds.json holds examples both test suites
+// check. Whitespace is the six ASCII characters on both sides, spelled out,
+// because Python's and JavaScript's ideas of Unicode whitespace differ. A new
+// kind is one more entry here and one more line in view.py; the first rule
+// that matches wins.
 const MYSTERY_COMMENT = "Mystery Configuration";
+const AUTO_KINDS = [
+   { kind: "runplan", label: "runplan",
+     test: function (c) { return /^runplan[ \t\n\r\f\v]/.test(c); } },
+   { kind: "mystery", label: "mystery",
+     test: function (c) { return c.replace(/^[ \t\n\r\f\v]+|[ \t\n\r\f\v]+$/g, "") === MYSTERY_COMMENT; } }
+];
 const SHOW_AUTO_KEY = "cfgdb.showAuto";
-
-function isRunplanConfig(row) {
-   return RUNPLAN_COMMENT.test((row && row.comment) || "");
-}
-
-function isMysteryConfig(row) {
-   return ((row && row.comment) || "").trim() === MYSTERY_COMMENT;
-}
 
 /** "runplan", "mystery", or "" for a configuration someone wrote by hand. */
 function autoKind(row) {
-   if (isRunplanConfig(row)) return "runplan";
-   if (isMysteryConfig(row)) return "mystery";
+   const comment = row && typeof row.comment === "string" ? row.comment : "";
+   for (let i = 0; i < AUTO_KINDS.length; i++) {
+      if (AUTO_KINDS[i].test(comment)) return AUTO_KINDS[i].kind;
+   }
    return "";
 }
+
+function isRunplanConfig(row) { return autoKind(row) === "runplan"; }
+
+function isMysteryConfig(row) { return autoKind(row) === "mystery"; }
 
 function autoAttr(row) {
    const kind = autoKind(row);
    return kind ? " data-auto='" + kind + "'" : "";
 }
 
-/** The show/hide line under a table; filled in by applyAutoVisibility(). */
-function autoToggleHtml(rows) {
-   const runplan = (rows || []).filter(isRunplanConfig).length;
-   const mystery = (rows || []).filter(isMysteryConfig).length;
-   return '<div class="rundb-note cfg-auto-toggle" data-runplan="' + runplan +
-          '" data-mystery="' + mystery + '"></div>';
+/** {kind: count} of the machine-written rows in a list of rows. */
+function autoCounts(rows) {
+   const counts = {};
+   AUTO_KINDS.forEach(function (k) { counts[k.kind] = 0; });
+   (rows || []).forEach(function (row) {
+      const kind = autoKind(row);
+      if (kind) counts[kind] += 1;
+   });
+   return counts;
+}
+
+function autoTotal(counts) {
+   return AUTO_KINDS.reduce(function (n, k) { return n + (Number((counts || {})[k.kind]) || 0); }, 0);
 }
 
 /** The "go to" button of one row; none for a row marked do_not_use. */
@@ -370,62 +391,107 @@ function currentToggled(box) {
    updateNumRuns();
 }
 
-function configTableHtml(configuration_tables) {
+// The three tables. `rows` is the key in state.configuration_tables, `values`
+// whether the client sends each row's values: target and degrader rows are a
+// handful of numbers and the page uses them (columns, the current-position
+// highlight, the five-point selection); a beamline row is ~35 EPICS channels
+// the list never shows, so it comes with seq_id only and a click on the row
+// reads that one configuration (`config {id}`).
+const TABLES = {
+   target:   { rows: "target_positions",   values: true,  columns: 7, what: "target positions" },
+   degrader: { rows: "degrader_positions", values: true,  columns: 6, what: "degrader positions" },
+   beamline: { rows: "beamline_settings",  values: false, columns: 5, what: "beamline settings" }
+};
+const LEVELS = ["target", "degrader", "beamline"];
+
+/** A fresh state.tables entry: what the page knows about one table besides its rows. */
+function tableState(table) {
+   return {
+      table: table,          // the config.* table name, or null when there is none
+      error: null,           // the error of the first read, if it failed
+      counts: {},            // machine-written rows in the table, by kind
+      auto: "none",          // none | loading | loaded | error: the hidden rows
+      autoError: null
+   };
+}
+
+/** One row of a table. Values are carried on the row when the client sent them. */
+function configRowHtml(level, row) {
+   const id = Number(row.config_id);
+   const v = row.values;
+   const has = v !== undefined && v !== null;
+   const klass = CURRENT_LEVELS[level].checkbox.slice(1);
+   const key = esc(row.config_type) + ":" + id;
+   const box = row.do_not_use ? " --- "
+      : '<input type="checkbox" class="' + klass + '" value="' + key + '"' +
+        (level === "target" ? ' id="' + key + '"' : "") + ">";
+   const seq = has ? v.seq_id : row.seq_id;
+   let html = "<tr" + autoAttr(row) + ' id="cfg_row' + id + '" data-config="' + id + '"' +
+              (has ? " data-values='" + JSON.stringify(v).replace(/&/g, "&amp;").replace(/'/g, "&#39;") + "'" : "") +
+              ">" +
+              "<td>" + id + "</td>" +
+              "<td>" + box + "</td>" +
+              "<td>" + gotoCell(row) + "</td>" +
+              "<td>" + (seq === undefined || seq === null ? " --- " : esc(seq)) + "</td>" +
+              "<td>" + (row.comment ? esc(row.comment) : " --- ") + "</td>";
+   if (level === "target" || level === "degrader") html += "<td>" + (has ? esc(v.xpos) : "---") + "</td>";
+   if (level === "target") html += "<td>" + (has ? esc(v.ypos) : "---") + "</td>";
+   return html + "</tr>";
+}
+
+const TABLE_HEADERS = {
+   target:   "<tr><th>config id</th><th>select</th><th>go to</th><th>seq_id</th><th>comment</th><th>xpos</th><th>ypos</th></tr>",
+   degrader: "<tr><th>config id</th><th>select</th><th>go to</th><th>seq_id</th><th>comment</th><th>xpos</th></tr>",
+   beamline: "<tr><th>config id</th><th>select</th><th>go to</th><th>seq_id</th><th>comment</th></tr>"
+};
+
+/**
+ * "kind: message (sizes) -- hint" for an error envelope or the page's own error
+ * object. A too_large reply names the sizes, and its hint is the knob that
+ * actually helps here: `config` takes no row limit to ask for fewer rows with.
+ */
+function configErrorText(err) {
+   err = err || {};
+   let size = "";
+   let hint = err.hint;
+   if (err.kind === "too_large") {
+      if (err.needed) {
+         size = " (the reply needed " + Math.ceil(Number(err.needed) / 1024) + " kB" +
+                (err.limit ? ", the buffer was " + Math.round(Number(err.limit) / 1024) + " kB" : "") + ")";
+      }
+      hint = "raise " + CONFIG_ROOT + "/Max reply kB (the page retries once at four times that)";
+   }
+   return esc(err.kind || "error") + ": " + esc(err.message || "no answer") + size +
+          (hint ? " &mdash; " + esc(hint) : "");
+}
+
+/**
+ * An error as a box above a table. The table stays, with its "current
+ * setting" row, so a sequence that leaves this level alone can still be
+ * scheduled.
+ */
+function configErrorHtml(what, err) {
+   return '<div class="rundb-alert red cfg-table-error"><b>Could not read the ' + esc(what) + ".</b> " +
+          configErrorText(err) + "</div>";
+}
+
+/** One table: heading link, error if any, header, "current setting" row, rows, show/hide line. */
+function configSectionHtml(level, title, href, rows, ts) {
+   return '<h3 class="rundb-h"><a href="' + href + '"> ' + esc(title) + " </a></h3>" +
+          (level === "target" ? '<input type="checkbox" id="5p_with_merge"> Run 5 point sequence with merging.' : "") +
+          (ts && ts.error ? configErrorHtml(TABLES[level].what, ts.error) : "") +
+          '<table class="mtable rundb-table" id="cfg-table-' + level + '">' +
+          TABLE_HEADERS[level] +
+          currentRowHtml(level, TABLES[level].columns) +
+          (rows || []).map(function (row) { return configRowHtml(level, row); }).join("") +
+          "</table>" +
+          '<div class="rundb-note cfg-auto-toggle" data-level="' + level + '"></div>';
+}
+
+function configTableHtml(configuration_tables, tables) {
    if (!configuration_tables) return '<div class="rundb-note">waiting for the first answer&hellip;</div>';
-
-   // Render target positions
-   const target_header = "<tr><th>config id</th><th>select</th><th>go to</th><th>seq_id</th><th>comment</th><th>xpos</th><th>ypos</th></tr>"
-   const target_body = configuration_tables.target_positions.map(function(row) {
-      const do_not_use_cell = row.do_not_use
-            ? " --- " : '<input type="checkbox" class="config-ckbx-target" value="' + row.config_type + ":" + row.config_id + '" id ="' + row.config_type + ":" + row.config_id + '">';
-      return "<tr" + autoAttr(row) + " id=cfg_row" + row.config_id + " data-values='" +
-                  JSON.stringify(row.values || {}).replace(/'/g, "&#39;") +
-                  "'>" +
-              "<td>" + row.config_id + "</td>" +
-              "<td>" + do_not_use_cell + "</td>" +
-              "<td>" + gotoCell(row) + "</td>" +
-              "<td>" + (row.values ? row.values.seq_id : "---") + "</td>" +
-              "<td>" + (row.comment ? row.comment : " --- ") + "</td>" +
-              "<td>" + (row.values ? row.values.xpos : "---") + "</td>" +
-              "<td>" + (row.values ? row.values.ypos : "---") + "</td>" +
-              "</tr>"
-
-   });
-   const target_5psequence = '<input type="checkbox" id = "5p_with_merge"> Run 5 point sequence with merging.'
-
-   // Render target positions
-   const degrader_header = '<tr><th>config id</th><th>select</th><th>go to</th><th>seq_id</th><th>comment</th><th>xpos</th></tr>'
-   const degrader_body = configuration_tables.degrader_positions.map(function(row) {
-      const do_not_use_cell = row.do_not_use
-            ? " --- " : '<input type="checkbox" class="config-ckbx-degrader"  value="' + row.config_type + ":" + row.config_id + '">';
-       return "<tr" + autoAttr(row) + " id=cfg_row" + row.config_id + " data-values='" +
-                  JSON.stringify(row.values || {}).replace(/'/g, "&#39;") +
-                  "'>" +
-              "<td>" + row.config_id + "</td>" +
-              "<td>" + do_not_use_cell + "</td>" +
-              "<td>" + gotoCell(row) + "</td>" +
-              "<td>" + (row.values ? row.values.seq_id : "---") + "</td>" +
-              "<td>" + (row.comment ? row.comment : " --- ") + "</td>" +
-              "<td>" + (row.values ? row.values.xpos : "---") + "</td>" +
-              "</tr>"
-
-   });
-
-   const beamline_header = '<tr><th>config id</th><th>select</th><th>go to</th><th>seq_id</th><th>comment</th></tr>'
-   const beamline_body   = configuration_tables.beamline_settings.map(function(row) {
-      const do_not_use_cell = row.do_not_use
-            ? " --- " : '<input type="checkbox" class="config-ckbx-beam"  value="' + row.config_type + ":" + row.config_id + '">';
-       return "<tr" + autoAttr(row) + " id=cfg_row" + row.config_id + " data-values='" +
-                  JSON.stringify(row.values || {}).replace(/'/g, "&#39;") +
-                  "'>" +
-              "<td>" + row.config_id + "</td>" +
-              "<td>" + do_not_use_cell + "</td>" +
-              "<td>" + gotoCell(row) + "</td>" +
-              "<td>" + (row.values ? row.values.seq_id : " ---" ) + "</td>" +
-              "<td>" + (row.comment ? row.comment : " --- ") + "</td>" +
-              "</tr>"
-
-   });
+   tables = tables || {};
+   const beamline = configuration_tables.beamline || {};
 
    // submit area
    const submit_area = '<table  class="mtable rundb-table">'+
@@ -438,37 +504,23 @@ function configTableHtml(configuration_tables) {
          '</table>';
 
    return '<div id="cfg-goto-status"></div>' +
-          '<h3 class="rundb-h"><a href="http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FXYTable%2FVariables"> Target Positions </a></h3>' +
-          target_5psequence +
-          '<table class="mtable rundb-table">' +
-          target_header +
-          currentRowHtml("target", 7) +
-          target_body.join("") +
-          "</table>" +
-          autoToggleHtml(configuration_tables.target_positions) +
+          configSectionHtml("target", "Target Positions",
+             "http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FXYTable%2FVariables",
+             configuration_tables.target_positions, tables.target) +
           '<div id="target-add-line"></div>' +
 
-         '<h3 class="rundb-h"><a href="http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FDegrader%2FVariables"> Degrader Positions </a></h3>'+
-         '<table class="mtable rundb-table">' +
-         degrader_header +
-         currentRowHtml("degrader", 6) +
-         degrader_body.join("") +
-         "</table>" +
-         autoToggleHtml(configuration_tables.degrader_positions) +
-         '<div id="degrader-add-line"></div>' +
+          configSectionHtml("degrader", "Degrader Positions",
+             "http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FDegrader%2FVariables",
+             configuration_tables.degrader_positions, tables.degrader) +
+          '<div id="degrader-add-line"></div>' +
 
-         '<h3 class="rundb-h"><a href="http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FEPICS">' + configuration_tables.beamline.name + ' Beamline </a></h3>'+
-         '<table class="mtable rundb-table">' +
-         beamline_header +
-         currentRowHtml("beamline", 5) +
-         beamline_body.join("") +
-         "</table>" +
-         autoToggleHtml(configuration_tables.beamline_settings) +
-         '<div id="beam_add_line"></div>' +
+          configSectionHtml("beamline", (beamline.name || "Unknown") + " Beamline",
+             "http://localhost:8080/?cmd=ODB&odb_path=%2FEquipment%2FEPICS",
+             configuration_tables.beamline_settings, tables.beamline) +
+          '<div id="beam_add_line"></div>' +
 
-         '<table class="mtable rundb-table">' +
-         '<h3 class="rundb-h"> Submit new Sequences </h3>'+
-         submit_area
+          '<h3 class="rundb-h"> Submit new Sequences </h3>'+
+          submit_area;
 }
 
 // ---------------------------------------------------------------------------
@@ -606,17 +658,36 @@ function writeShowAuto(show) {
 }
 
 /** "3 runplan + 12 mystery configurations", leaving out a kind with none. */
-function autoCountText(runplan, mystery) {
+function autoCountText(counts) {
    const parts = [];
-   if (runplan) parts.push(runplan + " runplan");
-   if (mystery) parts.push(mystery + " mystery");
-   return parts.join(" + ") + " configuration" + (runplan + mystery === 1 ? "" : "s");
+   AUTO_KINDS.forEach(function (k) {
+      const n = Number((counts || {})[k.kind]) || 0;
+      if (n) parts.push(n + " " + k.label);
+   });
+   return parts.join(" + ") + " configuration" + (autoTotal(counts) === 1 ? "" : "s");
 }
 
 /**
- * Show or hide the runplan and mystery rows and redo the lines under the
- * tables. Hiding a row also unticks it: a run count that includes rows nobody
- * can see would be a trap.
+ * The line under one table about its machine-written rows. `ts` is the
+ * table's state.tables entry, `show` whether they are asked for.
+ */
+function autoToggleText(ts, show) {
+   const what = autoCountText(ts.counts);
+   if (!show) return what + ' hidden &mdash; <a href="#" class="cfg-auto-switch">show</a>';
+   if (ts.auto === "loading") return "Loading " + what + "&hellip;";
+   if (ts.auto === "error") {
+      return '<span class="cfg-auto-error"><b>Could not load the ' + what + ".</b> " +
+             configErrorText(ts.autoError) + "</span>" +
+             ' &mdash; <a href="#" class="cfg-auto-retry">try again</a>' +
+             ' &mdash; <a href="#" class="cfg-auto-switch">hide</a>';
+   }
+   return "Showing " + what + ' &mdash; <a href="#" class="cfg-auto-switch">hide</a>';
+}
+
+/**
+ * Show or hide the machine-written rows that have been read, and redo the
+ * lines under the tables. Hiding a row also unticks it: a run count that
+ * includes rows nobody can see would be a trap.
  */
 function applyAutoVisibility() {
    const show = state.showAuto;
@@ -627,15 +698,86 @@ function applyAutoVisibility() {
       });
    });
    document.querySelectorAll("#rundb-configs .cfg-auto-toggle").forEach(function (node) {
-      const runplan = Number(node.dataset.runplan) || 0;
-      const mystery = Number(node.dataset.mystery) || 0;
-      const what = autoCountText(runplan, mystery);
-      node.style.display = runplan + mystery ? "" : "none";
-      node.innerHTML = show
-         ? "Showing " + what + ' &mdash; <a href="#" class="cfg-auto-switch">hide</a>'
-         : what + ' hidden &mdash; <a href="#" class="cfg-auto-switch">show</a>';
+      const ts = state.tables[node.dataset.level];
+      const total = ts ? autoTotal(ts.counts) : 0;
+      node.style.display = total ? "" : "none";
+      // A failed read is an error box like the ones above the tables, not a note.
+      const failed = Boolean(ts && show && ts.auto === "error");
+      node.classList.toggle("rundb-note", !failed);
+      node.classList.toggle("rundb-alert", failed);
+      node.classList.toggle("red", failed);
+      node.innerHTML = total ? autoToggleText(ts, show) : "";
    });
    updateNumRuns();
+}
+
+/**
+ * Read the machine-written rows of one table, once, and put them into it in
+ * id order. Rows already on the page keep their ticks; the new ones are
+ * locked like the others when their level is "current setting" (or, for the
+ * targets, while the five-point box is ticked). A failure says so under the
+ * table and leaves everything else as it was.
+ */
+async function loadAutoRows(level) {
+   const ts = state.tables[level];
+   if (!ts || !ts.table || ts.error || !autoTotal(ts.counts)) return;
+   if (ts.auto === "loading" || ts.auto === "loaded") return;
+   ts.auto = "loading";
+   ts.autoError = null;
+   applyAutoVisibility();
+
+   const env = await R.call("config", { id: ts.table, auto: "only", values: TABLES[level].values }, maxBytes());
+   if (!env || !env.ok || !env.data || !Array.isArray(env.data.rows)) {
+      ts.auto = "error";
+      ts.autoError = olderClientHint((env && env.error) || { kind: "bad_reply", message: "the reply carried no rows" });
+      applyAutoVisibility();
+      return;
+   }
+   insertRows(level, env.data.rows);
+   if (env.data.auto_counts) ts.counts = env.data.auto_counts;
+   ts.auto = "loaded";
+   applyAutoVisibility();
+}
+
+/** Merge rows into a table that is already on the page, in config id order. */
+function insertRows(level, rows) {
+   const key = TABLES[level].rows;
+   const list = state.configuration_tables[key] || [];
+   const seen = {};
+   list.forEach(function (row) { seen[row.config_id] = true; });
+   const fresh = rows.filter(function (row) { return !seen[row.config_id]; })
+                     .sort(function (a, b) { return a.config_id - b.config_id; });
+   state.configuration_tables[key] = list.concat(fresh).sort(function (a, b) { return a.config_id - b.config_id; });
+
+   const table = el("cfg-table-" + level);
+   if (!table) return;
+   const body = table.tBodies[0] || table;
+   const existing = Array.from(body.querySelectorAll("tr[data-config]"));
+   let at = 0;
+   fresh.forEach(function (row) {
+      while (at < existing.length && Number(existing[at].dataset.config) < row.config_id) at++;
+      const html = configRowHtml(level, row);
+      if (at < existing.length) existing[at].insertAdjacentHTML("beforebegin", html);
+      else body.insertAdjacentHTML("beforeend", html);
+   });
+
+   const current = document.querySelector('.config-ckbx-current[data-level="' + level + '"]');
+   const fivePoint = level === "target" && el("5p_with_merge") && el("5p_with_merge").checked;
+   if ((current && current.checked) || fivePoint) {
+      body.querySelectorAll(CURRENT_LEVELS[level].checkbox).forEach(function (box) { box.disabled = true; });
+   }
+}
+
+/** Turn the machine-written rows on or off; reading them the first time they are wanted. */
+function setShowAuto(show) {
+   state.showAuto = show;
+   writeShowAuto(show);
+   applyAutoVisibility();
+   if (show) loadAllAutoRows();
+}
+
+async function loadAllAutoRows() {
+   for (let i = 0; i < LEVELS.length; i++) await loadAutoRows(LEVELS[i]);
 }
 
 function updateNumRuns() {
@@ -785,45 +927,134 @@ async function gotoClicked(configId) {
    });
 }
 
+/** The config.* table of the beamline the ODB names, or null. */
+function beamlineTable(name) {
+   if (name == "PiM1") return "pim1_epics";
+   if (name == "PiE5") return "pie5_epics";
+   return null;
+}
+
+/** Why there is no beamline table to read, as an error the section can show. */
+function noBeamlineError(name) {
+   return {
+      kind: "odb",
+      message: CONFIG_ROOT + "/Beamline is " +
+               (name === null || name === undefined || name === "" ? "not set" : '"' + String(name) + '"') +
+               "; expected PiM1 or PiE5",
+      hint: "set it in the ODB and reload the page"
+   };
+}
+
+/**
+ * Read one table without its machine-written rows, into
+ * state.configuration_tables and state.tables. Never throws: a failed read is
+ * kept as the table's error and the page renders around it.
+ */
+async function readTable(level, table) {
+   const ts = tableState(table);
+   state.tables[level] = ts;
+   state.configuration_tables[TABLES[level].rows] = [];
+   if (!table) return;
+   const env = await R.call("config", { id: table, auto: "hide", values: TABLES[level].values }, maxBytes());
+   if (!env || !env.ok || !env.data || !Array.isArray(env.data.rows)) {
+      ts.error = olderClientHint((env && env.error) || { kind: "bad_reply", message: "the reply carried no rows" });
+      return;
+   }
+   state.configuration_tables[TABLES[level].rows] = env.data.rows;
+   ts.counts = env.data.auto_counts || {};
+}
+
+/**
+ * A client that predates `auto` and `values` refuses them as unknown
+ * arguments; say what to do about it rather than what it said.
+ */
+function olderClientHint(err) {
+   if (err && err.kind === "usage" && /does not take/.test(err.message || "")) {
+      return Object.assign({}, err, {
+         hint: "the " + R.getClientName() + " client is older than this page: restart it from the Programs page"
+      });
+   }
+   return err;
+}
+
+/** The values of one configuration, four name/value pairs to a line. */
+function valuesTableHtml(values) {
+   const entries = Object.entries(values || {});
+   let html = '<table  class="mtable rundb-table">';
+   for (let i = 0; i < entries.length; i += 4) {
+      html += "<tr>";
+      for (let j = 0; j < 4; j++) {
+         if (i + j < entries.length) {
+            const key = entries[i + j][0];
+            const value = entries[i + j][1];
+            const padding = j > 0 ? "padding: 4px 8px 4px 30px" : "padding: 4px 8px";
+            html += "<td style='" + padding + "'><b>" + esc(key) + "</b></td>";
+            html += "<td style='padding: 4px 8px'>" + esc(value) + "</td>";
+         } else {
+            html += "<td></td><td></td>";
+         }
+      }
+      html += "</tr>";
+   }
+   return html + "</table>";
+}
+
+/** A beamline row carries no values on the page; read them when it is clicked. */
+async function showValuesOf(configId) {
+   const env = await R.call("config", { id: configId }, maxBytes());
+   if (!env || !env.ok || !env.data || !env.data.config) {
+      const err = (env && env.error) || {};
+      dlgAlert("Cannot read configuration " + configId + ": " + esc(err.message || "no answer") +
+               (err.hint ? " &mdash; " + esc(err.hint) : ""));
+      return;
+   }
+   const cfg = env.data.config;
+   if (!cfg.values) {
+      dlgAlert("Configuration " + configId + " (" + esc(cfg.config_type) + ") has no table of values.");
+      return;
+   }
+   dlgAlert(valuesTableHtml(cfg.values));
+}
+
 // renderConfigurations is only called asyncronously upon loading the page.
 // Updates are going to be rare enough such that reloading the page is acceptable.
 async function renderConfigurations() {
    await pollOdb() // Poll ODB first to load configuration required here
-   const beamline = state.odb.beamline
-   let beamtable = null;
-   if (beamline == "PiM1") {
-      beamtable = "pim1_epics";
-   } else if (beamline == "PiE5") {
-      beamtable = "pie5_epics";
-   }
-   const target_positions   = await R.call("config", {"id" : "target_position"}, maxBytes());
-   const degrader_positions = await R.call("config", {"id" : "degrader_position"}, maxBytes());
-   const beamline_settings = await R.call("config", {"id" : beamtable}, maxBytes());
+   const beamline = state.odb.beamline;
+   const beamtable = beamlineTable(beamline);
    state.configuration_tables = {
-      "target_positions" : target_positions.data,
-      "degrader_positions" : degrader_positions.data,
-      "beamline_settings" : beamline_settings.data,
+      "target_positions" : [],
+      "degrader_positions" : [],
+      "beamline_settings" : [],
       "beamline" : {"name" : beamline, "table" : beamtable }
    };
-   put("rundb-configs", configTableHtml(state.configuration_tables))
+   await readTable("target", "target_position");
+   await readTable("degrader", "degrader_position");
+   await readTable("beamline", beamtable);
+   if (!beamtable) state.tables.beamline.error = noBeamlineError(beamline);
+   put("rundb-configs", configTableHtml(state.configuration_tables, state.tables));
 
    state.showAuto = readShowAuto();
    applyAutoVisibility();
+   if (state.showAuto) loadAllAutoRows();
+
+   // Delegated, so rows read later (the machine-written ones) need no wiring.
    el("rundb-configs").addEventListener("click", function (e) {
       const button = e.target.closest(".cfg-goto");
       if (button) { e.preventDefault(); gotoClicked(Number(button.dataset.config)); return; }
-      if (!e.target.matches(".cfg-auto-switch")) return;
-      e.preventDefault();
-      state.showAuto = !state.showAuto;
-      writeShowAuto(state.showAuto);
-      applyAutoVisibility();
+      if (e.target.matches(".cfg-auto-switch")) {
+         e.preventDefault();
+         setShowAuto(!state.showAuto);
+         return;
+      }
+      if (e.target.matches(".cfg-auto-retry")) {
+         e.preventDefault();
+         loadAutoRows(e.target.closest(".cfg-auto-toggle").dataset.level);
+      }
    });
-
-   document.querySelectorAll( ".config-ckbx-target, .config-ckbx-degrader, .config-ckbx-beam" ).forEach(function(checkbox) {
-      checkbox.addEventListener("change", updateNumRuns);
-   });
-   document.querySelectorAll(".config-ckbx-current").forEach(function (box) {
-      box.addEventListener("change", function () { currentToggled(box); });
+   el("rundb-configs").addEventListener("change", function (e) {
+      if (e.target.matches(".config-ckbx-current")) { currentToggled(e.target); return; }
+      if (e.target.matches(".config-ckbx-target, .config-ckbx-degrader, .config-ckbx-beam")) updateNumRuns();
    });
 
    document.getElementById("5p_with_merge").addEventListener("change", function() {
@@ -832,7 +1063,8 @@ async function renderConfigurations() {
          for (let index = 0; index < state.configuration_tables.target_positions.length; index++) {
             const element = state.configuration_tables.target_positions[index];
             let el = document.getElementById(element.config_type + ":" + element.config_id)
-            if (element.values.seq_id == 2) {
+            if (!el) continue;      // marked do_not_use: no checkbox
+            if (element.values && element.values.seq_id == 2) {
                el.checked = true;
             } else {
                el.checked = false;
@@ -918,36 +1150,13 @@ async function renderConfigurations() {
    });
    document.addEventListener("click", function(e) {
       if (e.target.matches("input[type=checkbox]") || e.target.closest(".cfg-goto")) return;
-      const row = e.target.closest("tr[data-values]");
+      const row = e.target.closest("#rundb-configs tr[data-config]");
       if (!row) return;
-
-      const values = JSON.parse(row.dataset.values);
-      const entries = Object.entries(values);
-
-      let html = '<table  class="mtable rundb-table">';
-
-      for (let i = 0; i < entries.length; i += 4) {
-         html += "<tr>";
-
-         for (let j = 0; j < 4; j++) {
-            if (i + j < entries.length) {
-               const [key, value] = entries[i + j];
-
-               const padding = j > 0 ? "padding: 4px 8px 4px 30px" : "padding: 4px 8px";
-
-               html += "<td style='" + padding + "'><b>" + key + "</b></td>";
-               html += "<td style='padding: 4px 8px'>" + value + "</td>";
-            } else {
-               html += "<td></td><td></td>";
-            }
-         }
-
-         html += "</tr>";
+      if (row.dataset.values !== undefined) {
+         dlgAlert(valuesTableHtml(JSON.parse(row.dataset.values)));
+      } else {
+         showValuesOf(Number(row.dataset.config));
       }
-
-      html += "</table>";
-
-      dlgAlert(html);
    });
    await pollOdb() // Poll ODB again to check against RPC loaded configurations.
 }
@@ -1068,6 +1277,9 @@ const CFGDB = {
    // pure builders, all testable without a browser or a database
    runStateWord, stripHtml, sequencerNoteHtml, staleHtml,
    databaseError, note, init, isRunplanConfig, isMysteryConfig, autoCountText,
+   AUTO_KINDS, autoKind, autoCounts, autoTotal, autoToggleText, tableState,
+   configRowHtml, configErrorHtml, configTableHtml, beamlineTable, noBeamlineError, valuesTableHtml,
+   state, readTable,
    gotoConfirmHtml, arrivalCount, splitIndex,
    // loops, exported so a fixture page can drive them one step at a time
    pollOdb

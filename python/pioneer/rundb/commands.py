@@ -86,7 +86,11 @@ _ARGUMENTS = {
     "queue": {"limit": ("rows", DEFAULT_QUEUE_ROWS)},
     "run": {"id": ("required_id", None)},
     "sequences": {"limit": ("rows", DEFAULT_SEQUENCE_ROWS)},
-    "config": {"id": ("id_or_string", None)},
+    # `id` is a configuration id (one row with its values) or a table name
+    # (every row of it).  `auto` and `values` apply to a table name only; see
+    # `view.RunDbView.config_list`.
+    "config": {"id": ("id_or_string", None), "auto": ("auto_rows", None),
+               "values": ("flag", True)},
     "schedule_five_point": {
         "config_ids": ("required_id_list", None),
         "requested_events": ("events", 1_000_000),
@@ -114,6 +118,10 @@ _ARGUMENTS = {
     },
     "generate_sequence" : {"config": ("", None), "events": ("events", 10000), "password": ("", None)},
 }
+
+# What `config`'s `auto` argument may say.  The same two words as
+# view.AUTO_CHOICES, repeated because this module does not import the view.
+AUTO_ROWS = ("hide", "only")
 
 # Anything that looks like a password is removed before a message is sent on.
 _PASSWORD = re.compile(r"(password|sslpassword)\s*=\s*\S+", re.IGNORECASE)
@@ -274,6 +282,15 @@ def parse_args(cmd: str, args) -> dict:
             if not text.isprintable():
                 raise CommandError("usage", f"{name} must be one line of plain text")
             out[name] = text
+        elif kind == "auto_rows":
+            # Which rows of a configuration table: all of them (absent), all
+            # but the machine-written ones ("hide"), or only those ("only").
+            if value is None:
+                out[name] = default
+            elif value in AUTO_ROWS:
+                out[name] = value
+            else:
+                raise CommandError("usage", f"{name} must be one of " + ", ".join(AUTO_ROWS))
         elif kind == "events":
             out[name] = default if value is None else _as_int(name, value)
         else:
@@ -406,9 +423,13 @@ def _call(view, actions, cmd: str, args: dict, actions_allowed: bool):
     if cmd == "config":
         this_id = args.get("id")
         if isinstance(this_id, int):
+            if args["auto"] is not None or args["values"] is not True:
+                raise CommandError("usage", "auto and values apply to a configuration table, "
+                                            "not to one configuration id")
             return view.config(this_id)
-        else:
-            return view.config_list(this_id)
+        if args["auto"] is None and args["values"] is True:
+            return view.config_list(this_id)      # the reply every caller has always had
+        return view.config_list(this_id, auto=args["auto"], values=args["values"])
     if cmd in PREVIEW_COMMANDS:
         # One gate, not two: this only reads, so the ODB flag does not come
         # into it.  What it needs is the action module, which is where the

@@ -37,7 +37,21 @@ python -m pioneer.rundb.view queue
 python -m pioneer.rundb.view run ID
 python -m pioneer.rundb.view sequences
 python -m pioneer.rundb.view config ID
+python -m pioneer.rundb.view config TABLE [--auto hide|only] [--no-values]
 ```
+
+`config TABLE` lists every configuration of one `config.*` table with its
+values, oldest first, as a plain list. The ConfigDB page asks for less: most
+rows of the beamline tables are written by machines -- runplan steps (comment
+`runplan ...`) and scheduled scans (`Mystery Configuration`, the default of
+`add_new_configuration`) -- so it sends `auto: "hide"` (leave those out) and
+reads them with `auto: "only"` when someone clicks "show". Either way the reply
+is then an object, `{config_type, auto, values, rows, auto_counts}`, where
+`auto_counts` counts the machine-written rows of the table by kind.
+`values: false` (`--no-values`) gives each row `seq_id` instead of its values;
+the page reads one beamline configuration's values with `config ID` when its
+row is clicked. The rules are `AUTO_KINDS` in `view.py`, mirrored in
+`custom/js/cfgdb.js` and pinned by `custom/js/cfgdb-auto-kinds.json`.
 
 `--dsn` overrides `$PIONEER_RUNDB_DSN`, `--timeout-ms` the four-second statement
 timeout. `--json` prints the reply envelope the custom page receives, byte for
