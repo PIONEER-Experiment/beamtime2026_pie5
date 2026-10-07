@@ -15,6 +15,7 @@ import sys                 # identify executable and obtain complete list of arg
 import shlex               # To parse the start_cmd
 import time
 import pathlib
+import re
 
 # define some default parameters
 kMidasClientName = "NearlineDaemon"
@@ -35,6 +36,12 @@ if kMidasExptName is None:
 
 
 kDefaultNumJobs  = 3
+
+
+def run_number_of(file_name):
+    """MIDAS run number in a logger file name (run02788_00015.mid.lz4 -> 2788), or None."""
+    match = re.match(r"run(\d+)", pathlib.PurePath(file_name).name)
+    return int(match.group(1)) if match else None
 
 # define DB credentials
 kDbUser = "bot"
@@ -400,9 +407,25 @@ class NearlineDaemon:
         # path should be
         # /Logger/Channels/<log_channel>/Settings/Current filename
         log_channel = path.split("/")[3]
+        # The notification can arrive late: a daemon busy in its main loop
+        # handles the stop transition first, which registers the run's last
+        # file itself (register_current_file) and zeroes Run DB PK.
+        if self.db_interface.find_file_id(f"logger_{log_channel}", value) is not None:
+            return
         run_number = client.odb_get("/Runinfo/Run number")
         run_db_pk  = client.odb_get("/Nearline/Info/Run DB PK")
         self.finish_file(log_channel)
+        if run_db_pk == 0:
+            # No run open, so nothing to recover: file it under the run its
+            # name gives and close it at once.
+            run_id = self.db_interface.get_run_id(run_number_of(value))
+            self.message(f"{value} reached the run database after its run ended "
+                         f"(run DB id {run_id}); it gets a nearline job but no farline job",
+                         is_error = True)
+            if run_id:
+                self.db_interface.open_file(f"logger_{log_channel}", run_id, value)
+                self.finish_file(log_channel)
+            return
         is_valid = self.db_interface.validate_run_number(run_id = run_db_pk, run_number = run_number)
         if not is_valid:
             client.trigger_internal_alarm("RunDB Corrupted", "ODB run number and rundb primary key don't match the rundatabase entry")
@@ -432,6 +455,19 @@ class NearlineDaemon:
             client.odb_set("/Nearline/Info/Run DB PK", run_db_pk)
 
         self.db_interface.open_file(f"logger_{log_channel}", run_db_pk, value)
+
+    def register_current_file(self, log_channel, run_number, run_db_pk):
+        """At the stop transition, register the channel's current file under
+        `run_db_pk` if its watch notification has not been handled yet, so
+        that end_of_midas_run schedules its jobs with the rest of the run."""
+        path = f"/Logger/Channels/{log_channel}/Settings/Current filename"
+        if not run_db_pk or not self.client.odb_exists(path):
+            return
+        value = self.client.odb_get(path)
+        if not value or run_number_of(value) != run_number:
+            return
+        if self.db_interface.find_file_id(f"logger_{log_channel}", value) is None:
+            self.db_interface.open_file(f"logger_{log_channel}", run_db_pk, value)
 
     # Small sub-routine to properly close out a file writing for a
     # specific channel. May be called either from filename_change_callback
@@ -511,6 +547,7 @@ class NearlineDaemon:
         logger_channels = self.client.odb_get("/Logger/Channels", just_key_list = True)
         nEv = 0
         for log_channel in logger_channels:
+            self.register_current_file(log_channel, run_number, run_db_pk)
             self.finish_file(log_channel)
             nEv += self.client.odb_get(f"/Logger/Channels/{log_channel}/Statistics/Events written")
         client.odb_set("/Nearline/Info/Run DB PK", 0)
