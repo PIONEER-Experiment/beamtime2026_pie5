@@ -131,12 +131,36 @@ class FakeDb:
 
     # what the daemon's stop transition calls
     def close_files_in_channel(self, logger_channel):
-        return []
+        closed = []
+        for f in self.files:
+            if f["producer"] == "logger_%s" % logger_channel and f["status"] == "RUNNING":
+                f["status"] = "DONE"
+                closed.append(f["id"])
+        return closed
 
-    def schedule_postproc_job_on_file(self, file_id, task):
-        return -1
+    def schedule_postproc_job_on_file(self, file_id, task, client=None):
+        run_id = next(f["run_id"] for f in self.files if f["id"] == file_id)
+        self.jobs.append({"midas_run_id": run_id, "file_id": file_id,
+                          "job_type": task, "status": "PENDING"})
+        return len(self.jobs)
 
-    def end_of_midas_run(self, run_id, schedule_post_processing=True):
+    def open_file(self, writer, run_id, file_name):
+        base, _, ext = file_name.partition(".")
+        self.files.append({"id": len(self.files) + 1, "run_id": run_id, "filebase": base,
+                           "fileext": ext, "producer": writer, "status": "RUNNING"})
+        return len(self.files)
+
+    def validate_run_number(self, run_id, run_number):
+        return self.runs.get(run_id, {}).get("midas_run_number") == run_number
+
+    def find_file_id(self, writer, file_name):
+        base, _, ext = file_name.partition(".")
+        ids = [f["id"] for f in self.files
+               if (f["producer"], f["filebase"], f["fileext"]) == (writer, base, ext)]
+        return ids[-1] if ids else None
+
+    def end_of_midas_run(self, run_id, recorded_events=None, stop_time=None,
+                         schedule_post_processing=True):
         if run_id not in self.runs:
             return False
         self.runs[run_id]["status"] = "DONE"

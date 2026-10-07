@@ -853,6 +853,23 @@ class interface:
         conn.close()
         return result[0] if result else None
 
+    def find_file_id(self, writer : str, file_name : str) -> int | None:
+        """file_list id of `file_name` written by `writer`, or None."""
+        file_base, _, file_ext = file_name.partition('.')
+
+        conn = connect(self.user, self.password)
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id FROM state.file_list
+                WHERE producer = %s AND filebase = %s AND fileext = %s
+                ORDER BY id DESC LIMIT 1
+                """, (writer, file_base, file_ext)
+            )
+            result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else None
+
     def close_files_in_channel(self, logger_channel : int):
         conn = connect(self.user, self.password)
         with conn.cursor() as cursor:
