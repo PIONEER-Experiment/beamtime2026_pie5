@@ -351,9 +351,13 @@ PSM_SMA_FINE_OFFSETS = True
 # light switch.
 PSM_SMA_NIM_LAG = True
 # {NIM copy id: nominal delay from S1 in ns} for the lag above; an id not listed is
-# 0. Empty: S4L's ch 10 copy is a logic output with several delays to S4 and stays
-# uncalibrated, and S3L sits within a few ns of S1.
-PSM_SMA_NIM_NOMINAL_DELAY_NS = {2021: 25, 2023: 75, 2024: 15, 2025: 22, 2026: 21}
+# 0. The measured delays of S1L..S5L since the 2026-10-09 NIM-crate changes (S2L off
+# an inverted converter, S3L onto an EG&G converter). The lag is only removed when it
+# lies more than 50 ns from these, so a few ns of drift is harmless; a copy recabled
+# by tens of ns needs a new value here. One value serves every run: before the
+# change S2L sat at ~75 ns, but it had no sma_time_alignment row there and was never
+# paired.
+PSM_SMA_NIM_NOMINAL_DELAY_NS = {2021: 25, 2023: 26, 2024: 26, 2025: 22, 2026: 21}
 # The detector ids the lag above is measured and removed for (the decoder's
 # fineOffsetLagVids): the NIM copies S1L..S5L. An id the run's map does not cable
 # is inactive. A TOT id may be added if its channel turns out to carry the same

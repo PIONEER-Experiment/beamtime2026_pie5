@@ -472,21 +472,34 @@ def test_rf_and_current_channels_can_be_switched_off(job_env):
     assert job["musip"].rf_channel == -2 and job["musip"].current_channel == -2
 
 
+def _nominal_line(text):
+    """The rendered job's PSM_SMA_NIM_NOMINAL_DELAY_NS line, whatever its shipped value."""
+    (line,) = [x for x in text.splitlines() if x.startswith("PSM_SMA_NIM_NOMINAL_DELAY_NS = ")]
+    return line
+
+
+_NOMINAL = "<the shipped PSM_SMA_NIM_NOMINAL_DELAY_NS line>"
+
+
 def test_the_nim_lag_is_on_with_the_decoders_roles_by_default(job_env):
     tmp_path, midas = job_env
     target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
     job = _run(target)
-    assert job["PSM_SMA_NIM_LAG"] is True and job["PSM_SMA_NIM_NOMINAL_DELAY_NS"] == {}
+    nominal = {2021: 25, 2023: 26, 2024: 26, 2025: 22, 2026: 21}
+    assert job["PSM_SMA_NIM_LAG"] is True and job["PSM_SMA_NIM_NOMINAL_DELAY_NS"] == nominal
     musip = job["musip"].__dict__
     # the lag ids are the NIM copies, set explicitly from PSM_SMA_LAG_VIDS
     assert musip["fineOffsetLagVids"] == [2021, 2023, 2024, 2025, 2026]
+    # the nominal delays go to the decoder as floats
+    assert musip["fineOffsetLagNominalNs"] == {k: float(v) for k, v in nominal.items()}
     # the other roles by detector id are the decoder's defaults; no raw-channel lists
-    for prop in ("fineOffsetLagNominalNs", "fineOffsetReferenceVid",
+    for prop in ("fineOffsetReferenceVid",
                  "fineOffsetVoteVids", "fineOffsetHalvedVids", "fineOffsetVoteChannels",
                  "fineOffsetHalvedChannels", "fineOffsetLagChannels", "fineOffsetReferenceChannel"):
         assert prop not in musip, prop
-    text = (target.read_text().replace("PSM_SMA_NIM_LAG = True", "PSM_SMA_NIM_LAG = False")
-            .replace("PSM_SMA_NIM_NOMINAL_DELAY_NS = {}", "PSM_SMA_NIM_NOMINAL_DELAY_NS = {2025: 42}"))
+    text = target.read_text()
+    text = (text.replace("PSM_SMA_NIM_LAG = True", "PSM_SMA_NIM_LAG = False")
+            .replace(_nominal_line(text), "PSM_SMA_NIM_NOMINAL_DELAY_NS = {2025: 42}"))
     musip = _run(target, text)["musip"]
     assert musip.fineOffsetLagVids == []
     assert musip.fineOffsetLagNominalNs == {2025: 42.0}
@@ -508,15 +521,15 @@ def test_the_lag_ids_can_take_a_tot_id(job_env):
 @pytest.mark.parametrize("old, new, match", [
     ("PSM_SMA_NIM_LAG = True", "PSM_SMA_NIM_LAG = 1", "PSM_SMA_NIM_LAG"),
     ("PSM_SMA_NIM_LAG = True", "PSM_SMA_NIM_LAG = 'True'", "PSM_SMA_NIM_LAG"),
-    ("PSM_SMA_NIM_NOMINAL_DELAY_NS = {}", "PSM_SMA_NIM_NOMINAL_DELAY_NS = {'2025': 42}",
+    (_NOMINAL, "PSM_SMA_NIM_NOMINAL_DELAY_NS = {'2025': 42}",
      "PSM_SMA_NIM_NOMINAL_DELAY_NS"),
-    ("PSM_SMA_NIM_NOMINAL_DELAY_NS = {}", "PSM_SMA_NIM_NOMINAL_DELAY_NS = {2025: '42'}",
+    (_NOMINAL, "PSM_SMA_NIM_NOMINAL_DELAY_NS = {2025: '42'}",
      "PSM_SMA_NIM_NOMINAL_DELAY_NS"),
-    ("PSM_SMA_NIM_NOMINAL_DELAY_NS = {}", "PSM_SMA_NIM_NOMINAL_DELAY_NS = {2025: 2**20}",
+    (_NOMINAL, "PSM_SMA_NIM_NOMINAL_DELAY_NS = {2025: 2**20}",
      "PSM_SMA_NIM_NOMINAL_DELAY_NS"),
-    ("PSM_SMA_NIM_NOMINAL_DELAY_NS = {}", "PSM_SMA_NIM_NOMINAL_DELAY_NS = {2025: float('nan')}",
+    (_NOMINAL, "PSM_SMA_NIM_NOMINAL_DELAY_NS = {2025: float('nan')}",
      "PSM_SMA_NIM_NOMINAL_DELAY_NS"),
-    ("PSM_SMA_NIM_NOMINAL_DELAY_NS = {}", "PSM_SMA_NIM_NOMINAL_DELAY_NS = [(2025, 42)]",
+    (_NOMINAL, "PSM_SMA_NIM_NOMINAL_DELAY_NS = [(2025, 42)]",
      "PSM_SMA_NIM_NOMINAL_DELAY_NS"),
     ("PSM_SMA_LAG_VIDS = [2021", "PSM_SMA_LAG_VIDS = [2001, 2021", "2001 \\(the S1 reference\\)"),
     ("PSM_SMA_LAG_VIDS = [2021", "PSM_SMA_LAG_VIDS = [2014, 2021", "2014 \\(the RF role marker\\)"),
@@ -530,6 +543,8 @@ def test_a_bad_nim_lag_knob_is_rejected(job_env, old, new, match):
     tmp_path, midas = job_env
     target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
     text = target.read_text()
+    if old == _NOMINAL:
+        old = _nominal_line(text)
     assert old in text
     with pytest.raises(SystemExit, match=match):
         _run(target, text.replace(old, new))
@@ -652,6 +667,8 @@ def test_a_bad_sma_pairing_knob_is_rejected(job_env, old, new, match):
     tmp_path, midas = job_env
     target = render_job(midas, tmp_path / "run00790_00000.root", light=False)
     text = target.read_text()
+    if old == _NOMINAL:
+        old = _nominal_line(text)
     assert old in text
     with pytest.raises(SystemExit, match=match):
         _run(target, text.replace(old, new))
