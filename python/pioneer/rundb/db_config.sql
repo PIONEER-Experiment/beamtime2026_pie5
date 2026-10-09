@@ -489,7 +489,7 @@ BEGIN
         SELECT COALESCE(MAX(priority), 0) + 1
         INTO NEW.priority
         FROM state.postproc_job j
-        WHERE utils.is_pending(j.status);
+        WHERE status IN (SELECT name FROM utils.status WHERE isPending);
     END IF;
 
     RETURN NEW;
