@@ -142,10 +142,10 @@ def _gaudi_stubs():
         "shared": module("shared"),
         "shared.PiGaudiSharedSvcConf": module(
             "shared.PiGaudiSharedSvcConf", "PIAOutputStream", "PIConditionsSvc",
-            "PIDataModelSvc", "PIHeaderSvc", "PIHistogramSvc"),
+            "PIDataModelSvc", "PIGeometrySvc", "PIHeaderSvc", "PIHistogramSvc"),
         "reco_testbeam": module("reco_testbeam"),
         "reco_testbeam.pi_testbeam_servicesConf": module(
-            "reco_testbeam.pi_testbeam_servicesConf", "PIGeometrySvc"),
+            "reco_testbeam.pi_testbeam_servicesConf", "PIPSMGeoTableSource", "PIPSMIselLayer"),
         "pi_midas": module("pi_midas"),
         "pi_midas.PIONEER_MIDAS_READERConf": module(
             "pi_midas.PIONEER_MIDAS_READERConf", "PIMidasSelector", "PIMidasConversionSvc",

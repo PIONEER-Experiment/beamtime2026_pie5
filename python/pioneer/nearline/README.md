@@ -90,7 +90,7 @@ each counter; `hits_per_event_vs_counter`; `tot`, every cabled counter together;
 `fine_time_vs_counter`, the low 20 bits of the SMA time stamp, which are the
 word's fine field unchanged, where a stuck or ramping field shows as
 structure; and `counters`, the exposure — frames, hits, parked hits, hits with
-an unknown vid. The counter axis is the raw `MUTRIG` map `PIGeometrySvc` serves,
+an unknown vid. The counter axis is the raw `MUTRIG` map (its conditions table, `mutrig_channel_map`),
 so it follows the cabling of the run being processed, and the parked index is
 the Degrader id every uncabled channel sits on — which is where the idle FEB's
 ToT 0 and ToT 255 words land, and why that index is left out of the ToT
@@ -293,11 +293,11 @@ stops the job at `initialize()`, as it does for `PIWDWaveformAnalysis`.
 
 | setting | default | what goes wrong if it is wrong |
 |---|---|---|
-| `PSM_GEOMETRY_BASE` | `"GEOCOND:psm_geometry"` | The layer `PIGeometrySvc` builds the `GeoHeader` from. Empty and the decoder throws on hit one; anything but a `GEOCOND:<table>` form is rejected, because that is the only form this job takes |
-| `PSM_GEOMETRY_MAPS` | `["MUPIX:mupix_chip_map", "MUTRIG:mutrig_channel_map"]` | Raw-readout-id → detector-id maps. The `NAME` side must match the decoder's `muPixMap`/`muTrigMap` defaults; without them the decoder cannot turn a chip id or `chipid*32+channel` into a detector id and throws naming the raw id on the first hit |
-| `PSM_GEOMETRY_TRANS` | `["COND:isel"]` | Adds the XY-stage translation read from `/Equipment/XYTable`. A run whose ODB has no XYTable equipment fails at `initialize()` with "source absent" rather than silently using a stale stage position; set `[]` and `PSM_WEIGHT_STRATEGY = 0` to process one (the acceptance weights need the stage position) |
+| `PSM_GEOMETRY_BASE` | `"GEOCOND:psm_geometry"` | The conditions table `PIGeometrySvc` builds the telescope from (`PIPSMGeoTableSource`). Empty and the decoder throws on hit one; anything but a `GEOCOND:<table>` form is rejected, because that is the only form this job takes |
+| `PSM_GEOMETRY_MAPS` | `["MUPIX:mupix_chip_map", "MUTRIG:mutrig_channel_map"]` | Raw-readout-id → detector-id maps (the cabling), as `NAME:table`. `MUPIX` names the table the decoder (`muPixMap`) and the timewalk correction (`MuPixMap`) read, `MUTRIG` the one the decoder (`muTrigMap`), the SMA calibration and the SMA monitor (`RawMap`) read; exactly one of each, or `check()` refuses. They are read from conditions directly and checked against the geometry; without them the decoder cannot turn a chip id or `chipid*32+channel` into a detector id and throws naming the raw id on the first hit |
+| `PSM_GEOMETRY_TRANS` | `["COND:isel"]` | Adds the XY-stage translation read from `/Equipment/XYTable`, as a setup layer moving the whole telescope (`PIPSMIselLayer`); `"COND:isel"` is the only entry `check()` accepts. A run whose ODB has no XYTable equipment fails at `initialize()` with "source absent" rather than silently using a stale stage position; set `[]` and `PSM_WEIGHT_STRATEGY = 0` to process one (the acceptance weights need the stage position) |
 | `PSM_GEOMETRY_FILES` | `bt2026_psm_geometry.json`, `bt2026_psm_readout_map.json` | Supply the base table and the two map tables. Empty with a `GEOCOND` base is a hard indexing error at startup |
-| `PSM_GEOMETRY_TAG` | `None` | Tag of the base geometry table (`PIGeometrySvc.GeometryTag`); `None` is the table's default, `bt2026-v4`, which puts a **provisional** 0.32 mm gap (2 pixels per side) between the four MuPix chips of each quad, an assumed value from the in-beam wedge study of 2026-09-25 that is to be measured after the beamtime. `"bt2026-v3"` reprocesses with the chips edge to edge, as files made before 2026-09-25 were. Only the geometry table is pinned, the two maps keep their default tags. Anything but `None` or a non-empty string is rejected by `check()` |
+| `PSM_GEOMETRY_TAG` | `None` | Tag of the base geometry table (`PIPSMGeoTableSource.Tag`); `None` is the table's default, `bt2026-v4`, which puts a **provisional** 0.32 mm gap (2 pixels per side) between the four MuPix chips of each quad, an assumed value from the in-beam wedge study of 2026-09-25 that is to be measured after the beamtime. `"bt2026-v3"` reprocesses with the chips edge to edge, as files made before 2026-09-25 were. Only the geometry table is pinned, the two maps keep their default tags. Anything but `None` or a non-empty string is rejected by `check()` |
 
 ### MuPix monitor
 
@@ -311,7 +311,7 @@ That is the point of it — it still says what the pixel planes are doing when
 the parts it is checking are what is broken, and a source or cosmic run that
 makes no scintillator coincidence at all still produces its plots.
 
-Everything it draws is decided from `PIGeometrySvc` at `initialize()`: which
+Everything it draws is decided from the `PIGeometrySvc` geometry at `initialize()`: which
 channels are MuPix, which plane each is on, each chip's footprint, and the
 L1 → L2 lever arm. There is no plane or distance setting here for that reason —
 `L1Plane`/`L2Plane` default to the two MuPix planes of lowest z, in that order,
@@ -563,8 +563,8 @@ that reads one decoded collection **alone** — the SMA hits, as the time-ordere
 channel map, no tracklets. A run whose tracklet reco reconstructs
 nothing still tells you which counters took hits and what their ToT looked like.
 
-The counter axis is not configured here: `initialize()` asks `PIGeometrySvc` for
-the raw `MUTRIG` map, takes the distinct detector ids out of it and logs the
+The counter axis is not configured here: `initialize()` reads the raw `MUTRIG`
+map table (`PSM_GEOMETRY_MAPS`), takes the distinct detector ids out of it and logs the
 index it built, raw channels and all. `ParkedVid` is set to `2002`, the Degrader
 id the map parks every uncabled channel on; that index carries the idle FEB's
 own words and is therefore excluded from the ToT judgements below. Change the
@@ -572,7 +572,7 @@ parked id in the map and this number has to follow it.
 
 | setting | default | what goes wrong if it is wrong |
 |---|---|---|
-| `PSM_SMA_MONITOR` | `True` | Off drops the whole module. Requires `PSM_DECODE`: only the musip decoding tool produces `/Event/mutrig`, from which the SMA calibration layer makes the `/Event/mutrig_cal` the monitor reads, and the monitor takes the raw `MUTRIG` map from the `PIGeometrySvc` that `PSM_DECODE` creates |
+| `PSM_SMA_MONITOR` | `True` | Off drops the whole module. Requires `PSM_DECODE`: only the musip decoding tool produces `/Event/mutrig`, from which the SMA calibration layer makes the `/Event/mutrig_cal` the monitor reads, and the monitor checks the raw `MUTRIG` map against the `PIGeometrySvc` geometry that `PSM_DECODE` creates |
 | `PSM_SMA_HITS_PER_EVENT_MAX` | `20000` | Top of the per-counter hits-per-event axis; everything above it lands in the last bin. 20,000 is the H000 bank cap, so nothing a frame can hold is clipped; a busy counter exceeds a few hundred hits per frame |
 | `PSM_SMA_DEGENERATE_TOT_SHARE` | `0.95` | Share of a cabled counter's hits at its commonest ToT value above which `finalize()` calls it degenerate. One value repeated is a pulser or a stuck field, not a spectrum. Lower it and a genuinely narrow spectrum starts warning |
 | `PSM_SMA_MARKER_TOT_SHARE` | `0.5` | Share at ToT 0 or 255 above which a cabled counter is called marker-dominated. Those two values are the idle FEB's own words, so a counter made mostly of them is not seeing its TOT box |
@@ -1675,14 +1675,14 @@ where an unreachable server fails the job (*Conditions DB down*).
 4. A resolved conditions container or ODB spec does not exist — one line per file, naming the absolute path. In db mode only the ODB specs and `ODB_OVERRIDES` are files. Next to it: `CONDITIONS` does not parse, or names a service no service file defines (the message lists the files searched and gives the `process.py --conditions json:<snapshot dir>` line), or, unrendered, `pioneer` is not on `PYTHONPATH` to expand the service. In db mode also: a container setting changed from its committed value, or a `CONDITIONS_DIR` holding `bt2026_*.json` that is not a `reco_testbeam/conditions` tree (use json mode for either). No message echoes a conninfo: only host, port and dbname are ever printed.
 5. Both halves off (`WD_ENABLED` and `PSM_DECODE`): nothing would decode.
 6. `PSM_RECO` without `PSM_DECODE`: nothing would produce `/Event/muquad` and `/Event/mutrig`.
-7. `PSM_DECODE` with an empty `PSM_GEOMETRY_BASE`: no `GeoHeader`, and the decoder throws on hit one.
+7. `PSM_DECODE` with an empty `PSM_GEOMETRY_BASE`: no geometry, and the decoder throws on hit one.
 8. `PSM_GEOMETRY_BASE` not in `GEOCOND:<table>` form.
 9. `PSM_MUPIX_MONITOR` without `PSM_DECODE`: nothing would produce `/Event/muquad`, and the monitor takes the chip footprints from the `PIGeometrySvc` that `PSM_DECODE` creates.
 10. `PSM_MUPIX_PIXELS_PER_BIN` below 1: it is how many pixels share one bin of a hit map.
 11. `PSM_MUPIX_DT_RANGE_NS` or `PSM_MUPIX_DT_BINS` not positive: a half-width and a bin count.
 12. `PSM_MUPIX_WINDOW_NS` not positive: a non-positive half-window pairs nothing at all.
 13. `PSM_MUPIX_EXPANDED_RANGE_MM` or `PSM_MUPIX_CENTRAL_SLOPE_MRAD` not positive: both are half-widths of symmetric axes.
-14. `PSM_SMA_MONITOR` without `PSM_DECODE`: nothing would produce `/Event/mutrig`, from which the SMA calibration layer makes the `/Event/mutrig_cal` the monitor reads, and the monitor takes the raw `MUTRIG` channel map from the `PIGeometrySvc` that `PSM_DECODE` creates.
+14. `PSM_SMA_MONITOR` without `PSM_DECODE`: nothing would produce `/Event/mutrig`, from which the SMA calibration layer makes the `/Event/mutrig_cal` the monitor reads, and the monitor checks the raw `MUTRIG` channel map against the `PIGeometrySvc` geometry that `PSM_DECODE` creates.
 15. `PSM_SMA_HITS_PER_EVENT_MAX` below 1: it is the top of an axis counting hits per event.
 16. `PSM_SMA_DEGENERATE_TOT_SHARE` or `PSM_SMA_MARKER_TOT_SHARE` outside `(0, 1]`: both are shares of one counter's hits.
 17. `PSM_SMA_COARSE_SHIFT` neither `None` nor an integer 0-18: above 18 the coarse field no longer pins the fine field's wrap.
@@ -1717,6 +1717,8 @@ where an unreachable server fails the job (*Conditions DB down*).
 46. `OUTPUT_LEVEL` not one of `DEBUG`, `ERROR`, `INFO`, `WARNING`.
 47. `PSM_GEOMETRY_TAG` neither `None` nor a non-empty string: it names a tag of the geometry table.
 48. `PSM_RECO` with a central map on (`PSM_RECO_CENTRAL_PHASE_MAPS`, `PSM_STOP_LAYER_MAPS` or `PSM_STOP_PHASE_MAPS`) and `PSM_CENTRAL_PIXELS_PER_BIN` not an integer of at least 1, `PSM_MUPIX_EXPANDED_RANGE_MM`, `PSM_MUPIX_CENTRAL_SLOPE_MRAD` or `PSM_QUAD_PIXEL_PITCH` not positive, or the range not a whole number of `PSM_CENTRAL_PIXELS_PER_BIN`-pixel or 4-pixel bins: the edge bin would have another width and runs of a scan would not merge.
+49. An entry of `PSM_GEOMETRY_TRANS` other than `COND:isel`: the stage is the only setup layer this job knows.
+50. `PSM_GEOMETRY_MAPS` not exactly one `MUPIX:table` and one `MUTRIG:table`.
 
 ## The phase-space histograms are minitwin input
 

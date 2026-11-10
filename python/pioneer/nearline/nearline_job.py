@@ -90,8 +90,9 @@ from pathlib import Path
 from Configurables import EvtDataSvc, EvtPersistencySvc, Gaudi__Sequencer
 from Gaudi.Configuration import *
 from shared.PiGaudiSharedSvcConf import (PIAOutputStream, PIConditionsSvc,
-                                         PIDataModelSvc, PIHeaderSvc, PIHistogramSvc)
-from reco_testbeam.pi_testbeam_servicesConf import PIGeometrySvc
+                                         PIDataModelSvc, PIGeometrySvc, PIHeaderSvc,
+                                         PIHistogramSvc)
+from reco_testbeam.pi_testbeam_servicesConf import PIPSMGeoTableSource, PIPSMIselLayer
 from pi_midas.PIONEER_MIDAS_READERConf import (PIMidasSelector, PIMidasConversionSvc,
                                                PIMidasDecoder, PITMidasMusip,
                                                PITMidasWaveDream)
@@ -437,13 +438,14 @@ PSM_SMA_NIM_ONLY_TOT = 1.0
 # rendered job and every reprocessing find them.
 PSM_SMA_OFFSET_OVERRIDE_NS = {}
 # --- PSM geometry ----------------------------------------------------------
-# Base layer PIGeometrySvc builds the GeoHeader from, as "GEOCOND:<table>".
+# Conditions table PIGeometrySvc builds the telescope from, as "GEOCOND:<table>".
 PSM_GEOMETRY_BASE = "GEOCOND:psm_geometry"
-# Raw-readout-id -> detector-id maps as "NAME:table"; the NAME side must match the
-# decoder's muPixMap/muTrigMap property defaults.
+# Raw-readout-id -> detector-id maps (the cabling) as "NAME:table". MUPIX names the
+# table the decoder and the timewalk correction read for the chips, MUTRIG the one
+# the decoder, the SMA calibration and the SMA monitor read for the counters.
 PSM_GEOMETRY_MAPS = ["MUPIX:mupix_chip_map", "MUTRIG:mutrig_channel_map"]
-# Extra transform layers on the base; ["COND:isel"] adds the XY-stage translation
-# read from /Equipment/XYTable in the ODB. A run whose ODB has no XYTable fails
+# Setup layers on the base; ["COND:isel"] moves the telescope by the XY-stage
+# translation read from /Equipment/XYTable in the ODB (PIPSMIselLayer). A run whose ODB has no XYTable fails
 # at initialize() with "source absent"; set [] and PSM_WEIGHT_STRATEGY = 0 to
 # process one of those (the acceptance weights need the stage position).
 PSM_GEOMETRY_TRANS = ["COND:isel"]
@@ -1247,10 +1249,18 @@ def check():
                         f"tool produces {_TES_MUQUAD} and {_TES_MUTRIG}.")
     if PSM_DECODE and not PSM_GEOMETRY_BASE:
         problems.append("PSM_DECODE is on but PSM_GEOMETRY_BASE is empty: PIGeometrySvc has "
-                        "nothing to build a GeoHeader from and the decoder throws on hit one.")
+                        "nothing to build the telescope from and the decoder throws on hit one.")
     if PSM_GEOMETRY_BASE and not str(PSM_GEOMETRY_BASE).startswith("GEOCOND:"):
         problems.append(f"PSM_GEOMETRY_BASE '{PSM_GEOMETRY_BASE}' is not a "
                         "'GEOCOND:<table>' layer, which is the only form this job takes.")
+    for t in PSM_GEOMETRY_TRANS:
+        if str(t) != "COND:isel":
+            problems.append(f"PSM_GEOMETRY_TRANS has '{t}': the only setup layer this job "
+                            "knows is 'COND:isel'.")
+    _map_names = sorted(str(m).split(":", 1)[0] for m in PSM_GEOMETRY_MAPS)
+    if _map_names != ["MUPIX", "MUTRIG"]:
+        problems.append(f"PSM_GEOMETRY_MAPS names {_map_names}: it must give exactly one "
+                        "MUPIX and one MUTRIG table, as 'NAME:table'.")
     if PSM_MUPIX_MONITOR and not PSM_DECODE:
         problems.append("PSM_MUPIX_MONITOR is on but PSM_DECODE is off: only the musip "
                         f"decoding tool produces {_TES_MUQUAD}, and the monitor takes the "
@@ -1597,14 +1607,19 @@ if _COND_KIND == "db":
 # initialize(); PIConditionsSvc reads /Runinfo/Run number out of that header
 # during ITS initialize() to pick intervals of validity; PIGeometrySvc needs the
 # conditions service resolved before it. Reorder and every table resolves run 0.
+# The raw-channel map tables, by readout branch, from PSM_GEOMETRY_MAPS.
+_RAW_MAP_TABLES = dict(str(m).split(":", 1) for m in PSM_GEOMETRY_MAPS)
 services = [PIHeaderSvc(), selector, PIMidasConversionSvc("ConversionSvc"),
             EvtDataSvc(), PIDataModelSvc(), condSvc]
 if PSM_DECODE:
-    geo_svc = PIGeometrySvc(Base=str(PSM_GEOMETRY_BASE),
-                            Trans=[str(t) for t in PSM_GEOMETRY_TRANS],
-                            Maps=[str(m) for m in PSM_GEOMETRY_MAPS])
-    if PSM_GEOMETRY_TAG:
-        geo_svc.GeometryTag = str(PSM_GEOMETRY_TAG)
+    # The PSM algorithms read the geometry in their initialize(), so it is built
+    # on first use (AllowEarlyBuild) rather than in start(); the ExtSvc order
+    # above still provides the run's conditions by then.
+    geo_svc = PIGeometrySvc(
+        Source=PIPSMGeoTableSource(Table=str(PSM_GEOMETRY_BASE).split(":", 1)[1],
+                                   Tag=str(PSM_GEOMETRY_TAG) if PSM_GEOMETRY_TAG else ""),
+        Layers=[PIPSMIselLayer(Table=str(t).split(":", 1)[1]) for t in PSM_GEOMETRY_TRANS],
+        AllowEarlyBuild=True)
     services.append(geo_svc)
 services.append(PIHistogramSvc(OutputFile=hist_file(NL_OUT)))
 services.append(EvtPersistencySvc(CnvServices=["PIMidasConversionSvc/ConversionSvc"]))
@@ -1627,7 +1642,9 @@ _RECO_LATTICE_ON = False
 tools = [PITMidasWaveDream()] if WD_ENABLED else []
 if PSM_DECODE:
     musip = PITMidasMusip(quadPixelPitch=float(PSM_QUAD_PIXEL_PITCH),
-                          quadTimeBinWidth=float(PSM_QUAD_TIME_BIN_NS))
+                          quadTimeBinWidth=float(PSM_QUAD_TIME_BIN_NS),
+                          muPixMap=_RAW_MAP_TABLES["MUPIX"],
+                          muTrigMap=_RAW_MAP_TABLES["MUTRIG"])
     # Unset, the decoder takes the RF and current channels from the run's raw
     # map (its role ids 2014/2015) and says at initialize where each came from;
     # set, they override the map; "off" (the decoder's -2) switches the role
@@ -1700,6 +1717,7 @@ if PSM_DECODE:
     # The raw /Event/mutrig stays on the TES in readout order.
     sma_cal = PIPSMSMACalibration("PIPSMSMACalibration", input=_TES_MUTRIG,
                                   output=_TES_MUTRIG_CAL, hitsOutput=_TES_SMA_HITS,
+                                  RawMap=_RAW_MAP_TABLES["MUTRIG"],
                                   NimPairing=bool(PSM_SMA_NIM_PAIRING),
                                   PairWindowNs=float(PSM_SMA_PAIR_WINDOW_NS),
                                   TimeSource=str(PSM_SMA_TIME_SOURCE),
@@ -1730,6 +1748,7 @@ if PSM_DECODE:
     twc = PIPSMMuPixTimewalkCorrection(
         "PIPSMMuPixTimewalkCorrection", input=_TES_MUQUAD, output=_TES_MUQUAD_TWC,
         applyTimewalkCorrection=bool(PSM_TIMEWALK_CORRECTION), GeometrySvc="PIGeometrySvc",
+        MuPixMap=_RAW_MAP_TABLES["MUPIX"],
         TimewalkDtMin=float(PSM_TIMEWALK_DT_MIN), TimewalkDtMax=float(PSM_TIMEWALK_DT_MAX),
         TimewalkDtBins=int(PSM_TIMEWALK_DT_BINS))
     if PSM_TIMEWALK_CORRECTION_TAG:
@@ -1920,7 +1939,7 @@ if PSM_SMA_MONITOR:
     # /Event/rf is read as an optional input: a frame in which the decoder saw
     # no RF has none.
     sma_monitor = PIPSMSMAMonitor(
-        input=_TES_MUTRIG_CAL, GeometrySvc="PIGeometrySvc", RawMap="MUTRIG",
+        input=_TES_MUTRIG_CAL, GeometrySvc="PIGeometrySvc", RawMap=_RAW_MAP_TABLES["MUTRIG"],
         ParkedVid=2002,
         HitsPerEventMax=int(PSM_SMA_HITS_PER_EVENT_MAX),
         DegenerateTotShare=float(PSM_SMA_DEGENERATE_TOT_SHARE),
